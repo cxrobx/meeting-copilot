@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.build/
+build/
+*.o
+*.d
+*.swiftdeps
+*.swiftdeps~
+.DS_Store
+*.sock
+/models/
+*.wav
+*.pcm
+.env*
+*.log
+.vscode/
+.idea/
