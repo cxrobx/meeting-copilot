@@ -16,9 +16,11 @@ export async function claudeChat(
     model?: string;
     maxTokens?: number;
     signal?: AbortSignal;
+    allowedTools?: string[];
   } = {},
 ): Promise<string> {
-  const args = ['--print', '--output-format', 'json', '--no-session-persistence', '--max-turns', '1'];
+  const maxTurns = options.allowedTools?.length ? '5' : '1';
+  const args = ['--print', '--output-format', 'json', '--no-session-persistence', '--max-turns', maxTurns];
 
   if (options.systemPrompt) {
     args.push('--system-prompt', options.systemPrompt);
@@ -28,6 +30,9 @@ export async function claudeChat(
   }
   if (options.maxTokens) {
     args.push('--max-tokens', String(options.maxTokens));
+  }
+  if (options.allowedTools?.length) {
+    args.push('--allowedTools', ...options.allowedTools);
   }
 
   args.push('-p', prompt);
@@ -95,11 +100,13 @@ export async function claudeSuggest(
   prompt: string,
   systemPrompt: string,
   signal?: AbortSignal,
+  allowedTools?: string[],
 ): Promise<string> {
   return claudeChat(prompt, {
     systemPrompt,
     model: 'claude-sonnet-4-6',
     maxTokens: 2048,
     signal,
+    allowedTools,
   });
 }

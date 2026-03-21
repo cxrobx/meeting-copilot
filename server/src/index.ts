@@ -326,7 +326,46 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       // Stop intelligence
       intelligence.stop();
 
-      // Let workers finish
+      // Auto-generate end-of-meeting summary
+      try {
+        const transcriptRecords = sessionStore.getTranscript();
+        if (transcriptRecords.length > 0) {
+          const fullTranscript = transcriptRecords
+            .map((r) => `${r.label} ${r.text}`)
+            .join('\n');
+          const session = sessionStore.getSession();
+          const summaryAction = registry.suggest({
+            type: 'summary',
+            title: `Meeting Summary: ${session?.title || 'Untitled'}`,
+            description: 'Auto-generated end-of-meeting summary',
+            triggerQuote: fullTranscript.slice(-200),
+            estimatedDurationSec: 30,
+            params: {
+              transcript: fullTranscript,
+              scope: 'full',
+              title: session?.title,
+            },
+          });
+          if (summaryAction) {
+            sessionStore.addAction({
+              id: summaryAction.id,
+              type: summaryAction.type,
+              title: summaryAction.title,
+              description: summaryAction.description,
+              triggerQuote: summaryAction.triggerQuote,
+              state: summaryAction.state,
+              params: summaryAction.params,
+              createdAt: summaryAction.createdAt,
+            });
+            registry.approve(summaryAction.id);
+            debugLog('[Session] Auto-summary triggered');
+          }
+        }
+      } catch (error) {
+        console.error('[Session] Failed to trigger auto-summary:', error instanceof Error ? error.message : String(error));
+      }
+
+      // Let workers finish (includes auto-summary if triggered)
       await registry.onMeetingEnd();
 
       // Remove shared presence
@@ -384,10 +423,32 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         description,
         triggerQuote: window.slice(-200),
         estimatedDurationSec: 30,
-        params: {
-          context: window,
-          ...(message.prompt ? { userPrompt: message.prompt } : {}),
-        },
+        params: (() => {
+          switch (actionType) {
+            case 'research':
+              return {
+                query: message.prompt || 'Research topics from current discussion',
+                context: window,
+              };
+            case 'summary':
+              return {
+                transcript: window,
+                scope: message.prompt ? 'focused' : 'full',
+                ...(message.prompt ? { focus: message.prompt } : {}),
+                title: sessionStore?.getSession()?.title,
+              };
+            case 'analysis':
+              return {
+                topic: message.prompt || 'Analyze current discussion',
+                context: window,
+              };
+            default:
+              return {
+                context: window,
+                ...(message.prompt ? { userPrompt: message.prompt } : {}),
+              };
+          }
+        })(),
       };
 
       // Inject project context into worker params

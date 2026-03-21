@@ -22,6 +22,7 @@ echo ""
 echo "[2/4] Installing Node.js server dependencies..."
 cd "$PROJECT_DIR/server"
 npm install --silent
+npm rebuild better-sqlite3
 echo "  Done."
 
 # Build Node.js server

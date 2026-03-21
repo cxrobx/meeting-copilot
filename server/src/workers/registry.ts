@@ -93,7 +93,17 @@ export class WorkerRegistry extends EventEmitter {
 
   approve(actionId: string): void {
     const action = this.actions.get(actionId);
-    if (!action || action.state !== 'suggested') return;
+    if (!action) return;
+    if (action.state !== 'suggested' && action.state !== 'failed') return;
+
+    // Reset execution state on retry from failed
+    if (action.state === 'failed') {
+      action.retryCount = 0;
+      action.result = undefined;
+      action.startedAt = undefined;
+      action.completedAt = undefined;
+      action.cancelController = new AbortController();
+    }
 
     action.state = 'approved';
     action.approvedAt = Date.now();

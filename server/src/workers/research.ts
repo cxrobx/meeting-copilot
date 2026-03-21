@@ -45,7 +45,7 @@ If context from the meeting is provided, use it to tailor your research to what 
         ? `Research query: ${query}\n\nMeeting context:\n${context}`
         : `Research query: ${query}`;
 
-      const text = await claudeSuggest(userContent, systemPrompt, signal);
+      const text = await claudeSuggest(userContent, systemPrompt, signal, ['WebSearch', 'WebFetch']);
 
       if (signal.aborted) {
         return {
