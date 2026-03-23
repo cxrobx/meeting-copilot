@@ -388,6 +388,22 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
     }
 
     case 'action.approve': {
+      // Inject live transcript into worker params if not already present
+      const actionToApprove = registry.getAction(message.actionId);
+      if (actionToApprove && sessionStore) {
+        const transcriptRecords = sessionStore.getTranscript();
+        if (transcriptRecords.length > 0) {
+          const transcript = transcriptRecords.map((r) => `${r.label} ${r.text}`).join('\n');
+          if (actionToApprove.type === 'summary' && !actionToApprove.params.transcript) {
+            actionToApprove.params.transcript = transcript;
+            actionToApprove.params.title = actionToApprove.params.title ?? sessionStore.getSession()?.title;
+          }
+          // Give all workers meeting context if they don't have it
+          if (!actionToApprove.params.meetingTranscript) {
+            actionToApprove.params.meetingTranscript = transcript;
+          }
+        }
+      }
       registry.approve(message.actionId);
       eventLogger?.log('action.approved', { actionId: message.actionId });
       break;

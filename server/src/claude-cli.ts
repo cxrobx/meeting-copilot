@@ -28,9 +28,8 @@ export async function claudeChat(
   if (options.model) {
     args.push('--model', options.model);
   }
-  if (options.maxTokens) {
-    args.push('--max-tokens', String(options.maxTokens));
-  }
+  // Note: Claude CLI has no --max-tokens flag; token limit is controlled by the model.
+  // Use --max-budget-usd for cost control if needed.
   if (options.allowedTools?.length) {
     args.push('--allowedTools', ...options.allowedTools);
   }
@@ -55,18 +54,27 @@ export async function claudeChat(
   try {
     const { stdout } = await execFileAsync('claude', args, {
       maxBuffer: 10 * 1024 * 1024, // 10MB
-      timeout: options.maxTokens ? 120_000 : 60_000,
+      timeout: options.allowedTools?.length ? 120_000 : 60_000,
       signal: controller.signal,
       env,
     });
 
     // --output-format json returns { result: "...", ... }
+    // CLI may include terminal title escape sequences — strip them first
+    const cleaned = stdout.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '').trim();
     try {
-      const parsed = JSON.parse(stdout);
-      return parsed.result ?? parsed.text ?? stdout;
+      const parsed = JSON.parse(cleaned);
+      return parsed.result ?? parsed.text ?? cleaned;
     } catch {
-      // If not valid JSON, return raw stdout
-      return stdout.trim();
+      // stdout might contain JSON embedded in other text — try to extract it
+      const jsonMatch = cleaned.match(/\{[\s\S]*"result"\s*:\s*"[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0]);
+          return parsed.result ?? parsed.text ?? cleaned;
+        } catch { /* fall through */ }
+      }
+      return cleaned;
     }
   } catch (error: any) {
     if (error.code === 'ABORT_ERR' || error.killed) {
