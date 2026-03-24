@@ -92,7 +92,7 @@ export class WorkerRegistry extends EventEmitter {
       let intersection = 0;
       for (const w of titleWords) { if (existingWords.has(w)) intersection++; }
       const union = titleWords.size + existingWords.size - intersection;
-      if (union > 0 && intersection / union >= 0.6) {
+      if (union > 0 && intersection / union >= 0.75) {
         return null; // Similar title already exists
       }
     }

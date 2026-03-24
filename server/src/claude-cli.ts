@@ -54,7 +54,7 @@ export async function claudeChat(
   try {
     const { stdout } = await execFileAsync('claude', args, {
       maxBuffer: 10 * 1024 * 1024, // 10MB
-      timeout: options.allowedTools?.length ? 180_000 : 120_000,
+      timeout: options.allowedTools?.length ? 180_000 : 180_000,
       signal: controller.signal,
       env,
     });
