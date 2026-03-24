@@ -59,22 +59,30 @@ export async function claudeChat(
       env,
     });
 
-    // --output-format json returns { result: "...", ... }
-    // CLI may include terminal title escape sequences — strip them first
-    const cleaned = stdout.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '').trim();
+    // --output-format json returns { type: "result", result: "...", ... }
+    // CLI wraps output in terminal title escape sequences (OSC): \x1b]0;...\x1b\
+    // Strip them, then extract the JSON envelope's `result` field.
+    const stripped = stdout.replace(/\x1b\].*?(?:\x07|\x1b\\)/gs, '').trim();
+
+    // Find the JSON object boundaries (more reliable than regex)
+    const jsonStart = stripped.indexOf('{');
+    const jsonEnd = stripped.lastIndexOf('}');
+    const jsonStr = (jsonStart >= 0 && jsonEnd > jsonStart)
+      ? stripped.slice(jsonStart, jsonEnd + 1)
+      : stripped;
+
     try {
-      const parsed = JSON.parse(cleaned);
-      return parsed.result ?? parsed.text ?? cleaned;
-    } catch {
-      // stdout might contain JSON embedded in other text — try to extract it
-      const jsonMatch = cleaned.match(/\{[\s\S]*"result"\s*:\s*"[\s\S]*\}/);
-      if (jsonMatch) {
-        try {
-          const parsed = JSON.parse(jsonMatch[0]);
-          return parsed.result ?? parsed.text ?? cleaned;
-        } catch { /* fall through */ }
+      const parsed = JSON.parse(jsonStr);
+      const result = parsed.result ?? parsed.text ?? '';
+      // When stop_reason is error_max_turns, result can be empty string "".
+      // Treat empty/whitespace-only result as missing — don't return it.
+      if (typeof result === 'string' && result.trim().length > 0) {
+        return result;
       }
-      return cleaned;
+      // Fallback: return the raw JSON so callers can see what happened
+      return jsonStr;
+    } catch {
+      return stripped;
     }
   } catch (error: any) {
     if (error.code === 'ABORT_ERR' || error.killed) {

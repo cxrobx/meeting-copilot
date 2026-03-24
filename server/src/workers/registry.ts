@@ -60,6 +60,18 @@ export class WorkerRegistry extends EventEmitter {
     );
   }
 
+  /**
+   * Replace the result of a completed action in-place (for rolling updates).
+   * Emits action.status so all clients see the update.
+   */
+  replaceActionResult(actionId: string, newResult: WorkerResult): void {
+    const action = this.actions.get(actionId);
+    if (!action || action.state !== 'completed') return;
+    action.result = newResult;
+    action.completedAt = Date.now();
+    this.emit('action.status', action);
+  }
+
   suggest(suggestion: ActionSuggestion): ActionLifecycle | null {
     // Dedup check: hash type + params
     const dedupKey = createHash('sha256')

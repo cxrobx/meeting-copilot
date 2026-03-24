@@ -111,6 +111,12 @@ type OutboundMessage =
 let sessionStore: SessionStore | null = null;
 let eventLogger: EventLogger | null = null;
 let sessionActive = false;
+
+// Rolling summary: periodically refreshes the summary card with updated transcript
+let rollingSummaryId: string | null = null;
+let rollingSummaryTimer: ReturnType<typeof setInterval> | null = null;
+let rollingSummaryWordCount = 0;
+const ROLLING_SUMMARY_INTERVAL_MS = 120_000; // 2 minutes
 let configuredRetentionDays = 90;
 let whisperAvailable: boolean | null = null;
 
@@ -311,6 +317,73 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
 
       // Write shared presence for companion apps
       writePresence(sessionStore.id);
+
+      // Start rolling summary timer
+      rollingSummaryId = null;
+      rollingSummaryWordCount = 0;
+      if (rollingSummaryTimer) clearInterval(rollingSummaryTimer);
+      rollingSummaryTimer = setInterval(async () => {
+        if (!sessionActive || !sessionStore) return;
+
+        const transcriptRecords = sessionStore.getTranscript();
+        const currentWordCount = transcriptRecords.reduce((sum, r) => sum + (r.wordCount || 0), 0);
+
+        // Only refresh if transcript has grown meaningfully (50+ new words)
+        if (currentWordCount - rollingSummaryWordCount < 50) return;
+        rollingSummaryWordCount = currentWordCount;
+
+        const fullTranscript = transcriptRecords
+          .map((r) => `${r.label} ${r.text}`)
+          .join('\n');
+
+        if (!fullTranscript.trim()) return;
+
+        const session = sessionStore.getSession();
+        const summaryWorker = registry.getWorker('summary');
+        if (!summaryWorker) return;
+
+        try {
+          debugLog('[RollingSummary] Refreshing summary...');
+          const result = await summaryWorker.execute(
+            {
+              transcript: fullTranscript,
+              scope: 'full',
+              title: session?.title,
+            },
+            new AbortController().signal,
+          );
+
+          if (result.success) {
+            if (rollingSummaryId) {
+              // Update existing card in-place
+              registry.replaceActionResult(rollingSummaryId, result);
+              debugLog(`[RollingSummary] Updated action ${rollingSummaryId}`);
+            } else {
+              // First rolling summary — create it via suggest + auto-approve
+              const action = registry.suggest({
+                type: 'summary',
+                title: `Meeting Summary: ${session?.title || 'Live'}`,
+                description: 'Auto-updating meeting summary (refreshes every 2 min)',
+                triggerQuote: fullTranscript.slice(-100),
+                estimatedDurationSec: 15,
+                params: { transcript: fullTranscript, scope: 'full', title: session?.title, _rolling: true },
+              });
+              if (action) {
+                // Directly set to completed with the result (skip worker execution)
+                action.state = 'completed';
+                action.result = result;
+                action.completedAt = Date.now();
+                registry.emit('action.status', action);
+                rollingSummaryId = action.id;
+                debugLog(`[RollingSummary] Created initial summary: ${action.id}`);
+              }
+            }
+          }
+        } catch (err) {
+          debugLog(`[RollingSummary] Error: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }, ROLLING_SUMMARY_INTERVAL_MS);
+
       break;
     }
 
@@ -322,6 +395,14 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
 
       eventLogger?.log('session.stop', { sessionId: sessionStore.id });
       debug.recordStateTransition();
+
+      // Stop rolling summary
+      if (rollingSummaryTimer) {
+        clearInterval(rollingSummaryTimer);
+        rollingSummaryTimer = null;
+      }
+      rollingSummaryId = null;
+      rollingSummaryWordCount = 0;
 
       // Stop intelligence
       intelligence.stop();
