@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Consent View
 
@@ -110,6 +111,50 @@ struct ConsentView: View {
                 .padding(.horizontal, 16)
             }
 
+            // Reference Documents — always visible
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Reference Documents")
+                    .font(.headline)
+                Text("Add docs, specs, or notes for the copilot to reference.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                // Saved sources list
+                if !sessionManager.availableContextSources.isEmpty {
+                    ScrollView {
+                        LazyVStack(spacing: 4) {
+                            ForEach(sessionManager.availableContextSources) { source in
+                                ContextSourceRow(
+                                    source: source,
+                                    isSelected: sessionManager.selectedContextPaths.contains(source.path),
+                                    onToggle: { sessionManager.toggleContextSelection(source.path) },
+                                    onRemove: { sessionManager.removeContextSource(path: source.path) }
+                                )
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 120)
+                }
+
+                // Add buttons
+                HStack(spacing: 8) {
+                    Button(action: { sessionManager.addContextFolder() }) {
+                        Label("Add Folder", systemImage: "folder.badge.plus")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button(action: { sessionManager.addContextFile() }) {
+                        Label("Add File", systemImage: "doc.badge.plus")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+            .padding(.horizontal, 16)
+
             // Buttons
             VStack(spacing: 10) {
                 Button(action: onConsent) {
@@ -137,7 +182,10 @@ struct ConsentView: View {
         .padding(20)
         .frame(width: 340)
         .onAppear {
-            Task { await sessionManager.fetchProjects() }
+            Task {
+                await sessionManager.fetchProjects()
+                await sessionManager.fetchContextSources()
+            }
         }
     }
 }
@@ -178,5 +226,52 @@ private struct ProjectPickerRow: View {
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Context Source Row
+
+private struct ContextSourceRow: View {
+    let source: ContextSourceInfo
+    let isSelected: Bool
+    let onToggle: () -> Void
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: onToggle) {
+                HStack(spacing: 8) {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(isSelected ? .blue : .secondary)
+                        .font(.body)
+
+                    Image(systemName: source.icon)
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+
+                    Text(source.displayName)
+                        .font(.body)
+                        .lineLimit(1)
+                }
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            Text(source.type == .file ? "file" : "\(source.fileCount) files")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary.opacity(0.6))
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(isSelected ? Color.blue.opacity(0.06) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }

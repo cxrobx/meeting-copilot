@@ -34,11 +34,16 @@ export function buildSonnetSuggestPrompt(
   transcriptWindow: string,
   triageResult: { reason: string; triggerQuote: string },
   projectBriefs?: string[],
+  contextBlock?: string,
 ): string {
   let prompt = `Based on this meeting transcript and the identified actionable moment, generate a specific action suggestion that an AI worker can execute immediately.`;
 
   if (projectBriefs?.length) {
     prompt += `\n\n<project_context>\n${projectBriefs.join('\n\n---\n\n')}\n</project_context>\nGround suggestions in the actual codebase. Reference real files, services, and patterns. For codegen, include target file paths. For research, focus on the project's tech stack.`;
+  }
+
+  if (contextBlock) {
+    prompt += `\n\n<context_documents>\n${contextBlock}\n</context_documents>\nUse these reference documents to ground your suggestions. Cite specific details from the documents when relevant.`;
   }
 
   prompt += `\n\n<transcript>\n${transcriptWindow}\n</transcript>

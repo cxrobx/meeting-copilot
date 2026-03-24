@@ -1,4 +1,6 @@
 import Foundation
+import AppKit
+import UniformTypeIdentifiers
 
 // File-based debug logging (stdout invisible when launched from Finder)
 func appLog(_ msg: String) {
@@ -35,6 +37,8 @@ final class SessionManager {
     var hasNewSuggestion: Bool = false
     var availableProjects: [ProjectInfo] = []
     var selectedProjectNames: [String] = []
+    var availableContextSources: [ContextSourceInfo] = []
+    var selectedContextPaths: [String] = []
     var serverReady: Bool = false
     var serverStartFailed: Bool = false
     var errorMessage: String? = nil
@@ -155,6 +159,82 @@ final class SessionManager {
         }
     }
 
+    func fetchContextSources() async {
+        guard let url = URL(string: "http://localhost:17890/context-sources") else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let response = try JSONDecoder().decode(ContextSourceListResponse.self, from: data)
+            availableContextSources = response.items
+        } catch {
+            print("[SessionManager] Failed to fetch context sources: \(error)")
+        }
+    }
+
+    func toggleContextSelection(_ path: String) {
+        if selectedContextPaths.contains(path) {
+            selectedContextPaths.removeAll { $0 == path }
+        } else {
+            selectedContextPaths.append(path)
+        }
+    }
+
+    func addContextFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Select a folder of reference documents"
+        panel.prompt = "Add Folder"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            await addContextSource(path: url.path, type: .folder)
+        }
+    }
+
+    func addContextFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [UTType.plainText, UTType.yaml, UTType.json].compactMap { $0 }
+        panel.message = "Select reference documents"
+        panel.prompt = "Add Files"
+        guard panel.runModal() == .OK else { return }
+        Task {
+            for fileURL in panel.urls {
+                await addContextSource(path: fileURL.path, type: .file)
+            }
+        }
+    }
+
+    private func addContextSource(path: String, type: ContextSourceType) async {
+        guard let url = URL(string: "http://localhost:17890/context-sources/add") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: String] = ["path": path, "type": type.rawValue]
+        request.httpBody = try? JSONEncoder().encode(body)
+        _ = try? await URLSession.shared.data(for: request)
+        await fetchContextSources()
+        // Auto-select the newly added item
+        if !selectedContextPaths.contains(path) {
+            selectedContextPaths.append(path)
+        }
+    }
+
+    func removeContextSource(path: String) {
+        selectedContextPaths.removeAll { $0 == path }
+        Task {
+            guard let url = URL(string: "http://localhost:17890/context-sources") else { return }
+            var request = URLRequest(url: url)
+            request.httpMethod = "DELETE"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try? JSONEncoder().encode(["path": path])
+            _ = try? await URLSession.shared.data(for: request)
+            await fetchContextSources()
+        }
+    }
+
     private func startSession() async {
         appLog("[Session] startSession() called, state=\(state.rawValue)")
         guard handleStateTransition(to: .priming) else {
@@ -260,7 +340,8 @@ final class SessionManager {
                     title: currentSession?.title,
                     projectNames: selectedProjectNames.isEmpty ? nil : selectedProjectNames,
                     agenda: agendaToSend.isEmpty ? nil : agendaToSend,
-                    attendees: attendeesToSend.isEmpty ? nil : attendeesToSend
+                    attendees: attendeesToSend.isEmpty ? nil : attendeesToSend,
+                    contextPaths: selectedContextPaths.isEmpty ? nil : selectedContextPaths
                 ))
                 appLog("[Session] session.start sent OK")
             } catch {
@@ -341,6 +422,7 @@ final class SessionManager {
         degradedReasons = []
         hasNewSuggestion = false
         selectedProjectNames = []
+        selectedContextPaths = []
         meetingTitle = ""
         meetingAgenda = ""
         meetingAttendees = ""
@@ -400,7 +482,8 @@ final class SessionManager {
                         title: currentSession?.title,
                         projectNames: selectedProjectNames.isEmpty ? nil : selectedProjectNames,
                         agenda: agendaToSend.isEmpty ? nil : agendaToSend,
-                        attendees: attendeesToSend.isEmpty ? nil : attendeesToSend
+                        attendees: attendeesToSend.isEmpty ? nil : attendeesToSend,
+                        contextPaths: selectedContextPaths.isEmpty ? nil : selectedContextPaths
                     ))
                     appLog("[Session] Recovery session.start sent OK")
                 } catch {

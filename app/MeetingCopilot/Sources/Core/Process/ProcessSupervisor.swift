@@ -73,34 +73,54 @@ final class ProcessSupervisor {
         return env
     }
 
-    // MARK: - Cleanup Orphans
+    // MARK: - Port Checks
 
-    /// Kill any orphaned processes from previous launches that hold our ports.
-    /// Called before starting new server/whisper processes to avoid EADDRINUSE.
+    /// Check if a port already has a healthy process listening.
+    /// Returns true if the port is in use by another process (not ours).
+    private func isPortInUse(_ port: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/lsof")
+        process.arguments = ["-ti", "tcp:\(port)"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !output.isEmpty else { return false }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Kill orphaned processes on the copilot server port only.
+    /// Whisper port (8078) is NOT killed — it may be shared with notes4chris.
     func cleanupOrphans() {
-        let ports = [("17890", "Server"), ("8078", "Whisper")]
-        for (port, name) in ports {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/lsof")
-            process.arguments = ["-ti", "tcp:\(port)"]
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = Pipe()
-            do {
-                try process.run()
-                process.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !output.isEmpty else { continue }
-                let pids = output.components(separatedBy: "\n").compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
-                let myPID = ProcessInfo.processInfo.processIdentifier
-                for pid in pids where pid != myPID {
-                    print("[ProcessSupervisor] Killing orphaned \(name) process (PID: \(pid)) on port \(port)")
-                    kill(pid, SIGKILL)
-                }
-            } catch {
-                print("[ProcessSupervisor] Failed to check port \(port): \(error)")
+        // Only clean up the copilot server port — whisper may be shared
+        let port = "17890"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/lsof")
+        process.arguments = ["-ti", "tcp:\(port)"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !output.isEmpty else { return }
+            let pids = output.components(separatedBy: "\n").compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+            let myPID = ProcessInfo.processInfo.processIdentifier
+            for pid in pids where pid != myPID {
+                print("[ProcessSupervisor] Killing orphaned Server process (PID: \(pid)) on port \(port)")
+                kill(pid, SIGKILL)
             }
+        } catch {
+            print("[ProcessSupervisor] Failed to check port \(port): \(error)")
         }
     }
 
@@ -181,6 +201,14 @@ final class ProcessSupervisor {
 
     func startWhisper() {
         guard !whisperRunning else { return }
+
+        // If whisper-server is already running on 8078 (e.g. from notes4chris), reuse it
+        if isPortInUse("8078") {
+            print("[ProcessSupervisor] Whisper already running on port 8078 — reusing existing instance")
+            whisperRunning = true
+            return
+        }
+
         whisperRestartCount = 0
         launchWhisper()
     }
@@ -194,7 +222,18 @@ final class ProcessSupervisor {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
-        let modelPath = NSString("~/.meeting-copilot/models/ggml-base.en.bin").expandingTildeInPath
+
+        // Prefer user model, fall back to bundle model
+        let userModelPath = NSString("~/.meeting-copilot/models/ggml-base.en.bin").expandingTildeInPath
+        let bundleModelPath = Bundle.main.resourcePath.map { "\($0)/models/ggml-base.en.bin" }
+        let modelPath: String
+        if FileManager.default.fileExists(atPath: userModelPath) {
+            modelPath = userModelPath
+        } else if let bPath = bundleModelPath, FileManager.default.fileExists(atPath: bPath) {
+            modelPath = bPath
+        } else {
+            modelPath = userModelPath // Will fail, but gives a clear error
+        }
         process.arguments = ["--model", modelPath, "--port", "8078", "--threads", "4", "--no-timestamps"]
 
         let pipe = Pipe()

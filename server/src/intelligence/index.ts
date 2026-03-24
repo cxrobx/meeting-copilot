@@ -5,6 +5,8 @@ import type { TranscriptSegment } from '../transcription/types.js';
 import type { ActionSuggestion } from '../workers/types.js';
 import type { ProjectContext } from '../project/index.js';
 import { formatProjectBrief } from '../project/index.js';
+import type { ContextDoc } from '../context/index.js';
+import { buildContextManifest, buildContextBlock } from '../context/index.js';
 import {
   HAIKU_TRIAGE_SYSTEM,
   buildHaikuTriagePrompt,
@@ -53,6 +55,8 @@ export class IntelligenceEngine extends EventEmitter {
   public projectNames: string[] = [];
   private projectContext: ProjectContext[] = [];
   private meetingContext: { agenda?: string; attendees?: string } = {};
+  private contextDocs: ContextDoc[] = [];
+  private contextManifest: string = '';
 
   // Metrics
   public evalsRun = 0;
@@ -102,6 +106,15 @@ export class IntelligenceEngine extends EventEmitter {
     return this.meetingContext;
   }
 
+  setContextDocs(docs: ContextDoc[]): void {
+    this.contextDocs = docs;
+    this.contextManifest = docs.length > 0 ? buildContextManifest(docs) : '';
+  }
+
+  getContextDocs(): ContextDoc[] {
+    return this.contextDocs;
+  }
+
   addTranscript(segment: TranscriptSegment): void {
     this.segments.push(segment);
 
@@ -141,6 +154,8 @@ export class IntelligenceEngine extends EventEmitter {
 
     this.projectContext = [];
     this.meetingContext = {};
+    this.contextDocs = [];
+    this.contextManifest = '';
 
     this.emit('stopped');
   }
@@ -318,7 +333,7 @@ export class IntelligenceEngine extends EventEmitter {
       ? formatProjectBrief(this.projectContext[0]!)
       : undefined;
     const text = await claudeTriage(
-      buildHaikuTriagePrompt(window, projectBrief),
+      buildHaikuTriagePrompt(window, projectBrief, this.contextManifest || undefined),
       HAIKU_TRIAGE_SYSTEM,
     );
     try {
@@ -338,6 +353,9 @@ export class IntelligenceEngine extends EventEmitter {
     triageResult: HaikuTriageResult,
   ): Promise<ActionSuggestion | null> {
     const projectBriefs = this.projectContext.map((c) => formatProjectBrief(c));
+    const contextBlock = this.contextDocs.length > 0
+      ? buildContextBlock(this.contextDocs, triageResult.triggerQuote)
+      : undefined;
     const text = await claudeSuggest(
       buildSonnetSuggestPrompt(
         window,
@@ -346,6 +364,7 @@ export class IntelligenceEngine extends EventEmitter {
           triggerQuote: triageResult.triggerQuote,
         },
         projectBriefs.length > 0 ? projectBriefs : undefined,
+        contextBlock,
       ),
       SONNET_SUGGEST_SYSTEM,
     );
