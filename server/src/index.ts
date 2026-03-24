@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { unlinkSync, existsSync, mkdirSync, chmodSync, appendFileSync } from 'node:fs';
+import { unlinkSync, existsSync, mkdirSync, chmodSync, appendFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -32,6 +32,8 @@ import { createPresentRouter } from './present/index.js';
 import { createRoutes } from './routes.js';
 import { scanProjects, loadProjectContext, formatProjectBrief } from './project/index.js';
 import type { ProjectContext } from './project/index.js';
+import { loadContextDocs, loadContextConfig, buildContextBlock } from './context/index.js';
+import type { ContextItemConfig } from './context/index.js';
 import type { ActionSuggestion, ActionLifecycle } from './workers/types.js';
 
 // Load environment
@@ -56,7 +58,7 @@ type InboundMessage =
       data: string; // base64 PCM
       source: 'mic' | 'meeting';
     }
-  | { type: 'session.start'; title?: string; projectNames?: string[]; agenda?: string; attendees?: string }
+  | { type: 'session.start'; title?: string; projectNames?: string[]; agenda?: string; attendees?: string; contextPaths?: string[]; contextDirPaths?: string[] }
   | { type: 'session.stop' }
   | { type: 'action.approve'; actionId: string }
   | { type: 'action.dismiss'; actionId: string }
@@ -301,6 +303,26 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         )).filter((c): c is ProjectContext => c !== null);
         intelligence.setProjectContext(contexts);
         console.log(`[Session] Project context loaded: ${contexts.map((c) => c.name).join(', ')}`);
+      }
+
+      // Load context docs (files + folders) if specified
+      const contextPaths = message.contextPaths ?? message.contextDirPaths ?? [];
+      if (contextPaths.length > 0) {
+        const savedConfig = loadContextConfig();
+        const items: ContextItemConfig[] = contextPaths.map((p) => {
+          const saved = savedConfig.find((c) => c.path === p);
+          if (saved) return saved;
+          // Infer type from filesystem
+          try {
+            const isDir = statSync(p).isDirectory();
+            return { path: p, type: isDir ? 'folder' : 'file' } as ContextItemConfig;
+          } catch {
+            return { path: p, type: 'file' } as ContextItemConfig;
+          }
+        });
+        const docs = loadContextDocs(items);
+        intelligence.setContextDocs(docs);
+        console.log(`[Session] Context docs loaded: ${docs.length} files from ${contextPaths.length} sources`);
       }
 
       // Start intelligence engine
@@ -551,12 +573,22 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       // Inject project context into worker params
       const projectContext = intelligence.getProjectContext();
       if (projectContext.length > 0) {
-        const contextBlock = projectContext.map((c) => formatProjectBrief(c)).join('\n---\n');
+        const projectBlock = projectContext.map((c) => formatProjectBrief(c)).join('\n---\n');
         const existing = suggestion.params.context ?? '';
         suggestion.params.context = existing
-          ? `${existing}\n\nProject Context:\n${contextBlock}`
-          : `Project Context:\n${contextBlock}`;
+          ? `${existing}\n\nProject Context:\n${projectBlock}`
+          : `Project Context:\n${projectBlock}`;
         suggestion.params._projectPaths = projectContext.map((c) => c.path);
+      }
+
+      // Inject context directory docs into worker params
+      const contextDocs = intelligence.getContextDocs();
+      if (contextDocs.length > 0) {
+        const docsBlock = buildContextBlock(contextDocs, message.prompt);
+        const existing = suggestion.params.context ?? '';
+        suggestion.params.context = existing
+          ? `${existing}\n\nReference Documents:\n${docsBlock}`
+          : `Reference Documents:\n${docsBlock}`;
       }
 
       const action = registry.suggest(suggestion);
@@ -614,12 +646,22 @@ intelligence.onSuggestion((suggestion: ActionSuggestion) => {
   // Inject project context into worker params so workers get codebase awareness
   const projectContext = intelligence.getProjectContext();
   if (projectContext.length > 0) {
-    const contextBlock = projectContext.map((c) => formatProjectBrief(c)).join('\n---\n');
+    const projectBlock = projectContext.map((c) => formatProjectBrief(c)).join('\n---\n');
     const existing = suggestion.params.context ?? '';
     suggestion.params.context = existing
-      ? `${existing}\n\nProject Context:\n${contextBlock}`
-      : `Project Context:\n${contextBlock}`;
+      ? `${existing}\n\nProject Context:\n${projectBlock}`
+      : `Project Context:\n${projectBlock}`;
     suggestion.params._projectPaths = projectContext.map((c) => c.path);
+  }
+
+  // Inject context directory docs into worker params
+  const contextDocs = intelligence.getContextDocs();
+  if (contextDocs.length > 0) {
+    const docsBlock = buildContextBlock(contextDocs, suggestion.triggerQuote);
+    const existing = suggestion.params.context ?? '';
+    suggestion.params.context = existing
+      ? `${existing}\n\nReference Documents:\n${docsBlock}`
+      : `Reference Documents:\n${docsBlock}`;
   }
 
   const action = registry.suggest(suggestion);

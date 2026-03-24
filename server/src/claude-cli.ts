@@ -19,7 +19,7 @@ export async function claudeChat(
     allowedTools?: string[];
   } = {},
 ): Promise<string> {
-  const maxTurns = options.allowedTools?.length ? '5' : '1';
+  const maxTurns = options.allowedTools?.length ? '8' : '1';
   const args = ['--print', '--output-format', 'json', '--no-session-persistence', '--max-turns', maxTurns];
 
   if (options.systemPrompt) {
@@ -54,7 +54,7 @@ export async function claudeChat(
   try {
     const { stdout } = await execFileAsync('claude', args, {
       maxBuffer: 10 * 1024 * 1024, // 10MB
-      timeout: options.allowedTools?.length ? 120_000 : 60_000,
+      timeout: options.allowedTools?.length ? 180_000 : 120_000,
       signal: controller.signal,
       env,
     });
@@ -93,20 +93,123 @@ export async function claudeChat(
 }
 
 /**
- * Quick triage call using the fastest available model.
- * Falls back to claude CLI if no API key is set.
+ * Triage call with fallback chain:
+ *   1. Gemini CLI (gemini-3-flash-preview) — fast + smart
+ *   2. Claude Haiku — reliable fallback
+ *   3. Codex CLI (gpt-5.4-mini) — last resort
  */
 export async function claudeTriage(
   prompt: string,
   systemPrompt: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  return claudeChat(prompt, {
-    systemPrompt,
-    model: 'claude-haiku-4-5-20251001',
-    maxTokens: 256,
-    signal,
+  // 1. Try Gemini Flash
+  try {
+    return await geminiTriage(prompt, systemPrompt, signal);
+  } catch { /* fall through */ }
+
+  // 2. Try Haiku
+  try {
+    return await claudeChat(prompt, {
+      systemPrompt,
+      model: 'claude-haiku-4-5-20251001',
+      signal,
+    });
+  } catch { /* fall through */ }
+
+  // 3. Try Codex
+  return codexTriage(prompt, systemPrompt, signal);
+}
+
+/**
+ * Triage via Gemini CLI (gemini-3-flash-preview).
+ */
+async function geminiTriage(
+  prompt: string,
+  systemPrompt: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const combinedPrompt = `${systemPrompt}\n\n${prompt}`;
+
+  const controller = new AbortController();
+  if (signal) {
+    if (signal.aborted) throw new Error('Aborted');
+    signal.addEventListener('abort', () => controller.abort());
+  }
+
+  const { stdout } = await execFileAsync('gemini', [
+    '-m', 'gemini-3-flash-preview',
+    '-p', combinedPrompt,
+    '-o', 'json',
+  ], {
+    maxBuffer: 5 * 1024 * 1024,
+    timeout: 30_000,
+    signal: controller.signal,
+    env: { ...process.env },
   });
+
+  // Gemini JSON output: { session_id, response, stats }
+  try {
+    const parsed = JSON.parse(stdout);
+    if (parsed.response && typeof parsed.response === 'string') {
+      return parsed.response;
+    }
+  } catch { /* fall through */ }
+
+  // Try to extract response from partial output
+  const stripped = stdout.replace(/\x1b\].*?(?:\x07|\x1b\\)/gs, '').trim();
+  const jsonStart = stripped.indexOf('{');
+  const jsonEnd = stripped.lastIndexOf('}');
+  if (jsonStart >= 0 && jsonEnd > jsonStart) {
+    const parsed = JSON.parse(stripped.slice(jsonStart, jsonEnd + 1));
+    if (parsed.response) return parsed.response;
+  }
+
+  throw new Error('No response in gemini output');
+}
+
+/**
+ * Triage via Codex CLI (gpt-5.4-mini).
+ */
+async function codexTriage(
+  prompt: string,
+  systemPrompt: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const combinedPrompt = `${systemPrompt}\n\n${prompt}`;
+
+  const controller = new AbortController();
+  if (signal) {
+    if (signal.aborted) throw new Error('Aborted');
+    signal.addEventListener('abort', () => controller.abort());
+  }
+
+  const { stdout } = await execFileAsync('codex', [
+    'exec',
+    '-m', 'gpt-5.4-mini',
+    '--ephemeral',
+    '--skip-git-repo-check',
+    '--json',
+    combinedPrompt,
+  ], {
+    maxBuffer: 5 * 1024 * 1024,
+    timeout: 30_000,
+    signal: controller.signal,
+    env: { ...process.env },
+  });
+
+  // Parse JSONL output — find the agent_message item
+  const lines = stdout.trim().split('\n');
+  for (const line of lines) {
+    try {
+      const evt = JSON.parse(line);
+      if (evt.type === 'item.completed' && evt.item?.type === 'agent_message' && evt.item?.text) {
+        return evt.item.text;
+      }
+    } catch { /* skip non-JSON lines */ }
+  }
+
+  throw new Error('No agent_message in codex output');
 }
 
 /**

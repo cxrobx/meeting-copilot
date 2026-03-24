@@ -13,6 +13,14 @@ import { SessionStore as SessionStoreClass } from './session/store.js';
 import { cleanupOldSessions } from './session/cleanup.js';
 import { setSharingEnabled, appendTranscript } from './session/shared.js';
 import { scanProjects } from './project/index.js';
+import {
+  loadContextConfig,
+  saveContextConfig,
+  addContextItem,
+  removeContextItem,
+  getContextItemInfo,
+} from './context/index.js';
+import type { ContextItemConfig } from './context/index.js';
 
 interface RouteContext {
   transcription: TranscriptionService;
@@ -144,6 +152,29 @@ export function createRoutes(ctx: RouteContext): Router {
     });
   });
 
+  // Live transcript (for web UI refresh during active session)
+  router.get('/transcript', (_req, res) => {
+    const { store, active } = ctx.getSession();
+    if (!active || !store) {
+      res.json({ segments: [], active: false });
+      return;
+    }
+    const records = store.getTranscript();
+    res.json({
+      segments: records.map((r) => ({
+        id: r.id,
+        text: r.text,
+        source: r.source,
+        label: r.label,
+        timestamp: r.timestamp,
+        duration: r.duration,
+        wordCount: r.wordCount,
+      })),
+      active: true,
+      sessionId: store.id,
+    });
+  });
+
   // Preflight check
   router.get('/preflight', (_req, res) => {
     const checks = runPreflightChecks(ctx.getWhisperAvailable());
@@ -186,6 +217,53 @@ export function createRoutes(ctx: RouteContext): Router {
   router.get('/projects', (_req, res) => {
     const projects = scanProjects();
     res.json({ projects });
+  });
+
+  // Context sources (files + folders)
+  const handleGetContextSources = (_req: any, res: any) => {
+    const configs = loadContextConfig();
+    const items = configs.map((c) => getContextItemInfo(c));
+    res.json({ items });
+  };
+  router.get('/context-sources', handleGetContextSources);
+  router.get('/context-dirs', handleGetContextSources); // backwards compat
+
+  const handlePostContextSources = (req: any, res: any) => {
+    const body = req.body as { items?: ContextItemConfig[] };
+    if (!Array.isArray(body.items)) {
+      res.status(400).json({ error: 'Expected { items: ContextItemConfig[] }' });
+      return;
+    }
+    saveContextConfig(body.items);
+    res.json({ success: true, count: body.items.length });
+  };
+  router.post('/context-sources', handlePostContextSources);
+  router.post('/context-dirs', handlePostContextSources); // backwards compat
+
+  // Add a single context source (used by file/folder pickers)
+  router.post('/context-sources/add', (req, res) => {
+    const body = req.body as { path?: string; type?: string; label?: string };
+    if (!body.path || !body.type || !['file', 'folder'].includes(body.type)) {
+      res.status(400).json({ error: 'Expected { path: string, type: "file"|"folder", label?: string }' });
+      return;
+    }
+    const items = addContextItem({
+      path: body.path,
+      type: body.type as 'file' | 'folder',
+      label: body.label,
+    });
+    res.json({ success: true, items: items.map((c) => getContextItemInfo(c)) });
+  });
+
+  // Remove a context source
+  router.delete('/context-sources', (req, res) => {
+    const body = req.body as { path?: string };
+    if (!body.path) {
+      res.status(400).json({ error: 'Expected { path: string }' });
+      return;
+    }
+    const items = removeContextItem(body.path);
+    res.json({ success: true, items: items.map((c) => getContextItemInfo(c)) });
   });
 
   // Session history — list all sessions with manifest data

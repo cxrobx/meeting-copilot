@@ -1,18 +1,20 @@
-export const HAIKU_TRIAGE_SYSTEM = `You analyze meeting transcripts to identify actionable moments where an AI copilot could provide immediate, concrete value.
+export const HAIKU_TRIAGE_SYSTEM = `You are a strict filter for a meeting AI copilot. Your job is to identify ONLY moments where the copilot can take useful action RIGHT NOW using information ALREADY PRESENT in the transcript.
 
-You look for:
-- Questions being asked that could benefit from research or data lookup
-- Decisions being discussed that would benefit from analysis
-- Requests for summaries or recaps
-- Ideas being brainstormed that could use mockups or prototypes
-- Technical discussions that could benefit from code generation
-- Action items being assigned that could be started immediately
+You MUST flag (actionable = true):
+- A specific question asked that web research could answer ("What's the deadline for X?", "How does Y work?")
+- A concrete decision being weighed where analysis of options would help RIGHT NOW
+- A topic with enough substance discussed (3+ sentences) that a structured summary would be useful
+- A technical problem described in enough detail to generate code or a mockup
 
-You do NOT flag:
-- Small talk or greetings
-- Simple yes/no exchanges
-- Routine status updates with no ambiguity
-- Discussions that are already resolved
+You MUST NOT flag (actionable = false):
+- Someone MENTIONING a future task ("I'll send you the recording", "Let's schedule a call") — these are intentions, not actionable moments
+- Small talk, greetings, trip stories, personal anecdotes
+- Simple acknowledgments ("okay", "sounds good", "mm-hmm")
+- Status updates with no ambiguity or open questions
+- Repeats of topics already flagged — if the same subject was discussed earlier, don't re-flag it
+- Vague references ("we should look into that") without enough context to act on
+
+KEY RULE: If you can't describe a specific, concrete output the copilot would produce (e.g., "research NBREA conference speaker requirements" or "compare PDF vs slide deck for consulting pitch"), then it is NOT actionable. Err on the side of NOT flagging.
 
 Respond with JSON only. No other text.`;
 
@@ -25,11 +27,16 @@ export interface HaikuTriageResult {
 export function buildHaikuTriagePrompt(
   transcriptWindow: string,
   projectBrief?: string,
+  contextManifest?: string,
 ): string {
-  let prompt = `Analyze this recent meeting transcript segment and determine if there is an actionable moment where an AI assistant could provide concrete value RIGHT NOW.`;
+  let prompt = `Analyze this transcript and determine if there is a moment where the copilot should act. Only flag if you can name a SPECIFIC output the copilot would produce using information ALREADY in the transcript. Do NOT flag future intentions or tasks someone said they would do later.`;
 
   if (projectBrief) {
     prompt += `\n\n<project_context>\n${projectBrief}\n</project_context>\nThis meeting is about the project described above. Flag discussions about specific APIs, components, or architecture as actionable — the copilot can provide grounded assistance.`;
+  }
+
+  if (contextManifest) {
+    prompt += `\n\n<context_documents>\nReference documents loaded for this meeting:\n${contextManifest}\n</context_documents>\nDiscussions about topics covered by these documents are actionable — the copilot can reference the source material.`;
   }
 
   prompt += `\n\n<transcript>\n${transcriptWindow}\n</transcript>

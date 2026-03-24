@@ -1383,6 +1383,16 @@ const PRESENT_HTML = `<!DOCTYPE html>
           sessionState = 'live';
           sessionId = d.session;
           sessionStartTime = Date.now(); // approximate
+          // Load existing transcript from server so refresh doesn't lose history
+          fetch('/transcript').then(function(r) { return r.json(); }).then(function(t) {
+            if (t.segments && t.segments.length > 0) {
+              // Clear any duplicates from WS messages received during fetch
+              transcriptFeed.innerHTML = '';
+              segments = [];
+              totalWords = 0; micWords = 0; meetingWords = 0;
+              t.segments.forEach(function(seg) { addSegment(seg); });
+            }
+          }).catch(function() {});
         }
         updateUI();
       }).catch(function() { updateUI(); });

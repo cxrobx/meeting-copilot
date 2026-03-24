@@ -73,7 +73,7 @@ export class WorkerRegistry extends EventEmitter {
   }
 
   suggest(suggestion: ActionSuggestion): ActionLifecycle | null {
-    // Dedup check: hash type + params
+    // Dedup check 1: exact hash of type + params
     const dedupKey = createHash('sha256')
       .update(JSON.stringify({ type: suggestion.type, params: suggestion.params }))
       .digest('hex');
@@ -81,6 +81,22 @@ export class WorkerRegistry extends EventEmitter {
     if (this.suggestionHashes.has(dedupKey)) {
       return null; // Duplicate suggestion
     }
+
+    // Dedup check 2: similar title within same type (fuzzy — catches "Extract key points from Rory" vs "Extract key items from Rory")
+    const titleWords = new Set(suggestion.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 3));
+    for (const existing of this.actions.values()) {
+      if (existing.type !== suggestion.type) continue;
+      if (existing.state === 'cancelled' || existing.state === 'expired') continue;
+      const existingWords = new Set(existing.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 3));
+      // Jaccard similarity on title words
+      let intersection = 0;
+      for (const w of titleWords) { if (existingWords.has(w)) intersection++; }
+      const union = titleWords.size + existingWords.size - intersection;
+      if (union > 0 && intersection / union >= 0.6) {
+        return null; // Similar title already exists
+      }
+    }
+
     this.suggestionHashes.add(dedupKey);
 
     const action: ActionLifecycle = {
