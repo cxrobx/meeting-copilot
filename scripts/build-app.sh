@@ -17,7 +17,7 @@ mkdir -p "$BUILD_DIR"
 
 # ── Step 1: Build Node.js server ─────────────────────────────────────────
 
-echo "[1/5] Building Node.js server..."
+echo "[1/6] Building Node.js server..."
 cd "$PROJECT_DIR/server"
 npm ci --silent
 npx tsc
@@ -34,7 +34,7 @@ echo "  Installed production dependencies"
 # ── Step 2: Build Swift binary ───────────────────────────────────────────
 
 echo ""
-echo "[2/5] Building Swift app (release)..."
+echo "[2/6] Building Swift app (release)..."
 cd "$PROJECT_DIR/app/MeetingCopilot"
 swift build -c release --quiet 2>&1
 SWIFT_BIN="$(swift build -c release --show-bin-path)/MeetingCopilot"
@@ -43,7 +43,7 @@ echo "  Built: $SWIFT_BIN"
 # ── Step 3: Assemble .app bundle ─────────────────────────────────────────
 
 echo ""
-echo "[3/5] Assembling app bundle..."
+echo "[3/6] Assembling app bundle..."
 
 # Create bundle structure
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
@@ -75,6 +75,21 @@ fi
 if [ -f "$PROJECT_DIR/server/.env" ]; then
   cp "$PROJECT_DIR/server/.env" "$APP_BUNDLE/Contents/Resources/server/"
   echo "  Copied .env"
+fi
+
+# Bundle whisper-server binary if available
+WHISPER_BIN="/opt/homebrew/bin/whisper-server"
+if [ -f "$WHISPER_BIN" ]; then
+  cp "$WHISPER_BIN" "$APP_BUNDLE/Contents/Resources/whisper-server"
+  echo "  Bundled whisper-server"
+fi
+
+# Bundle whisper model if available
+WHISPER_MODEL="$HOME/.meeting-copilot/models/ggml-base.en.bin"
+if [ -f "$WHISPER_MODEL" ]; then
+  mkdir -p "$APP_BUNDLE/Contents/Resources/models"
+  cp "$WHISPER_MODEL" "$APP_BUNDLE/Contents/Resources/models/"
+  echo "  Bundled whisper model ($(du -h "$WHISPER_MODEL" | cut -f1))"
 fi
 
 # PkgInfo
@@ -119,6 +134,11 @@ cat >> "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <string>Meeting Copilot needs microphone access to capture your voice during meetings.</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright 2026 Christopher Robinson</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
 </dict>
 </plist>
 PLIST
@@ -128,7 +148,7 @@ echo "  Bundle assembled: $APP_BUNDLE"
 # ── Step 4: Ad-hoc code sign ─────────────────────────────────────────────
 
 echo ""
-echo "[4/5] Code signing (ad-hoc)..."
+echo "[4/6] Code signing (ad-hoc)..."
 
 # Create entitlements
 ENTITLEMENTS="$BUILD_DIR/entitlements.plist"
@@ -149,7 +169,7 @@ echo "  Signed (ad-hoc)"
 # ── Step 5: Install to /Applications ─────────────────────────────────────
 
 echo ""
-echo "[5/5] Installing to /Applications..."
+echo "[5/6] Installing to /Applications..."
 
 DEST="/Applications/$APP_NAME.app"
 if [ -d "$DEST" ]; then
@@ -163,15 +183,20 @@ echo "  Installed: $DEST"
 # Cleanup staging
 rm -rf "$PROD_STAGING"
 
+# ── Step 6: Copy to dist/ ───────────────────────────────────────────────
+
+echo ""
+echo "[6/6] Creating dist/ copy..."
+
+DIST_DIR="$PROJECT_DIR/dist"
+rm -rf "$DIST_DIR"
+mkdir -p "$DIST_DIR"
+cp -R "$APP_BUNDLE" "$DIST_DIR/"
+echo "  Copied to: $DIST_DIR/$APP_NAME.app"
+
 echo ""
 echo "=== Build Complete ==="
 echo ""
 echo "  $APP_NAME is now in /Applications."
+echo "  Also available at: dist/$APP_NAME.app"
 echo "  Launch it from Spotlight or /Applications."
-echo ""
-echo "  Note: On first launch, macOS will ask for:"
-echo "    - Screen Recording permission (for meeting audio)"
-echo "    - Microphone permission (for your voice)"
-echo ""
-echo "  The whisper model must be at ~/.meeting-copilot/models/ggml-base.en.bin"
-echo "  Run ./scripts/setup.sh if you haven't already."

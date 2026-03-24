@@ -190,17 +190,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Panel Management
 
     func showPanel() {
-        let panelContent = ActionPanelView(sessionManager: sessionManager)
-            .sheet(isPresented: Binding(
-                get: { self.sessionManager.showingConsentDialog },
-                set: { _ in }
-            )) {
-                ConsentView(
-                    sessionManager: self.sessionManager,
-                    onConsent: { self.sessionManager.consentGranted() },
-                    onCancel: { self.sessionManager.consentDenied() }
-                )
-            }
+        // Web dashboard — loads the Gruvbox-themed /present page in a WKWebView.
+        // The web UI handles session control, transcript, approvals, and action results.
+        let panelContent = WebDashboardView()
+
+        // NOTE: To restore the native SwiftUI panel, uncomment below and comment out the WebDashboardView line above:
+        // let panelContent = ActionPanelView(sessionManager: sessionManager)
+        //     .sheet(isPresented: Binding(
+        //         get: { self.sessionManager.showingConsentDialog },
+        //         set: { _ in }
+        //     )) {
+        //         ConsentView(
+        //             sessionManager: self.sessionManager,
+        //             onConsent: { self.sessionManager.consentGranted() },
+        //             onCancel: { self.sessionManager.consentDenied() }
+        //         )
+        //     }
 
         floatingPanelController.showPanel(contentView: panelContent)
     }
