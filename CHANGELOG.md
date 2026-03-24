@@ -5,6 +5,34 @@ All notable changes to Meeting Copilot will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- 2026-03-24: Audio replay testing — `replay-audio.ts` + `scripts/replay-audio.sh` streams recorded WAV files through the full pipeline (audio → whisper → intelligence → workers) with `--speed` and `--auto-approve` flags
+- 2026-03-24: Web-first dashboard at `/present` — 3-column layout (transcript, action results, TOC outline) with Gruvbox Light theme (AnuPpuccin), JetBrains Mono font, session controls, approval flow, quick actions
+- 2026-03-24: WKWebView integration — floating panel now loads `/present` web dashboard instead of SwiftUI views (SwiftUI code preserved as comments)
+- 2026-03-24: Multi-model triage chain — Gemini 3 Flash Preview → Haiku 4.5 → GPT 5.4 Mini (via `gemini`, `claude`, `codex` CLIs)
+- 2026-03-24: Rolling summary — auto-refreshes every 2 min via `registry.replaceActionResult()`, updates card in-place as transcript grows
+- 2026-03-24: Title-based Jaccard dedup in WorkerRegistry (75% threshold) prevents near-duplicate suggestions
+- 2026-03-24: `GET /transcript` endpoint — returns live session transcript for web UI refresh persistence
+- 2026-03-24: `GET /present/transcript?session=<id>` — returns stored transcript for session replay
+- 2026-03-24: `GET /present/sessions` — lists sessions with action/segment counts, sorted by date
+- 2026-03-24: Session replay via `?session=<id>` — loads transcript + actions from SQLite, read-only mode with "Back" navigation
+- 2026-03-24: Enhanced start form — project picker (checkboxes), context source toggles, title/agenda/attendees fields
+- 2026-03-24: Cmd+/- CSS zoom in WKWebView via `document.body.style.zoom`
+- 2026-03-24: `NSAllowsLocalNetworking` in Info.plist for WKWebView localhost access
+
+### Fixed
+- 2026-03-24: `--max-tokens` CLI flag crash — Claude CLI has no such flag; was silently failing every intelligence eval
+- 2026-03-24: CLI output parsing — terminal escape sequences (OSC `\x1b]...\x1b\`) stripped before JSON.parse; empty `result` on `error_max_turns` falls back to raw JSON
+- 2026-03-24: WAV header injection — replay audio chunks need proper 44-byte WAV headers for whisper-server (not raw PCM)
+- 2026-03-24: Summary worker transcript injection — live transcript injected into params at approval time so mid-meeting summaries have content
+- 2026-03-24: Stale "Running..." in replay mode — shows "Did not complete during session" instead of forever-spinner
+- 2026-03-24: CLI timeout increased to 180s for all calls (was 60s for non-tool calls, causing mockup/codegen aborts)
+- 2026-03-24: Research `maxTurns` increased from 5 to 8 for web search completion
+
+### Changed
+- 2026-03-24: Haiku triage prompt rewritten — strict filter requiring specific actionable output, rejects future intentions and re-flags
+- 2026-03-24: Action cards render chronologically (newest at bottom, was newest at top)
+- 2026-03-24: All AI calls use headless CLIs (`claude --print`, `gemini -p`, `codex exec`) via user subscriptions — no API keys needed
+
 - 2026-03-14: Deepgram transcription provider — `server/src/transcription/deepgram.ts` implements REST API against nova-2, selected via `TRANSCRIPTION_PROVIDER=deepgram`
 - 2026-03-14: Replay runner — `scripts/replay.sh run` feeds fixture transcripts through IntelligenceEngine; `diff` compares output against baselines using Jaccard title matching
 - 2026-03-14: Test suite foundation — 30 tests across WorkerRegistry, IntelligenceEngine, and SessionStore using vitest

@@ -4,12 +4,14 @@
 
 | Component | Technology |
 |-----------|------------|
-| App | SwiftUI macOS menubar app (Swift Package Manager) |
+| App | SwiftUI menubar app + WKWebView dashboard (Swift Package Manager) |
 | Server | Node.js + TypeScript (Express, WebSocket) |
-| AI | Anthropic SDK — Haiku triage, Sonnet suggestions |
+| AI Triage | Gemini 3 Flash Preview → Haiku 4.5 → GPT 5.4 Mini (fallback chain via CLIs) |
+| AI Suggest | Claude Sonnet 4.6 (via `claude --print`) |
 | Database | better-sqlite3 per-session SQLite |
 | Audio | ScreenCaptureKit (meeting) + AVAudioEngine (mic) |
 | Transcription | whisper-server local (default), Deepgram cloud (optional) |
+| Dashboard | Web UI at `/present` (Gruvbox Light, JetBrains Mono) in WKWebView |
 
 ## Two-Process Architecture
 

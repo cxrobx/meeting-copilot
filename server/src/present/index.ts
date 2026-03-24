@@ -1332,7 +1332,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     if (existing) existing.remove();
 
     var card = document.createElement('div');
-    card.className = 'card' + (action.state === 'running' ? ' running' : action.state === 'suggested' ? ' suggested' : '');
+    card.className = 'card' + (action.state === 'running' && !isReplay ? ' running' : action.state === 'suggested' ? ' suggested' : '');
     card.id = 'action-' + action.id;
 
     var typeClass = action.state === 'failed' ? 'failed' : action.type;
@@ -1357,11 +1357,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
       }
       body += '</div>';
     } else if (action.state === 'running') {
-      body = '<div class="card-body"><span class="spinner"></span> Running...';
-      if (!isReplay) {
+      if (isReplay) {
+        body = '<div class="card-body"><p style="color:var(--gb-overlay2)">Did not complete during session.</p></div>';
+      } else {
+        body = '<div class="card-body"><span class="spinner"></span> Running...';
         body += '<div class="card-actions"><button class="btn btn-ghost-red" onclick="cancelAction(\\'' + action.id + '\\')">Cancel</button></div>';
+        body += '</div>';
       }
-      body += '</div>';
     } else if (action.result && action.result.artifacts && action.result.artifacts.length > 0) {
       body = '<div class="card-body">';
       action.result.artifacts.forEach(function(artifact, i) {

@@ -5,10 +5,10 @@ AI agent that activates during meetings to generate live research, mockups, and 
 ## Architecture
 
 Two-process design:
-- **SwiftUI Menubar App** (`app/MeetingCopilot/`) — audio capture (ScreenCaptureKit + AVAudioEngine), floating panel UI with approval flows
-- **Node.js Local Server** (`server/`) — transcription, intelligence eval, worker execution, session storage
+- **SwiftUI Menubar App** (`app/MeetingCopilot/`) — audio capture (ScreenCaptureKit + AVAudioEngine), WKWebView dashboard, process supervision
+- **Node.js Local Server** (`server/`) — transcription, intelligence eval, worker execution, session storage, web dashboard
 
-Communication: WebSocket over localhost:17890 (MVP), Unix socket `~/.meeting-copilot/copilot.sock` (production)
+Communication: WebSocket over localhost:17890. Browser connects as additional WS client alongside Swift app.
 
 ## Project Structure
 
@@ -44,16 +44,17 @@ cd app/MeetingCopilot && swift build
 
 - **Audio**: ScreenCaptureKit (meeting) + AVAudioEngine (mic), 16kHz mono PCM
 - **Transcription**: whisper-server local (default), Deepgram cloud (optional)
-- **Intelligence**: Haiku triage (15s cadence) → Sonnet suggestions (on actionable hits)
-- **Workers**: Research, Summary, Analysis (implemented); Mockup, CodeGen (stubs)
+- **Intelligence**: Gemini Flash triage (15s cadence) → Sonnet suggestions. Fallback: Haiku → GPT 5.4 Mini
+- **Workers**: Research, Summary, Analysis, Mockup, CodeGen (all implemented)
+- **UI**: Web dashboard at `/present` (Gruvbox Light theme, JetBrains Mono) served in WKWebView
 - **Storage**: SQLite per session at `~/.meeting-copilot/sessions/<id>/`
 - **Privacy**: No raw audio stored. Consent prompt per session. Visible REC indicator.
 
 ## Environment
 
-- `ANTHROPIC_API_KEY` — required for intelligence + workers
 - `DEEPGRAM_API_KEY` — optional, for cloud transcription
 - `COPILOT_PORT` — TCP port (default: 17890)
+- No API keys required — all AI calls use headless CLIs (`claude`, `gemini`, `codex`) via user subscriptions
 
 ## Golden Commands
 
@@ -63,7 +64,9 @@ cd app/MeetingCopilot && swift build
 cd server && npm run dev                 # Dev with tsx (hot reload)
 cd app/MeetingCopilot && swift build     # Build Swift app
 ./scripts/build-app.sh                   # Release .app bundle
-./scripts/replay.sh                      # Test with fixtures
+./scripts/replay.sh                      # Test with text fixtures
+./scripts/replay-audio.sh <dir> --speed 4 --auto-approve  # Test with real audio
+open "/Applications/Meeting Copilot.app" # Launch packaged app
 ```
 
 ## Critical Invariants (DO NOT BREAK)
@@ -90,6 +93,13 @@ Full list in `.claude/rules/architecture.md`.
 
 ## Recent Learnings
 
+- 2026-03-24: Claude CLI `--output-format json` wraps response in `{"type":"result","result":"..."}` envelope with OSC escape sequences — must strip `\x1b]...\x1b\` and extract `result` field; empty result on `error_max_turns`
+- 2026-03-24: Claude CLI has no `--max-tokens` flag — use `--max-budget-usd` for cost control
+- 2026-03-24: WAV chunks sent to whisper-server need proper 44-byte WAV headers, not raw PCM
+- 2026-03-24: WKWebView needs `NSAllowsLocalNetworking` in Info.plist + health polling before loading localhost URLs
+- 2026-03-24: Gemini 3 Flash Preview is best triage model (42% hit rate, accurate reasoning); Haiku too lenient, GPT 5.4 Mini too eager (100% hit rate)
+- 2026-03-24: CSS `zoom` property via JS works for browser-style Cmd+/- zoom in WKWebView; `allowsMagnification` only does bitmap scaling
+- 2026-03-24: 3-column layout requires fixed-height grid container (`height: calc(100vh - header)`) with each column having independent `overflow-y: auto`
 - 2026-03-10: Shared transcript protocol added — `server/src/session/shared.ts` writes presence + JSONL, notes4chris reads at processing time
 - 2026-03-10: `.app` bundle works — `build-app.sh` produces 45MB bundle; `ProcessSupervisor` prefers bundle path via `isPackaged` check
 - 2026-03-10: `segment.timestamp` is epoch-ms, `segment.duration` is whisper latency — shared.ts converts to session-relative seconds and uses fixed 10s chunk duration

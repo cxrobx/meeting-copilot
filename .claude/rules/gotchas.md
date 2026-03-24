@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 8 items, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 11 items, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -8,12 +8,15 @@ Organized by category. 8 items, condensed format. Original numbering preserved (
 |---|-------|----------|
 | 1 | ScreenCaptureKit permissions | Environment |
 | 2 | whisper-server must be running | Environment |
-| 3 | Large index.ts monolith (partially addressed — WS handlers deduplicated) | Backend |
+| 3 | Large index.ts monolith (partially addressed) | Backend |
 | 4 | TranscriptSegment.timestamp is epoch-ms | Backend |
 | 5 | TranscriptSegment.duration is whisper latency | Backend |
 | 6 | Finder-launched .app has minimal PATH | Environment |
 | 7 | Preflight check endpoint exists | Backend |
 | 8 | JSONL writes use O_APPEND for atomicity | Backend |
+| 9 | Claude CLI JSON output has escape sequences | Backend |
+| 10 | Claude CLI has no --max-tokens flag | Backend |
+| 11 | WKWebView needs health polling before load | Frontend |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
 
@@ -58,6 +61,24 @@ Standard categories: Environment, Database, Backend, Frontend, Security, Deploym
 **Cause**: Apps launched from Finder/Spotlight get a stripped PATH without `/opt/homebrew/bin`
 **Solution**: `ProcessSupervisor.processEnvironment()` injects homebrew paths before launching child processes
 **Pattern**: `app/MeetingCopilot/Sources/Core/Process/ProcessSupervisor.swift:61-70`
+
+### 9. Claude CLI `--output-format json` Has Terminal Escape Sequences
+**Symptom**: Raw JSON blob `{"type":"result",...}` appears in worker output cards
+**Cause**: CLI wraps output in OSC escape sequences (`\x1b]0;...\x1b\`) that break `JSON.parse`. Also, `result` field is empty string on `error_max_turns`.
+**Solution**: Strip escapes with `/\x1b\].*?(?:\x07|\x1b\\)/gs`, find JSON by `indexOf('{')`/`lastIndexOf('}')`, treat empty `result` as fallback.
+**Pattern**: `server/src/claude-cli.ts:62-85`
+
+### 10. Claude CLI Has No `--max-tokens` Flag
+**Symptom**: Every intelligence eval silently fails with "unknown option '--max-tokens'"
+**Cause**: `--max-tokens` is an API parameter, not a CLI flag. CLI uses `--max-budget-usd` for cost control.
+**Solution**: Removed `--max-tokens` from `claudeChat()` args.
+**Pattern**: `server/src/claude-cli.ts:31`
+
+### 11. WKWebView Needs Health Polling Before Loading Localhost
+**Symptom**: Blank white panel on app launch
+**Cause**: WKWebView loads `/present` before the Node server finishes starting. Failed navigation shows blank page, `reload()` does nothing after failed provisional navigation.
+**Solution**: `WebDashboardView.Coordinator.loadWhenReady()` polls `/health` until 200, then loads. Retries on navigation failure with `load(URLRequest(...))` not `reload()`.
+**Pattern**: `app/MeetingCopilot/Sources/Features/WebPanel/WebDashboardView.swift`
 
 ---
 
