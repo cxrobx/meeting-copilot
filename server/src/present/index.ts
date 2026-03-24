@@ -244,11 +244,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
     line-height: 1.6;
     min-height: 100vh;
     font-size: 13px;
+    overflow-x: hidden;
+    max-width: 100vw;
   }
 
   /* ─── Header ───────────────────────────────────────────────── */
   .header {
-    padding: 12px 24px;
+    padding: 10px 20px;
     border-bottom: 1px solid var(--gb-surface2);
     display: flex;
     align-items: center;
@@ -257,6 +259,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     top: 0;
     background: var(--gb-base);
     z-index: 100;
+    height: 50px;
   }
 
   .header-left {
@@ -381,10 +384,19 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .layout {
     display: grid;
     grid-template-columns: 1fr;
-    min-height: calc(100vh - 90px);
+    height: calc(100vh - 50px);
+    overflow: hidden;
+  }
+  .layout .transcript-col,
+  .layout .toc {
+    display: none;
   }
   .layout.three-col {
-    grid-template-columns: 300px 1fr 260px;
+    grid-template-columns: 260px minmax(0, 1fr) 280px;
+  }
+  .layout.three-col .transcript-col,
+  .layout.three-col .toc {
+    display: flex;
   }
 
   @media (max-width: 1400px) {
@@ -403,10 +415,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
     border-right: 1px solid var(--gb-surface2);
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 90px);
-    position: sticky;
-    top: 90px;
     overflow: hidden;
+    min-width: 0;
   }
 
   .transcript-header {
@@ -546,6 +556,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     padding: 24px 32px;
     min-width: 0;
     overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .empty-state {
@@ -609,6 +620,55 @@ const PRESENT_HTML = `<!DOCTYPE html>
     resize: vertical;
   }
   .idle-form input:focus, .idle-form textarea:focus { border-color: var(--gb-blue); }
+
+  .proj-grid {
+    max-height: 180px;
+    overflow-y: auto;
+    border: 1px solid var(--gb-surface2);
+    border-radius: 5px;
+    padding: 8px 10px;
+    background: var(--gb-surface1);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px 16px;
+  }
+  .proj-item {
+    display: flex !important;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    font-size: 12px !important;
+    font-weight: 400 !important;
+    text-transform: none !important;
+    letter-spacing: 0 !important;
+    cursor: pointer;
+    color: var(--gb-text) !important;
+    overflow: hidden;
+  }
+  .proj-item input[type="checkbox"] {
+    accent-color: var(--gb-green);
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+  }
+  .proj-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--gb-text);
+  }
+  .proj-badge {
+    font-size: 8px;
+    font-weight: 700;
+    padding: 1px 4px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    margin-left: auto;
+  }
+  .proj-badge.ios {
+    background: rgba(69,133,136,0.12);
+    color: var(--gb-blue);
+  }
 
   .idle-actions {
     display: flex;
@@ -791,51 +851,51 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   /* ─── TOC Sidebar ──────────────────────────────────────────── */
   .toc {
-    width: 260px;
-    flex-shrink: 0;
+    min-width: 0;
     border-left: 1px solid var(--gb-surface2);
-    position: sticky;
-    top: 90px;
-    height: calc(100vh - 90px);
     overflow-y: auto;
-    padding: 14px 10px;
+    overflow-x: hidden;
+    padding: 14px 16px 14px 12px;
     background: var(--gb-mantle);
     scrollbar-width: thin;
     scrollbar-color: var(--gb-overlay0) transparent;
+    word-break: break-word;
+    display: flex;
+    flex-direction: column;
   }
   .toc::-webkit-scrollbar { width: 4px; }
   .toc::-webkit-scrollbar-thumb { background: var(--gb-overlay0); border-radius: 2px; }
 
   .toc-title {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.06em;
     color: var(--gb-overlay2);
     margin-bottom: 10px;
-    padding-left: 6px;
+    padding: 0 4px;
+    white-space: nowrap;
   }
 
-  .toc-section { margin-bottom: 2px; }
+  .toc-section { margin-bottom: 2px; overflow: hidden; }
 
   .toc-card-title {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px 6px;
+    padding: 4px;
     border-radius: 4px;
     font-size: 11px;
     font-weight: 600;
     color: var(--gb-subtext1);
     cursor: pointer;
     transition: background 0.12s;
+    line-height: 1.4;
   }
   .toc-card-title:hover { background: var(--gb-surface1); }
   .toc-card-title.active { background: var(--gb-surface1); color: var(--gb-text); }
 
   .toc-badge {
     font-size: 8px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.04em; padding: 1px 4px; border-radius: 3px; flex-shrink: 0;
+    letter-spacing: 0.04em; padding: 1px 4px; border-radius: 3px;
+    display: inline; vertical-align: middle; margin-right: 3px;
   }
   .toc-badge.research { background: rgba(152,151,26,0.15); color: var(--gb-green); }
   .toc-badge.summary { background: rgba(215,153,33,0.15); color: var(--gb-yellow); }
@@ -845,16 +905,14 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   .toc-heading {
     display: block;
-    padding: 1px 6px 1px 18px;
+    padding: 2px 4px 2px 20px;
     font-size: 11px;
     color: var(--gb-subtext0);
     cursor: pointer;
     transition: color 0.12s, background 0.12s;
     border-radius: 3px;
     text-decoration: none;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    line-height: 1.4;
   }
   .toc-heading.depth-3 { padding-left: 28px; }
   .toc-heading:hover { color: var(--gb-subtext1); background: var(--gb-surface1); }
@@ -958,6 +1016,16 @@ const PRESENT_HTML = `<!DOCTYPE html>
   var autoScroll = true;
   var actionCards = new Map();
   var headingIdCounter = 0;
+  var availableProjects = [];
+  var availableContextSources = [];
+
+  // Pre-fetch projects and context sources for the start form
+  fetch('/projects').then(function(r) { return r.json(); }).then(function(d) {
+    availableProjects = d.projects || [];
+  }).catch(function() {});
+  fetch('/context-sources').then(function(r) { return r.json(); }).then(function(d) {
+    availableContextSources = d.items || [];
+  }).catch(function() {});
 
   // ─── Signal Detection ──────────────────────────────────────
   var actionMarkers = ['action item','follow up','next step','send','share','create','draft','schedule','update','write','review','prepare','need to',"let's",'we should',"i'll",'i will','can you','could you','own that','take that'];
@@ -1084,17 +1152,55 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
 
   function showIdleState() {
-    idleOverlay.innerHTML = '<div class="idle-overlay"><div class="idle-card">' +
+    var wsConnected = ws && ws.readyState === WebSocket.OPEN;
+    var btnDisabled = wsConnected ? '' : ' disabled';
+    var statusMsg = wsConnected ? '' : '<p style="color:var(--gb-red);font-size:11px;margin-top:8px">Connecting to server...</p>';
+
+    // Build project checkboxes
+    var projectsHtml = '';
+    if (availableProjects.length > 0) {
+      projectsHtml = '<label>Projects <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>' +
+        '<div class="proj-grid">';
+      availableProjects.forEach(function(p) {
+        var badge = p.category === 'xcode' ? ' <span class="proj-badge ios">iOS</span>' : '';
+        projectsHtml += '<label class="proj-item">' +
+          '<input type="checkbox" class="proj-cb" value="' + escapeHtml(p.name) + '">' +
+          '<span class="proj-name">' + escapeHtml(p.name) + '</span>' + badge +
+        '</label>';
+      });
+      projectsHtml += '</div>';
+    }
+
+    // Build context sources
+    var contextHtml = '';
+    if (availableContextSources.length > 0) {
+      contextHtml = '<label>Reference Docs <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>' +
+        '<div style="max-height:100px;overflow-y:auto;border:1px solid var(--gb-surface2);border-radius:5px;padding:6px 8px;background:var(--gb-surface1)">';
+      availableContextSources.forEach(function(s) {
+        var icon = s.type === 'folder' ? 'folder' : 'file';
+        contextHtml += '<label style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:12px;text-transform:none;letter-spacing:0;cursor:pointer">' +
+          '<input type="checkbox" class="ctx-cb" value="' + escapeHtml(s.path) + '" checked style="accent-color:var(--gb-green)">' +
+          '<span style="color:var(--gb-text)">' + escapeHtml(s.displayName || s.path.split('/').pop()) + '</span>' +
+          '<span style="color:var(--gb-overlay1);font-size:10px;margin-left:auto">' + icon + '</span>' +
+        '</label>';
+      });
+      contextHtml += '</div>';
+    }
+
+    idleOverlay.innerHTML = '<div class="idle-overlay"><div class="idle-card" style="max-width:500px">' +
       '<h2>No Active Meeting</h2>' +
       '<p>Start a session to begin capturing and analyzing your meeting.</p>' +
       '<div class="idle-form">' +
         '<label>Title</label><input id="startTitle" placeholder="Weekly sync, 1:1, etc.">' +
         '<label>Agenda</label><textarea id="startAgenda" rows="2" placeholder="Topics to discuss..."><\\/textarea>' +
         '<label>Attendees</label><input id="startAttendees" placeholder="Chris, Alex, Sam">' +
+        projectsHtml +
+        contextHtml +
       '</div>' +
       '<div class="idle-actions">' +
-        '<button class="btn btn-green" onclick="startSession()">Start Session</button>' +
+        '<button class="btn btn-green" id="startBtn" onclick="startSession()"' + btnDisabled + '>Start Session</button>' +
       '</div>' +
+      statusMsg +
       '<span class="sessions-link" onclick="showSessionHistory()">View Past Sessions</span>' +
     '</div></div>';
   }
@@ -1116,10 +1222,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
     if (sessionState === 'live' || sessionState === 'degraded') {
       wsSend({ type: 'session.stop' });
     } else {
-      // Open the idle form if not visible
-      if (!document.getElementById('startTitle')) {
-        showIdleState();
-      }
+      // Start with values from form if available, otherwise empty
+      startSession();
     }
   };
 
@@ -1127,12 +1231,28 @@ const PRESENT_HTML = `<!DOCTYPE html>
     var title = (document.getElementById('startTitle') || {}).value || '';
     var agenda = (document.getElementById('startAgenda') || {}).value || '';
     var attendees = (document.getElementById('startAttendees') || {}).value || '';
-    wsSend({
+
+    // Collect selected projects
+    var selectedProjects = [];
+    document.querySelectorAll('.proj-cb:checked').forEach(function(cb) {
+      selectedProjects.push(cb.value);
+    });
+
+    // Collect selected context paths
+    var selectedContextPaths = [];
+    document.querySelectorAll('.ctx-cb:checked').forEach(function(cb) {
+      selectedContextPaths.push(cb.value);
+    });
+
+    var msg = {
       type: 'session.start',
       title: title || undefined,
       agenda: agenda || undefined,
       attendees: attendees || undefined,
-    });
+      projectNames: selectedProjects.length ? selectedProjects : undefined,
+      contextPaths: selectedContextPaths.length ? selectedContextPaths : undefined,
+    };
+    wsSend(msg);
   };
 
   window.triggerAction = function(type) {
@@ -1288,7 +1408,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       }
       var label = document.createElement('span');
       label.textContent = titleEl.textContent;
-      label.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+      label.style.cssText = '';
       cardLink.appendChild(label);
       cardLink.addEventListener('click', function() {
         document.getElementById(card.id).scrollIntoView({ behavior:'smooth', block:'start' });
@@ -1341,20 +1461,45 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   // ─── Session History ──────────────────────────────────────
   window.showSessionHistory = function() {
-    idleOverlay.innerHTML = '<div style="padding:20px"><h3 style="font-size:14px;font-weight:700;margin-bottom:14px">Past Sessions</h3><div id="sessionListItems">Loading...</div><div style="margin-top:14px"><span class="sessions-link" onclick="updateUI()">Back</span></div></div>';
+    idleOverlay.innerHTML = '<div class="idle-overlay"><div class="idle-card" style="max-width:560px">' +
+      '<h2>Past Sessions</h2>' +
+      '<p>Review previous meetings and their generated outputs.</p>' +
+      '<div id="sessionListItems" style="margin:16px 0"><p style="color:var(--gb-overlay2)">Loading...</p></div>' +
+      '<button class="btn btn-ghost" onclick="updateUI()">Back</button>' +
+    '</div></div>';
+
     fetch('/present/sessions').then(function(r) { return r.json(); }).then(function(data) {
       var el = document.getElementById('sessionListItems');
       if (!el) return;
-      if (!data.sessions || data.sessions.length === 0) { el.textContent = 'No sessions found.'; return; }
+      if (!data.sessions || data.sessions.length === 0) {
+        el.innerHTML = '<p style="color:var(--gb-overlay2);text-align:center;padding:20px">No sessions found.</p>';
+        return;
+      }
       el.innerHTML = '';
       data.sessions.forEach(function(s) {
+        var date = s.startedAt ? new Date(s.startedAt) : null;
+        var endDate = s.endedAt ? new Date(s.endedAt) : null;
+        var duration = '';
+        if (date && endDate) {
+          var mins = Math.round((endDate - date) / 60000);
+          duration = mins >= 60 ? Math.floor(mins/60) + 'h ' + (mins%60) + 'm' : mins + ' min';
+        }
+
         var item = document.createElement('div');
         item.className = 'session-item';
         item.onclick = function() { window.location.href = '/present?session=' + s.id; };
-        var date = s.startedAt ? new Date(s.startedAt) : null;
-        item.innerHTML = '<div><div class="session-item-title">' + escapeHtml(s.title) + '</div>' +
-          '<div class="session-item-meta">' + (date ? date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : 'Unknown date') + '</div></div>' +
-          '<div class="session-item-stats">' + (s.actionCount || 0) + ' actions<br>' + (s.segmentCount || 0) + ' segments</div>';
+        item.innerHTML = '<div style="min-width:0">' +
+          '<div class="session-item-title">' + escapeHtml(s.title) + '</div>' +
+          '<div class="session-item-meta">' +
+            (date ? date.toLocaleDateString([], {month:'short',day:'numeric',year:'numeric'}) + ' at ' +
+              date.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : 'Unknown date') +
+            (duration ? '  &middot;  ' + duration : '') +
+          '</div>' +
+        '</div>' +
+        '<div class="session-item-stats">' +
+          '<div>' + (s.actionCount || 0) + ' actions</div>' +
+          '<div>' + (s.segmentCount || 0) + ' segments</div>' +
+        '</div>';
         el.appendChild(item);
       });
     });
@@ -1365,7 +1510,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
   var maxRetries = 20;
 
   function wsSend(msg) {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+    } else {
+      console.warn('[WS] Not connected, cannot send:', msg.type);
+      // Try reconnecting
+      if (!ws || ws.readyState === WebSocket.CLOSED) connectWS();
+    }
   }
 
   function connectWS() {
@@ -1377,6 +1528,11 @@ const PRESENT_HTML = `<!DOCTYPE html>
     ws.onopen = function() {
       wsRetries = 0;
       statusDot.className = 'status-dot connected';
+      // Enable start button if on idle screen
+      var startBtn = document.getElementById('startBtn');
+      if (startBtn) startBtn.disabled = false;
+      var connMsg = idleOverlay.querySelector('p[style*="red"]');
+      if (connMsg) connMsg.remove();
       // Check current session state
       fetch('/health').then(function(r) { return r.json(); }).then(function(d) {
         if (d.session) {
@@ -1391,6 +1547,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
               segments = [];
               totalWords = 0; micWords = 0; meetingWords = 0;
               t.segments.forEach(function(seg) { addSegment(seg); });
+              setTimeout(function() { transcriptFeed.scrollTop = transcriptFeed.scrollHeight; }, 100);
             }
           }).catch(function() {});
         }
@@ -1493,7 +1650,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
         if (data.actions && data.actions.length > 0) {
           data.actions.forEach(renderAction);
         }
-        headerTitle.textContent = (data.actions && data.actions.length > 0) ? 'Session Replay' : '';
+        headerTitle.innerHTML = '<span style="cursor:pointer;color:var(--gb-blue);margin-right:8px" onclick="window.location.href=\\'/present\\'">&larr; Back</span> Session Replay';
       });
 
     // Load transcript
@@ -1503,6 +1660,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
         if (data.segments) {
           sessionStartTime = data.startedAt || (data.segments.length > 0 ? data.segments[0].timestamp : null);
           data.segments.forEach(function(seg) { addSegment(seg); });
+          // Scroll transcript to bottom for replay (delay for DOM render)
+          setTimeout(function() { transcriptFeed.scrollTop = transcriptFeed.scrollHeight; }, 100);
           sessionTimerEl.textContent = segments.length > 0 ? formatDuration(
             (segments[segments.length-1].timestamp || 0) - (sessionStartTime || 0)
           ) : '';
