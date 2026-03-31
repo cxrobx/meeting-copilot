@@ -1249,7 +1249,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
           '<span class="ctx-icon">' + icon + '</span>' +
           '<span class="ctx-name">' + escapeHtml(name) + '</span>' +
           '<span class="ctx-path" title="' + escapeHtml(s.path) + '">' + escapeHtml(shortPath) + '</span>' +
-          '<button class="ctx-remove" onclick="removeContextSource(\'' + escapeHtml(s.path).replace(/'/g, "\\'") + '\')" title="Remove">\u00D7</button>' +
+          '<button class="ctx-remove" onclick="removeContextSource(\\'' + escapeHtml(s.path).replace(/'/g, "\\\\'") + '\\')" title="Remove">\u00D7</button>' +
         '</div>';
       });
       html += '</div>';
@@ -1259,15 +1259,15 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
     if (ctxAddingType) {
       html += '<div class="ctx-input-row">' +
-        '<input id="ctxPathInput" placeholder="' + (ctxAddingType === 'folder' ? '/path/to/folder — or drag from Finder' : '/path/to/file.md — or drag from Finder') + '" onkeydown="if(event.key===\'Enter\')submitContextSource();if(event.key===\'Escape\')cancelAddContext()">' +
+        '<input id="ctxPathInput" placeholder="' + (ctxAddingType === 'folder' ? '/path/to/folder — or drag from Finder' : '/path/to/file.md — or drag from Finder') + '" onkeydown="if(event.key===\\'Enter\\')submitContextSource();if(event.key===\\'Escape\\')cancelAddContext()">' +
         '<button class="ctx-submit" onclick="submitContextSource()">Add</button>' +
         '<button class="ctx-cancel" onclick="cancelAddContext()">Cancel</button>' +
       '</div>';
       if (ctxError) html += '<div class="ctx-error">' + escapeHtml(ctxError) + '</div>';
     } else {
       html += '<div class="ctx-add-row">' +
-        '<button class="ctx-add-btn" onclick="showAddContext(\'folder\')">+ Add Folder</button>' +
-        '<button class="ctx-add-btn" onclick="showAddContext(\'file\')">+ Add File</button>' +
+        '<button class="ctx-add-btn" onclick="showAddContext(\\'folder\\')">+ Add Folder</button>' +
+        '<button class="ctx-add-btn" onclick="showAddContext(\\'file\\')">+ Add File</button>' +
       '</div>';
     }
 
