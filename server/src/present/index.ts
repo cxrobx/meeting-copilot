@@ -670,6 +670,127 @@ const PRESENT_HTML = `<!DOCTYPE html>
     color: var(--gb-blue);
   }
 
+  /* Context manager */
+  .ctx-section { margin-top: 10px; }
+  .ctx-list {
+    max-height: 140px;
+    overflow-y: auto;
+    border: 1px solid var(--gb-surface2);
+    border-radius: 5px;
+    padding: 4px 8px;
+    background: var(--gb-surface1);
+  }
+  .ctx-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 0;
+    font-size: 12px;
+    border-bottom: 1px solid var(--gb-surface2);
+  }
+  .ctx-item:last-child { border-bottom: none; }
+  .ctx-item input[type="checkbox"] {
+    accent-color: var(--gb-green);
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+  }
+  .ctx-icon {
+    font-size: 11px;
+    color: var(--gb-overlay2);
+    flex-shrink: 0;
+    width: 14px;
+    text-align: center;
+  }
+  .ctx-name {
+    color: var(--gb-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+  }
+  .ctx-path {
+    color: var(--gb-overlay1);
+    font-size: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
+    flex-shrink: 1;
+  }
+  .ctx-remove {
+    background: none;
+    border: none;
+    color: var(--gb-overlay1);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+    flex-shrink: 0;
+    border-radius: 3px;
+  }
+  .ctx-remove:hover { color: var(--gb-red); background: rgba(204,36,29,0.08); }
+  .ctx-add-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .ctx-add-btn {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 4px 10px;
+    border: 1px dashed var(--gb-surface2);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--gb-overlay2);
+    cursor: pointer;
+    flex: 1;
+  }
+  .ctx-add-btn:hover { border-color: var(--gb-blue); color: var(--gb-blue); }
+  .ctx-input-row {
+    display: flex;
+    gap: 4px;
+    margin-top: 6px;
+  }
+  .ctx-input-row input {
+    flex: 1;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 5px 8px;
+    border: 1px solid var(--gb-blue);
+    border-radius: 5px;
+    background: var(--gb-surface1);
+    color: var(--gb-text);
+    outline: none;
+  }
+  .ctx-input-row button {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 4px 8px;
+    border-radius: 5px;
+    border: none;
+    cursor: pointer;
+  }
+  .ctx-input-row .ctx-submit { background: var(--gb-green); color: var(--gb-bg); }
+  .ctx-input-row .ctx-cancel { background: var(--gb-surface2); color: var(--gb-text); }
+  .ctx-empty {
+    color: var(--gb-overlay1);
+    font-size: 11px;
+    font-style: italic;
+    padding: 8px 0;
+    text-align: center;
+  }
+  .ctx-error {
+    color: var(--gb-red);
+    font-size: 11px;
+    margin-top: 4px;
+  }
+  .ctx-input-row input.drag-over {
+    border-color: var(--gb-green);
+    background: rgba(152,151,26,0.06);
+  }
+
   .idle-actions {
     display: flex;
     gap: 10px;
@@ -1027,6 +1148,132 @@ const PRESENT_HTML = `<!DOCTYPE html>
     availableContextSources = d.items || [];
   }).catch(function() {});
 
+  // ─── Context Source Management ─────────────────────────────
+  var ctxAddingType = null; // 'file' or 'folder' when input is visible
+  var ctxError = ''; // error message to display
+
+  window.refreshContextSources = function() {
+    return fetch('/context-sources').then(function(r) { return r.json(); }).then(function(d) {
+      availableContextSources = d.items || [];
+      if (sessionState === 'idle' && !isReplay) renderContextList();
+    }).catch(function() {});
+  };
+
+  window.showAddContext = function(type) {
+    ctxAddingType = type;
+    ctxError = '';
+    renderContextList();
+    var input = document.getElementById('ctxPathInput');
+    if (input) {
+      input.focus();
+      // Drag-and-drop: extract file path from dragged Finder items
+      input.addEventListener('dragover', function(e) { e.preventDefault(); input.classList.add('drag-over'); });
+      input.addEventListener('dragleave', function() { input.classList.remove('drag-over'); });
+      input.addEventListener('drop', function(e) {
+        e.preventDefault();
+        input.classList.remove('drag-over');
+        // Try to get file path from drag data
+        var files = e.dataTransfer && e.dataTransfer.files;
+        if (files && files.length > 0) {
+          // In WKWebView/Electron, file.path gives the full path; in browsers, file.name is all we get
+          var path = files[0].path || files[0].name;
+          if (path) input.value = path;
+        } else {
+          var text = e.dataTransfer && e.dataTransfer.getData('text/plain');
+          if (text) input.value = text.trim();
+        }
+      });
+    }
+  };
+
+  window.cancelAddContext = function() {
+    ctxAddingType = null;
+    ctxError = '';
+    renderContextList();
+  };
+
+  window.submitContextSource = function() {
+    var input = document.getElementById('ctxPathInput');
+    if (!input) return;
+    var path = input.value.trim();
+    // Client-side validation
+    if (!path) { ctxError = 'Please enter a path'; renderContextList(); return; }
+    if (!path.startsWith('/') && !path.startsWith('~')) { ctxError = 'Path must be absolute (start with / or ~)'; renderContextList(); return; }
+    ctxError = '';
+    fetch('/context-sources/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: path, type: ctxAddingType || 'folder' })
+    }).then(function(r) {
+      return r.json().then(function(d) { return { ok: r.ok, data: d }; });
+    }).then(function(res) {
+      if (!res.ok || res.data.error) {
+        ctxError = res.data.error || 'Failed to add — check that the path exists';
+        renderContextList();
+        return;
+      }
+      if (res.data.items) availableContextSources = res.data.items;
+      ctxAddingType = null;
+      ctxError = '';
+      renderContextList();
+    }).catch(function() {
+      ctxError = 'Network error — is the server running?';
+      renderContextList();
+    });
+  };
+
+  window.removeContextSource = function(path) {
+    fetch('/context-sources', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: path })
+    }).then(function(r) { return r.json(); }).then(function(d) {
+      if (d.items) availableContextSources = d.items;
+      renderContextList();
+    }).catch(function() {});
+  };
+
+  function renderContextList() {
+    var container = document.getElementById('ctxContainer');
+    if (!container) return;
+
+    var html = '';
+    if (availableContextSources.length > 0) {
+      html += '<div class="ctx-list">';
+      availableContextSources.forEach(function(s) {
+        var icon = s.type === 'folder' ? '\uD83D\uDCC1' : '\uD83D\uDCC4';
+        var name = s.label || s.path.split('/').pop();
+        var shortPath = s.path.replace(/^\\/Users\\/[^\\/]+/, '~');
+        html += '<div class="ctx-item">' +
+          '<input type="checkbox" class="ctx-cb" value="' + escapeHtml(s.path) + '" checked>' +
+          '<span class="ctx-icon">' + icon + '</span>' +
+          '<span class="ctx-name">' + escapeHtml(name) + '</span>' +
+          '<span class="ctx-path" title="' + escapeHtml(s.path) + '">' + escapeHtml(shortPath) + '</span>' +
+          '<button class="ctx-remove" onclick="removeContextSource(\'' + escapeHtml(s.path).replace(/'/g, "\\'") + '\')" title="Remove">\u00D7</button>' +
+        '</div>';
+      });
+      html += '</div>';
+    } else if (!ctxAddingType) {
+      html += '<div class="ctx-empty">No context sources added yet</div>';
+    }
+
+    if (ctxAddingType) {
+      html += '<div class="ctx-input-row">' +
+        '<input id="ctxPathInput" placeholder="' + (ctxAddingType === 'folder' ? '/path/to/folder — or drag from Finder' : '/path/to/file.md — or drag from Finder') + '" onkeydown="if(event.key===\'Enter\')submitContextSource();if(event.key===\'Escape\')cancelAddContext()">' +
+        '<button class="ctx-submit" onclick="submitContextSource()">Add</button>' +
+        '<button class="ctx-cancel" onclick="cancelAddContext()">Cancel</button>' +
+      '</div>';
+      if (ctxError) html += '<div class="ctx-error">' + escapeHtml(ctxError) + '</div>';
+    } else {
+      html += '<div class="ctx-add-row">' +
+        '<button class="ctx-add-btn" onclick="showAddContext(\'folder\')">+ Add Folder</button>' +
+        '<button class="ctx-add-btn" onclick="showAddContext(\'file\')">+ Add File</button>' +
+      '</div>';
+    }
+
+    container.innerHTML = html;
+  }
+
   // ─── Signal Detection ──────────────────────────────────────
   var actionMarkers = ['action item','follow up','next step','send','share','create','draft','schedule','update','write','review','prepare','need to',"let's",'we should',"i'll",'i will','can you','could you','own that','take that'];
   var decisionMarkers = ['we decided','decision','agreed','approved',"we'll go with","let's do",'locking','move forward with','ship this','finalize'];
@@ -1171,21 +1418,11 @@ const PRESENT_HTML = `<!DOCTYPE html>
       projectsHtml += '</div>';
     }
 
-    // Build context sources
-    var contextHtml = '';
-    if (availableContextSources.length > 0) {
-      contextHtml = '<label>Reference Docs <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>' +
-        '<div style="max-height:100px;overflow-y:auto;border:1px solid var(--gb-surface2);border-radius:5px;padding:6px 8px;background:var(--gb-surface1)">';
-      availableContextSources.forEach(function(s) {
-        var icon = s.type === 'folder' ? 'folder' : 'file';
-        contextHtml += '<label style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:12px;text-transform:none;letter-spacing:0;cursor:pointer">' +
-          '<input type="checkbox" class="ctx-cb" value="' + escapeHtml(s.path) + '" checked style="accent-color:var(--gb-green)">' +
-          '<span style="color:var(--gb-text)">' + escapeHtml(s.displayName || s.path.split('/').pop()) + '</span>' +
-          '<span style="color:var(--gb-overlay1);font-size:10px;margin-left:auto">' + icon + '</span>' +
-        '</label>';
-      });
-      contextHtml += '</div>';
-    }
+    // Context sources section — always visible with add/remove UI
+    var contextHtml = '<div class="ctx-section">' +
+      '<label>Context Files &amp; Folders <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>' +
+      '<div id="ctxContainer"></div>' +
+    '</div>';
 
     idleOverlay.innerHTML = '<div class="idle-overlay"><div class="idle-card" style="max-width:500px">' +
       '<h2>No Active Meeting</h2>' +
@@ -1203,6 +1440,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
       statusMsg +
       '<span class="sessions-link" onclick="showSessionHistory()">View Past Sessions</span>' +
     '</div></div>';
+
+    // Populate context list after DOM is built
+    renderContextList();
   }
 
   function showQuickActions() {
