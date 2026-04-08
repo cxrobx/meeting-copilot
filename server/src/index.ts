@@ -19,6 +19,7 @@ import { TranscriptionService } from './transcription/index.js';
 import { IntelligenceEngine } from './intelligence/index.js';
 import { WorkerRegistry } from './workers/registry.js';
 import { ResearchWorker } from './workers/research.js';
+import { FastResearchWorker } from './workers/fast-research.js';
 import { SummaryWorker } from './workers/summary.js';
 import { MockupWorker } from './workers/mockup.js';
 import { CodeGenWorker } from './workers/codegen.js';
@@ -99,6 +100,11 @@ type OutboundMessage =
       result?: any;
     }
   | {
+      type: 'action.stream';
+      actionId: string;
+      delta: string;
+    }
+  | {
       type: 'session.state';
       state: 'idle' | 'priming' | 'live' | 'degraded' | 'ending' | 'error' | 'archived';
       sessionId?: string;
@@ -131,6 +137,7 @@ const debug = new DebugHandler(transcription, intelligence, registry);
 
 // Register workers
 registry.register(new ResearchWorker());
+registry.register(new FastResearchWorker());
 registry.register(new SummaryWorker());
 registry.register(new MockupWorker());
 registry.register(new CodeGenWorker());
@@ -531,7 +538,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       }
 
       const window = intelligence.getTranscriptWindow();
-      const actionType = message.actionType as 'research' | 'summary' | 'mockup' | 'codegen' | 'analysis';
+      const actionType = message.actionType as 'research' | 'fast-research' | 'summary' | 'mockup' | 'codegen' | 'analysis';
       const description = message.prompt ?? `Manual ${actionType} on current transcript`;
 
       const suggestion: ActionSuggestion = {
@@ -545,6 +552,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         params: (() => {
           switch (actionType) {
             case 'research':
+            case 'fast-research':
               return {
                 query: message.prompt || 'Research topics from current discussion',
                 context: window,
@@ -736,6 +744,10 @@ registry.on('action.status', (action: ActionLifecycle) => {
     state: action.state,
     result: action.result,
   });
+});
+
+registry.on('action.stream', ({ actionId, delta }: { actionId: string; delta: string }) => {
+  broadcast({ type: 'action.stream', actionId, delta });
 });
 
 registry.on('action.completed', (action: ActionLifecycle) => {

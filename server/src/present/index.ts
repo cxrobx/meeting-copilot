@@ -131,16 +131,22 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
   });
 
   // ─── GET /present/sessions — list available sessions ────────────────
-  router.get('/present/sessions', (_req, res) => {
+  // ?all=1 includes empty/orphan sessions (for cleanup)
+  router.get('/present/sessions', (req, res) => {
     const sessionsDir = join(homedir(), '.meeting-copilot', 'sessions');
+    const includeAll = req.query.all === '1';
     try {
-      const dirs = existsSync(sessionsDir)
-        ? readdirSync(sessionsDir).filter((d) => {
-            return existsSync(join(sessionsDir, d, 'session.db'));
-          })
+      const allDirs = existsSync(sessionsDir)
+        ? readdirSync(sessionsDir, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => d.name)
         : [];
 
-      const sessions = dirs.map((id: string) => {
+      const sessions = allDirs.map((id: string) => {
+        const hasDb = existsSync(join(sessionsDir, id, 'session.db'));
+        if (!hasDb) {
+          return { id, title: '(Empty session)', startedAt: null, endedAt: null, actionCount: 0, segmentCount: 0, empty: true };
+        }
         try {
           const db = new Database(join(sessionsDir, id, 'session.db'), { readonly: true });
           const row = db.prepare('SELECT title, startedAt, endedAt FROM session LIMIT 1').get() as { title?: string; startedAt?: number; endedAt?: number } | undefined;
@@ -154,11 +160,12 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
             endedAt: row?.endedAt ? new Date(row.endedAt).toISOString() : null,
             actionCount,
             segmentCount,
+            empty: false,
           };
         } catch {
-          return { id, title: 'Untitled', startedAt: null, endedAt: null, actionCount: 0, segmentCount: 0 };
+          return { id, title: 'Untitled', startedAt: null, endedAt: null, actionCount: 0, segmentCount: 0, empty: false };
         }
-      }).filter((s: any) => s.actionCount > 0 || s.segmentCount > 0)
+      }).filter((s: any) => includeAll || s.actionCount > 0 || s.segmentCount > 0)
         .sort((a: any, b: any) => (b.startedAt ?? '').localeCompare(a.startedAt ?? ''));
 
       res.json({ sessions });
@@ -835,6 +842,29 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .session-item-title { font-weight: 600; color: var(--gb-text); font-size: 13px; }
   .session-item-meta { font-size: 11px; color: var(--gb-subtext0); }
   .session-item-stats { font-size: 10px; color: var(--gb-overlay2); text-align: right; }
+  .session-delete-btn {
+    background: none; border: none; color: var(--gb-overlay2); cursor: pointer;
+    font-size: 14px; padding: 4px 8px; border-radius: 4px; transition: all 0.15s;
+    flex-shrink: 0; margin-left: 8px;
+  }
+  .session-delete-btn:hover { background: var(--gb-red); color: #fff; }
+  .session-toolbar {
+    display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;
+  }
+  .session-toolbar .btn-sm {
+    font-size: 11px; padding: 4px 10px; border-radius: 4px;
+  }
+  .session-select-cb { margin-right: 10px; flex-shrink: 0; cursor: pointer; accent-color: var(--gb-blue); }
+  .session-bulk-bar {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+    background: var(--gb-surface1); border-radius: 6px; margin-bottom: 10px; font-size: 12px;
+  }
+  .session-confirm-bar {
+    display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+    background: #fbeaea; border: 1px solid var(--gb-red); border-radius: 6px;
+    margin-bottom: 10px; font-size: 12px; color: var(--gb-text);
+  }
+  .session-confirm-bar .btn { font-size: 11px; padding: 4px 12px; }
 
   /* ─── Quick Actions ────────────────────────────────────────── */
   .quick-actions {
@@ -1053,6 +1083,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   <div class="header-right">
     <span class="state-pill idle" id="statePill">Idle</span>
     <span class="session-timer" id="sessionTimer"></span>
+    <button class="btn btn-ghost" id="newMeetingBtn" style="display:none" onclick="newMeeting()">&larr; New Meeting</button>
     <button class="btn btn-green" id="startStopBtn" style="display:none" onclick="toggleSession()">Start</button>
   </div>
 </div>
@@ -1107,6 +1138,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   var statePill = document.getElementById('statePill');
   var sessionTimerEl = document.getElementById('sessionTimer');
   var startStopBtn = document.getElementById('startStopBtn');
+  var newMeetingBtn = document.getElementById('newMeetingBtn');
   var statsBar = document.getElementById('statsBar');
   var layout = document.getElementById('layout');
   var transcriptCol = document.getElementById('transcriptCol');
@@ -1363,15 +1395,24 @@ const PRESENT_HTML = `<!DOCTYPE html>
     // Header title
     headerTitle.textContent = sessionTitle || '';
 
-    // Start/Stop button
+    // Start/Stop button + New Meeting button
     if (!isReplay) {
-      startStopBtn.style.display = '';
-      if (sessionState === 'live' || sessionState === 'degraded') {
-        startStopBtn.textContent = 'Stop';
-        startStopBtn.className = 'btn btn-red';
+      if (sessionState === 'archived') {
+        // After a session ends, the setup form is no longer in the DOM, so the
+        // header Start would launch a session with empty metadata. Hide it and
+        // show "← New Meeting" instead, which resets back to the idle setup screen.
+        startStopBtn.style.display = 'none';
+        newMeetingBtn.style.display = '';
       } else {
-        startStopBtn.textContent = 'Start';
-        startStopBtn.className = 'btn btn-green';
+        newMeetingBtn.style.display = 'none';
+        startStopBtn.style.display = '';
+        if (sessionState === 'live' || sessionState === 'degraded') {
+          startStopBtn.textContent = 'Stop';
+          startStopBtn.className = 'btn btn-red';
+        } else {
+          startStopBtn.textContent = 'Start';
+          startStopBtn.className = 'btn btn-green';
+        }
       }
     }
 
@@ -1450,6 +1491,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       '<div class="quick-actions-title">Quick Actions</div>' +
       '<input class="quick-actions-input" id="quickPrompt" placeholder="Topic or prompt (optional)...">' +
       '<div class="quick-actions-row">' +
+        '<button class="btn btn-ghost" onclick="triggerAction(\\'fast-research\\')" title="Haiku, streaming">\u26A1 Fast</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'research\\')">Research</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'summary\\')">Summary</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'analysis\\')">Analysis</button>' +
@@ -1458,6 +1500,23 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
 
   // ─── Session Controls ─────────────────────────────────────
+  window.newMeeting = function() {
+    // Reset client-side state from archived → idle so the setup form re-renders.
+    // Server is already idle/archived; the next session.start will move it forward.
+    sessionState = 'idle';
+    sessionTitle = '';
+    sessionStartTime = null;
+    actionCards.clear();
+    resultsEl.innerHTML = '';
+    tocEntries.innerHTML = '';
+    transcriptFeed.innerHTML = '';
+    segments = [];
+    totalWords = 0; micWords = 0; meetingWords = 0;
+    segCountEl.textContent = '0';
+    sessionTimerEl.textContent = '';
+    updateUI();
+  };
+
   window.toggleSession = function() {
     if (sessionState === 'live' || sessionState === 'degraded') {
       wsSend({ type: 'session.stop' });
@@ -1600,9 +1659,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
       if (isReplay) {
         body = '<div class="card-body"><p style="color:var(--gb-overlay2)">Did not complete during session.</p></div>';
       } else {
-        body = '<div class="card-body"><span class="spinner"></span> Running...';
-        body += '<div class="card-actions"><button class="btn btn-ghost-red" onclick="cancelAction(\\'' + action.id + '\\')">Cancel</button></div>';
-        body += '</div>';
+        // Streaming-ready running body: placeholder shown until first delta,
+        // then the streaming-text div is appended to by the action.stream handler.
+        body = '<div class="card-body">' +
+          '<div class="streaming-placeholder"><span class="spinner"></span> Running...</div>' +
+          '<div class="streaming-text" style="white-space:pre-wrap;font-family:\\'JetBrains Mono\\',monospace;font-size:12px;line-height:1.5;color:var(--gb-text)"></div>' +
+          '<div class="card-actions"><button class="btn btn-ghost-red" onclick="cancelAction(\\'' + action.id + '\\')">Cancel</button></div>' +
+        '</div>';
       }
     } else if (action.result && action.result.artifacts && action.result.artifacts.length > 0) {
       body = '<div class="card-body">';
@@ -1702,19 +1765,35 @@ const PRESENT_HTML = `<!DOCTYPE html>
   });
 
   // ─── Session History ──────────────────────────────────────
+  var sessionManageMode = false;
+
   window.showSessionHistory = function() {
+    sessionManageMode = false;
     idleOverlay.innerHTML = '<div class="idle-overlay"><div class="idle-card" style="max-width:560px">' +
       '<h2>Past Sessions</h2>' +
-      '<p>Review previous meetings and their generated outputs.</p>' +
-      '<div id="sessionListItems" style="margin:16px 0"><p style="color:var(--gb-overlay2)">Loading...</p></div>' +
+      '<div class="session-toolbar">' +
+        '<p style="margin:0">Review or manage previous meetings.</p>' +
+        '<button class="btn btn-ghost btn-sm" id="manageToggle" onclick="toggleManageMode()">Manage</button>' +
+      '</div>' +
+      '<div id="sessionBulkBar" style="display:none"></div>' +
+      '<div id="sessionListItems" style="margin:8px 0"><p style="color:var(--gb-overlay2)">Loading...</p></div>' +
       '<button class="btn btn-ghost" onclick="updateUI()">Back</button>' +
     '</div></div>';
 
-    fetch('/present/sessions').then(function(r) { return r.json(); }).then(function(data) {
+    loadSessionList();
+  };
+
+  function loadSessionList() {
+    var sessUrl = '/present/sessions' + (sessionManageMode ? '?all=1' : '');
+    fetch(sessUrl).then(function(r) { return r.json(); }).then(function(data) {
       var el = document.getElementById('sessionListItems');
       if (!el) return;
       if (!data.sessions || data.sessions.length === 0) {
         el.innerHTML = '<p style="color:var(--gb-overlay2);text-align:center;padding:20px">No sessions found.</p>';
+        var bulkBar = document.getElementById('sessionBulkBar');
+        if (bulkBar) bulkBar.style.display = 'none';
+        var manageBtn = document.getElementById('manageToggle');
+        if (manageBtn) manageBtn.style.display = 'none';
         return;
       }
       el.innerHTML = '';
@@ -1729,21 +1808,135 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
         var item = document.createElement('div');
         item.className = 'session-item';
-        item.onclick = function() { window.location.href = '/present?session=' + s.id; };
-        item.innerHTML = '<div style="min-width:0">' +
-          '<div class="session-item-title">' + escapeHtml(s.title) + '</div>' +
-          '<div class="session-item-meta">' +
-            (date ? date.toLocaleDateString([], {month:'short',day:'numeric',year:'numeric'}) + ' at ' +
-              date.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : 'Unknown date') +
-            (duration ? '  &middot;  ' + duration : '') +
+        item.dataset.sessionId = s.id;
+
+        if (!sessionManageMode) {
+          item.onclick = function() { window.location.href = '/present?session=' + s.id; };
+        } else {
+          item.style.cursor = 'default';
+        }
+
+        var titleStyle = s.empty ? 'color:var(--gb-overlay2);font-style:italic' : '';
+        item.innerHTML =
+          (sessionManageMode ? '<input type="checkbox" class="session-select-cb" data-id="' + s.id + '">' : '') +
+          '<div style="min-width:0;flex:1">' +
+            '<div class="session-item-title" style="' + titleStyle + '">' + escapeHtml(s.title) + '</div>' +
+            '<div class="session-item-meta">' +
+              (date ? date.toLocaleDateString([], {month:'short',day:'numeric',year:'numeric'}) + ' at ' +
+                date.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : 'Unknown date') +
+              (duration ? '  &middot;  ' + duration : '') +
+            '</div>' +
           '</div>' +
-        '</div>' +
-        '<div class="session-item-stats">' +
-          '<div>' + (s.actionCount || 0) + ' actions</div>' +
-          '<div>' + (s.segmentCount || 0) + ' segments</div>' +
-        '</div>';
+          '<div class="session-item-stats">' +
+            '<div>' + (s.actionCount || 0) + ' actions</div>' +
+            '<div>' + (s.segmentCount || 0) + ' segments</div>' +
+          '</div>' +
+          (sessionManageMode ? '<button class="session-delete-btn" title="Delete">&#x2715;</button>' : '');
+
+        // Attach event listeners via DOM instead of inline onclick
+        if (sessionManageMode) {
+          var cb = item.querySelector('.session-select-cb');
+          if (cb) cb.addEventListener('click', function(e) { e.stopPropagation(); updateBulkBar(); });
+          var delBtn = item.querySelector('.session-delete-btn');
+          if (delBtn) {
+            (function(sid, stitle) {
+              delBtn.addEventListener('click', function(e) { e.stopPropagation(); deleteSession(sid, stitle); });
+            })(s.id, s.title);
+          }
+        }
+
         el.appendChild(item);
       });
+      updateBulkBar();
+    });
+  }
+
+  window.toggleManageMode = function() {
+    sessionManageMode = !sessionManageMode;
+    var btn = document.getElementById('manageToggle');
+    if (btn) btn.textContent = sessionManageMode ? 'Done' : 'Manage';
+    loadSessionList();
+  };
+
+  window.updateBulkBar = function() {
+    var bar = document.getElementById('sessionBulkBar');
+    if (!bar) return;
+    if (!sessionManageMode) { bar.style.display = 'none'; return; }
+
+    var checked = document.querySelectorAll('.session-select-cb:checked');
+    if (checked.length === 0) {
+      bar.style.display = 'none';
+      return;
+    }
+    bar.style.display = 'flex';
+    bar.innerHTML = '<span>' + checked.length + ' selected</span>' +
+      '<button class="btn btn-ghost btn-sm" onclick="selectAllSessions()">Select All</button>' +
+      '<button class="btn btn-sm" style="background:var(--gb-red);color:#fff;border:none;margin-left:auto" onclick="deleteSelectedSessions()">Delete Selected</button>';
+  };
+
+  window.selectAllSessions = function() {
+    var cbs = document.querySelectorAll('.session-select-cb');
+    var allChecked = Array.from(cbs).every(function(cb) { return cb.checked; });
+    cbs.forEach(function(cb) { cb.checked = !allChecked; });
+    updateBulkBar();
+  };
+
+  // Inline confirmation (WKWebView blocks confirm()/alert())
+  function showConfirmBar(message, onConfirm) {
+    var bar = document.getElementById('sessionBulkBar');
+    if (!bar) return;
+    bar.style.display = 'flex';
+    bar.className = 'session-confirm-bar';
+    bar.innerHTML = '<span style="flex:1">' + escapeHtml(message) + '</span>' +
+      '<button class="btn btn-ghost btn-sm" id="confirmCancel">Cancel</button>' +
+      '<button class="btn btn-sm" style="background:var(--gb-red);color:#fff;border:none" id="confirmYes">Delete</button>';
+    document.getElementById('confirmCancel').onclick = function() {
+      bar.className = 'session-bulk-bar';
+      updateBulkBar();
+    };
+    document.getElementById('confirmYes').onclick = function() {
+      bar.className = 'session-bulk-bar';
+      onConfirm();
+    };
+  }
+
+  window.deleteSession = function(id, title) {
+    showConfirmBar('Delete "' + title + '"?', function() {
+      fetch('/sessions/' + id, { method: 'DELETE' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.success) {
+            var item = document.querySelector('[data-session-id="' + id + '"]');
+            if (item) item.remove();
+            var remaining = document.querySelectorAll('.session-item');
+            if (remaining.length === 0) {
+              var el = document.getElementById('sessionListItems');
+              if (el) el.innerHTML = '<p style="color:var(--gb-overlay2);text-align:center;padding:20px">No sessions found.</p>';
+              var manageBtn = document.getElementById('manageToggle');
+              if (manageBtn) manageBtn.style.display = 'none';
+            }
+            updateBulkBar();
+          }
+        });
+    });
+  };
+
+  window.deleteSelectedSessions = function() {
+    var checked = document.querySelectorAll('.session-select-cb:checked');
+    var ids = Array.from(checked).map(function(cb) { return cb.dataset.id; });
+    if (ids.length === 0) return;
+
+    showConfirmBar('Delete ' + ids.length + ' session(s)? This cannot be undone.', function() {
+      fetch('/sessions/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: ids }),
+      }).then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.deleted && data.deleted.length > 0) {
+            loadSessionList();
+          }
+        });
     });
   };
 
@@ -1861,6 +2054,24 @@ const PRESENT_HTML = `<!DOCTYPE html>
               result: msg.result || null,
               completedAt: msg.state === 'completed' || msg.state === 'failed' ? new Date().toISOString() : null,
             });
+          }
+          break;
+
+        case 'action.stream':
+          var streamCard = actionCards.get(msg.actionId);
+          if (streamCard) {
+            var streamText = streamCard.querySelector('.streaming-text');
+            if (streamText) {
+              // Hide the "Running..." placeholder on first delta
+              var placeholder = streamCard.querySelector('.streaming-placeholder');
+              if (placeholder && streamText.textContent === '') {
+                placeholder.style.display = 'none';
+              }
+              streamText.textContent += msg.delta;
+              if (autoScroll) {
+                resultsEl.scrollTop = resultsEl.scrollHeight;
+              }
+            }
           }
           break;
       }

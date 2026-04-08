@@ -74,7 +74,8 @@ Be concise but thorough. Focus on substance, not filler.`;
         userContent += `\n\nFocus particularly on: ${focus}`;
       }
 
-      const markdown = await claudeSuggest(userContent, systemPrompt, signal);
+      const onDelta = params._onDelta as ((text: string) => void) | undefined;
+      const markdown = await claudeSuggest(userContent, systemPrompt, signal, undefined, { onDelta });
 
       if (signal.aborted) {
         return {

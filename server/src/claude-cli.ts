@@ -1,5 +1,6 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { createInterface } from 'node:readline';
 
 const execFileAsync = promisify(execFile);
 
@@ -213,19 +214,151 @@ async function codexTriage(
 }
 
 /**
- * Full suggestion/analysis call using a capable model.
+ * Full suggestion/analysis call using a capable model. Streams under the hood
+ * via `claude --output-format stream-json --include-partial-messages`, but
+ * returns the final concatenated text so blocking callers see unchanged
+ * behavior. Pass `options.onDelta` to receive token chunks as they arrive.
+ *
+ * Event envelope (per Claude Code headless docs):
+ *   { type: "stream_event", event: { delta: { type: "text_delta", text: "..." } } }
+ * Final authoritative text arrives in:
+ *   { type: "result", subtype: "success", result: "...", is_error: false }
  */
 export async function claudeSuggest(
   prompt: string,
   systemPrompt: string,
   signal?: AbortSignal,
   allowedTools?: string[],
+  options?: { onDelta?: (text: string) => void; model?: string },
 ): Promise<string> {
-  return claudeChat(prompt, {
-    systemPrompt,
-    model: 'claude-sonnet-4-6',
-    maxTokens: 2048,
-    signal,
-    allowedTools,
+  const model = options?.model ?? 'claude-sonnet-4-6';
+  const maxTurns = allowedTools?.length ? '8' : '1';
+
+  const args = [
+    '--print',
+    '--output-format', 'stream-json',
+    '--verbose',                  // required with stream-json
+    '--include-partial-messages', // token-level deltas
+    '--no-session-persistence',
+    '--max-turns', maxTurns,
+    '--model', model,
+    '--system-prompt', systemPrompt,
+  ];
+  if (allowedTools?.length) {
+    args.push('--allowedTools', ...allowedTools);
+  }
+  args.push('-p', prompt);
+
+  // Strip env vars that prevent nested Claude CLI invocations
+  const env = { ...process.env };
+  delete env.CLAUDECODE;
+  delete env.CLAUDE_PROJECT;
+
+  if (signal?.aborted) {
+    throw new Error('Aborted');
+  }
+
+  const MAX_STDOUT_BYTES = 10 * 1024 * 1024; // 10MB, matches claudeChat
+  const TIMEOUT_MS = 180_000;
+
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn('claude', args, { env });
+
+    let accumulated = '';
+    let finalResult = '';
+    let stderr = '';
+    let stdoutBytes = 0;
+    let settled = false;
+    let killedForLimit = false;
+
+    const done = (err: Error | null, value?: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutHandle);
+      if (abortHandler && signal) signal.removeEventListener('abort', abortHandler);
+      if (err) reject(err);
+      else resolve(value ?? '');
+    };
+
+    const timeoutHandle = setTimeout(() => {
+      child.kill('SIGTERM');
+      done(new Error(`claude CLI timed out after ${TIMEOUT_MS}ms`));
+    }, TIMEOUT_MS);
+
+    const abortHandler = signal
+      ? () => {
+          child.kill('SIGTERM');
+          done(new Error('Aborted'));
+        }
+      : undefined;
+    if (signal && abortHandler) {
+      signal.addEventListener('abort', abortHandler);
+    }
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > MAX_STDOUT_BYTES && !killedForLimit) {
+        killedForLimit = true;
+        child.kill('SIGTERM');
+        done(new Error(`claude CLI stdout exceeded ${MAX_STDOUT_BYTES} bytes`));
+      }
+    });
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    const rl = createInterface({ input: child.stdout });
+    rl.on('line', (line: string) => {
+      if (!line.trim()) return;
+      let evt: any;
+      try {
+        evt = JSON.parse(line);
+      } catch {
+        // Non-JSON line (shouldn't happen with stream-json, but be defensive)
+        return;
+      }
+
+      // Partial text deltas (requires --include-partial-messages)
+      if (
+        evt?.type === 'stream_event' &&
+        evt.event?.delta?.type === 'text_delta' &&
+        typeof evt.event.delta.text === 'string'
+      ) {
+        const chunk = evt.event.delta.text;
+        accumulated += chunk;
+        try {
+          options?.onDelta?.(chunk);
+        } catch {
+          // Callback errors must not kill the stream
+        }
+        return;
+      }
+
+      // Final authoritative result from CLI envelope
+      if (
+        evt?.type === 'result' &&
+        evt.subtype === 'success' &&
+        typeof evt.result === 'string' &&
+        evt.result.length > 0
+      ) {
+        finalResult = evt.result;
+      }
+    });
+
+    child.on('error', (err) => {
+      done(err);
+    });
+
+    child.on('close', (code) => {
+      if (settled) return;
+      if (code !== 0) {
+        const msg = stderr.trim() || `claude CLI exited with code ${code}`;
+        done(new Error(msg));
+        return;
+      }
+      // Prefer the CLI's authoritative result; fall back to accumulated deltas.
+      done(null, finalResult || accumulated);
+    });
   });
 }

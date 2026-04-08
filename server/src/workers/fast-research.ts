@@ -1,13 +1,17 @@
 import { claudeSuggest } from '../claude-cli.js';
 import type { Worker, WorkerCapabilities, WorkerResult } from './types.js';
 
-export class ResearchWorker implements Worker {
-  public readonly name = 'research';
+/**
+ * Fast research: Haiku 4.5 with WebSearch, streamed token-by-token.
+ * Optimized for minimum latency to first token during live meetings.
+ */
+export class FastResearchWorker implements Worker {
+  public readonly name = 'fast-research';
   public readonly capabilities: WorkerCapabilities = {
     network: 'web-search',
     filesystem: { read: [], write: [] },
     subprocess: false,
-    maxDurationMs: 90_000,
+    maxDurationMs: 60_000,
     maxMemoryMB: 100,
   };
 
@@ -22,7 +26,7 @@ export class ResearchWorker implements Worker {
       return {
         success: false,
         data: null,
-        summary: 'No query provided for research',
+        summary: 'No query provided for fast research',
         error: 'Missing required param: query',
       };
     }
@@ -31,28 +35,32 @@ export class ResearchWorker implements Worker {
       return {
         success: false,
         data: null,
-        summary: 'Research cancelled before start',
+        summary: 'Fast research cancelled before start',
         error: 'Aborted',
       };
     }
 
     try {
-      const systemPrompt = `You are a research assistant helping during a live meeting. Provide concise, factual, well-structured findings. Use markdown formatting. Focus on the most relevant and actionable information.
-
-If context from the meeting is provided, use it to tailor your research to what the participants actually need.`;
+      const systemPrompt = `You provide fast, factual answers during a live meeting. Be concise: 2-4 sentences, lead with the answer, add a one-line source or caveat only if essential. Markdown is fine but keep it tight. Prefer recent and authoritative sources.`;
 
       const userContent = context
-        ? `Research query: ${query}\n\nMeeting context:\n${context}`
-        : `Research query: ${query}`;
+        ? `Question: ${query}\n\nMeeting context:\n${context}`
+        : `Question: ${query}`;
 
       const onDelta = params._onDelta as ((text: string) => void) | undefined;
-      const text = await claudeSuggest(userContent, systemPrompt, signal, ['WebSearch', 'WebFetch'], { onDelta });
+      const text = await claudeSuggest(
+        userContent,
+        systemPrompt,
+        signal,
+        ['WebSearch', 'WebFetch'],
+        { onDelta, model: 'claude-haiku-4-5-20251001' },
+      );
 
       if (signal.aborted) {
         return {
           success: false,
           data: null,
-          summary: 'Research cancelled during execution',
+          summary: 'Fast research cancelled during execution',
           error: 'Aborted',
         };
       }
@@ -60,22 +68,21 @@ If context from the meeting is provided, use it to tailor your research to what 
       return {
         success: true,
         data: { query, findings: text },
-        summary: `Research completed for: ${query}`,
+        summary: `Fast research completed for: ${query}`,
         artifacts: [
           {
             type: 'markdown',
             content: text,
-            title: `Research: ${query}`,
+            title: `Fast: ${query}`,
           },
         ],
       };
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : String(error);
+      const message = error instanceof Error ? error.message : String(error);
       return {
         success: false,
         data: null,
-        summary: `Research failed: ${message}`,
+        summary: `Fast research failed: ${message}`,
         error: message,
       };
     }

@@ -278,6 +278,16 @@ export class WorkerRegistry extends EventEmitter {
       return;
     }
 
+    // Inject streaming callback for worker types that support it. The worker
+    // reads params._onDelta and forwards text chunks as they arrive from the
+    // Claude CLI; the registry emits them as action.stream events.
+    const streamingTypes = new Set(['research', 'fast-research', 'summary', 'analysis']);
+    if (streamingTypes.has(action.type) && typeof action.params._onDelta !== 'function') {
+      action.params._onDelta = (delta: string) => {
+        this.emit('action.stream', { actionId: action.id, delta });
+      };
+    }
+
     action.state = 'running';
     action.startedAt = Date.now();
     this.runningCount++;

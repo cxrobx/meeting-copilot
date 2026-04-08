@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -332,6 +332,79 @@ export function createRoutes(ctx: RouteContext): Router {
       } finally {
         store.close();
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: message });
+    }
+  });
+
+  // Delete a single session
+  router.delete('/sessions/:id', (req, res) => {
+    try {
+      const sessionId = req.params.id;
+      // Validate UUID format to prevent path traversal
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
+        res.status(400).json({ error: 'Invalid session ID' });
+        return;
+      }
+
+      const sessionDir = join(homedir(), '.meeting-copilot', 'sessions', sessionId);
+      if (!existsSync(sessionDir)) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
+
+      // Don't delete the active session
+      const { store, active } = ctx.getSession();
+      if (active && store?.id === sessionId) {
+        res.status(409).json({ error: 'Cannot delete the active session' });
+        return;
+      }
+
+      rmSync(sessionDir, { recursive: true, force: true });
+      console.log(`[Sessions] Deleted session ${sessionId}`);
+      res.json({ success: true, deleted: sessionId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: message });
+    }
+  });
+
+  // Batch delete sessions
+  router.post('/sessions/delete', (req, res) => {
+    try {
+      const body = req.body as { ids?: string[] };
+      if (!Array.isArray(body.ids) || body.ids.length === 0) {
+        res.status(400).json({ error: 'Expected { ids: string[] }' });
+        return;
+      }
+
+      const { store, active } = ctx.getSession();
+      const sessionsDir = join(homedir(), '.meeting-copilot', 'sessions');
+      const deleted: string[] = [];
+      const errors: string[] = [];
+
+      for (const id of body.ids) {
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+          errors.push(`Invalid session ID: ${id}`);
+          continue;
+        }
+        if (active && store?.id === id) {
+          errors.push(`Cannot delete active session: ${id}`);
+          continue;
+        }
+        const sessionDir = join(sessionsDir, id);
+        if (!existsSync(sessionDir)) continue;
+        try {
+          rmSync(sessionDir, { recursive: true, force: true });
+          deleted.push(id);
+        } catch (err) {
+          errors.push(`Failed to delete ${id}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      console.log(`[Sessions] Batch deleted ${deleted.length} sessions`);
+      res.json({ success: true, deleted, errors });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       res.status(500).json({ error: message });

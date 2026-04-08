@@ -61,28 +61,32 @@ private struct WebViewWrapper: NSViewRepresentable {
         weak var webView: WKWebView?
         var zoomLevel: Int = 100
         private var retryCount = 0
-        private let maxRetries = 30
 
         func applyZoom() {
             let scale = Double(zoomLevel) / 100.0
             webView?.evaluateJavaScript("document.body.style.zoom = '\(scale)'", completionHandler: nil)
         }
 
-        /// Poll the health endpoint before loading the page.
+        /// Retry delay: 1s for first 30 attempts, then 5s thereafter.
+        private var retryDelay: TimeInterval {
+            retryCount < 30 ? 1.0 : 5.0
+        }
+
+        /// Poll the health endpoint before loading the page. Never gives up.
         func loadWhenReady(webView: WKWebView) {
             checkHealth { ready in
                 if ready {
+                    self.retryCount = 0
                     print("[WebDashboard] Server ready, loading dashboard")
                     webView.load(URLRequest(url: dashboardURL))
-                } else if self.retryCount < self.maxRetries {
+                } else {
                     self.retryCount += 1
-                    print("[WebDashboard] Waiting for server (attempt \(self.retryCount))...")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    if self.retryCount <= 3 || self.retryCount % 10 == 0 {
+                        print("[WebDashboard] Waiting for server (attempt \(self.retryCount))...")
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + self.retryDelay) {
                         self.loadWhenReady(webView: webView)
                     }
-                } else {
-                    print("[WebDashboard] Server not ready after \(self.maxRetries)s, loading anyway")
-                    webView.load(URLRequest(url: dashboardURL))
                 }
             }
         }
@@ -106,12 +110,11 @@ private struct WebViewWrapper: NSViewRepresentable {
             retryLoad(webView: webView)
         }
 
+        /// On navigation failure, go back to health-polling instead of blindly retrying the load.
         private func retryLoad(webView: WKWebView) {
-            guard retryCount < maxRetries else { return }
             retryCount += 1
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                print("[WebDashboard] Retrying load (attempt \(self.retryCount))...")
-                webView.load(URLRequest(url: dashboardURL))
+            DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay) {
+                self.loadWhenReady(webView: webView)
             }
         }
     }

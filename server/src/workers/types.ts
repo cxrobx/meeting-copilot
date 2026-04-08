@@ -28,7 +28,7 @@ export interface Worker {
 }
 
 export interface ActionSuggestion {
-  type: 'research' | 'summary' | 'mockup' | 'codegen' | 'analysis';
+  type: 'research' | 'fast-research' | 'summary' | 'mockup' | 'codegen' | 'analysis';
   title: string;
   description: string;
   triggerQuote: string;

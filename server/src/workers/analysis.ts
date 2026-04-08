@@ -61,7 +61,8 @@ Important limitations or unknowns`;
         userContent += `\n\nOptions to compare:\n${compareOptions.map((o, i) => `${i + 1}. ${o}`).join('\n')}`;
       }
 
-      const text = await claudeSuggest(userContent, systemPrompt, signal);
+      const onDelta = params._onDelta as ((text: string) => void) | undefined;
+      const text = await claudeSuggest(userContent, systemPrompt, signal, undefined, { onDelta });
 
       if (signal.aborted) {
         return {
