@@ -1438,6 +1438,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       quickActionsSlot.innerHTML = '';
     }
   }
+  window.updateUI = updateUI;
 
   function showIdleState() {
     var wsConnected = ws && ws.readyState === WebSocket.OPEN;
