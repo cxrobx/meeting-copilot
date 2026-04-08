@@ -1277,7 +1277,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
         var name = s.label || s.path.split('/').pop();
         var shortPath = s.path.replace(/^\\/Users\\/[^\\/]+/, '~');
         html += '<div class="ctx-item">' +
-          '<input type="checkbox" class="ctx-cb" value="' + escapeHtml(s.path) + '" checked>' +
+          '<input type="checkbox" class="ctx-cb" value="' + escapeHtml(s.path) + '">' +
           '<span class="ctx-icon">' + icon + '</span>' +
           '<span class="ctx-name">' + escapeHtml(name) + '</span>' +
           '<span class="ctx-path" title="' + escapeHtml(s.path) + '">' + escapeHtml(shortPath) + '</span>' +
