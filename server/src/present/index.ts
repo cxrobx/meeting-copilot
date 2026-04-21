@@ -237,27 +237,27 @@ const PRESENT_HTML = `<!DOCTYPE html>
     --gb-text:     rgb(30,25,15);
     --gb-subtext0: rgb(70,60,45);
     --gb-subtext1: rgb(100,90,75);
-    /* Semantic (constant across modes — CXMail keeps these steady) */
+    /* Semantic (constant across modes) */
     --gb-red:      rgb(212,118,106); /* warm coral error    */
     --gb-maroon:   rgb(190,90,80);
     --gb-peach:    rgb(212,150,110);
     --gb-yellow:   rgb(212,168,90);  /* warm gold warning   */
-    --gb-green:    rgb(10,132,255);  /* success → iOS blue (no green in UI) */
-    --gb-teal:     rgb(50,150,220);
-    --gb-sky:      rgb(120,180,200);
-    --gb-sapphire: rgb(50,150,220);
-    --gb-blue:     rgb(10,132,255);  /* iOS-blue accent     */
+    --gb-green:    rgb(20,18,14);    /* success → near-black (no blue/green in UI) */
+    --gb-teal:     rgb(30,25,15);
+    --gb-sky:      rgb(30,25,15);
+    --gb-sapphire: rgb(20,18,14);
+    --gb-blue:     rgb(20,18,14);    /* accent → near-black */
     /* Warm-neutral variants of CXMail ai-accent for signal colors */
     --gb-lavender: rgb(180,160,140);
     --gb-mauve:    rgb(200,150,130);
     --gb-pink:     rgb(210,160,150);
     --gb-rosewater:rgb(200,170,150);
     --gb-flamingo: rgb(210,170,160);
-    /* New polish tokens (CXMail idioms) */
-    --accent:      var(--gb-blue);
-    --accent-hover: rgb(8,106,204);
-    --accent-soft: color-mix(in srgb, var(--gb-blue) 15%, transparent);
-    --focus-ring:  color-mix(in srgb, var(--gb-blue) 40%, transparent);
+    /* Accent polish tokens */
+    --accent:       var(--gb-blue);
+    --accent-hover: rgb(60,55,45);
+    --accent-soft:  color-mix(in srgb, var(--gb-blue) 10%, transparent);
+    --focus-ring:   color-mix(in srgb, var(--gb-blue) 28%, transparent);
   }
 
 
@@ -619,7 +619,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     border-radius: 2px;
     letter-spacing: 0.04em;
   }
-  .signal-tag.action { background: rgba(10,132,255,0.12); color: var(--gb-green); }
+  .signal-tag.action { background: rgba(20,18,14,0.08); color: var(--gb-green); }
   .signal-tag.decision { background: rgba(69,133,136,0.12); color: var(--gb-blue); }
   .signal-tag.question { background: rgba(146,111,175,0.12); color: var(--gb-lavender); }
   .signal-tag.risk { background: rgba(204,36,29,0.12); color: var(--gb-red); }
@@ -947,7 +947,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
   .ctx-input-row input.drag-over {
     border-color: var(--gb-green);
-    background: rgba(10,132,255,0.06);
+    background: rgba(20,18,14,0.04);
   }
 
   .idle-actions {
@@ -1019,13 +1019,21 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
   .session-confirm-bar .btn { font-size: 11px; padding: 4px 12px; }
 
-  /* ─── Quick Actions ────────────────────────────────────────── */
+  /* ─── Quick Actions ──────────────────────────────────────────
+     Sticks to the top of the .main scroll container so the user
+     can kick off a research/search without scrolling back up as
+     the card feed grows. The subtle shadow reads as "elevated"
+     once cards start flowing underneath. */
   .quick-actions {
     background: var(--gb-surface0);
     border: 1px solid var(--gb-surface2);
     border-radius: 8px;
     padding: 14px 16px;
     margin-bottom: 16px;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    box-shadow: 0 6px 14px -12px rgba(20,18,14,0.45);
   }
   .quick-actions-title {
     font-size: 10px;
@@ -1079,7 +1087,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     padding: 2px 7px;
     border-radius: 4px;
   }
-  .card-type.research { background: rgba(10,132,255,0.12); color: var(--gb-green); }
+  .card-type.research { background: rgba(20,18,14,0.08); color: var(--gb-green); }
   .card-type.summary { background: rgba(215,153,33,0.12); color: var(--gb-yellow); }
   .card-type.mockup { background: rgba(177,98,134,0.12); color: var(--gb-mauve); }
   .card-type.codegen { background: rgba(69,133,136,0.12); color: var(--gb-blue); }
@@ -1201,7 +1209,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     letter-spacing: 0.04em; padding: 1px 4px; border-radius: 3px;
     display: inline; vertical-align: middle; margin-right: 3px;
   }
-  .toc-badge.research { background: rgba(10,132,255,0.15); color: var(--gb-green); }
+  .toc-badge.research { background: rgba(20,18,14,0.10); color: var(--gb-green); }
   .toc-badge.summary { background: rgba(215,153,33,0.15); color: var(--gb-yellow); }
   .toc-badge.mockup { background: rgba(177,98,134,0.15); color: var(--gb-mauve); }
   .toc-badge.codegen { background: rgba(69,133,136,0.15); color: var(--gb-blue); }

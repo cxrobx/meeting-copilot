@@ -24,11 +24,13 @@ enum DashboardPalette {
     static let textMuted = Color.white.opacity(0.60)       // rgb(155,153,150)
     static let textFaint = Color.white.opacity(0.45)
 
-    // Accents (iOS blue + CXMail semantic)
-    static let accent = Color(red: 0.039, green: 0.518, blue: 1.000)      // rgb(10,132,255) iOS blue
-    static let accentBlue = Color(red: 0.039, green: 0.518, blue: 1.000)
+    // Accents — no blue/green. On the dark taupe surface, "black" accents
+    // invert to warm cream so the UI stays legible. The web dashboard uses
+    // near-black on its warm-cream background; this is the dark-surface dual.
+    static let accent = Color(red: 0.945, green: 0.929, blue: 0.898)      // warm cream
+    static let accentBlue = Color(red: 0.945, green: 0.929, blue: 0.898)
     static let accentTeal = Color(red: 0.627, green: 0.549, blue: 0.471)  // rgb(160,140,120) CXMail ai-accent
-    static let success = Color(red: 0.039, green: 0.518, blue: 1.000)     // rgb(10,132,255) iOS blue (no green in UI)
+    static let success = Color(red: 0.945, green: 0.929, blue: 0.898)     // cream (no green)
     static let warning = Color(red: 0.831, green: 0.659, blue: 0.353)     // rgb(212,168,90) warm gold
     static let danger = Color(red: 0.831, green: 0.463, blue: 0.416)      // rgb(212,118,106) warm coral
 }
