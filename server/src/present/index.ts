@@ -1354,7 +1354,44 @@ const PRESENT_HTML = `<!DOCTYPE html>
     }).catch(function() {});
   };
 
+  function addContextPath(path, type) {
+    fetch('/context-sources/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: path, type: type })
+    }).then(function(r) {
+      return r.json().then(function(d) { return { ok: r.ok, data: d }; });
+    }).then(function(res) {
+      if (!res.ok || res.data.error) {
+        ctxError = res.data.error || 'Failed to add — check that the path exists';
+        renderContextList();
+        return;
+      }
+      if (res.data.items) availableContextSources = res.data.items;
+      ctxAddingType = null;
+      ctxError = '';
+      renderContextList();
+    }).catch(function() {
+      ctxError = 'Network error — is the server running?';
+      renderContextList();
+    });
+  }
+
   window.showAddContext = function(type) {
+    // When running inside the Meeting Copilot app, use the native Finder
+    // picker instead of the manual path input.
+    if (hasNativeBridge() && window.__copilotNativeBridge.pickPath) {
+      ctxError = '';
+      window.__copilotNativeBridge.pickPath({
+        kind: type,
+        title: type === 'folder' ? 'Choose a context folder' : 'Choose a context file'
+      }).then(function(path) {
+        if (!path) return; // user cancelled
+        addContextPath(path, type);
+      });
+      return;
+    }
+
     ctxAddingType = type;
     ctxError = '';
     renderContextList();

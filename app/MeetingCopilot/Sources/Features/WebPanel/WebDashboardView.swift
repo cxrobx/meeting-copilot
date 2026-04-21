@@ -28,16 +28,37 @@ private struct WebViewWrapper: NSViewRepresentable {
         userContent.add(context.coordinator, name: bridgeMessageName)
         let bridgeScript = WKUserScript(
             source: """
-            window.__copilotNativeBridge = {
-              startSession: function(payload) {
-                window.webkit.messageHandlers.\(bridgeMessageName).postMessage(
-                  Object.assign({ action: 'startSession' }, payload || {})
-                );
-              },
-              stopSession: function() {
-                window.webkit.messageHandlers.\(bridgeMessageName).postMessage({ action: 'stopSession' });
-              }
-            };
+            (function() {
+              var pendingPicks = {};
+              var pickCounter = 0;
+              window.__copilotNativeBridge = {
+                startSession: function(payload) {
+                  window.webkit.messageHandlers.\(bridgeMessageName).postMessage(
+                    Object.assign({ action: 'startSession' }, payload || {})
+                  );
+                },
+                stopSession: function() {
+                  window.webkit.messageHandlers.\(bridgeMessageName).postMessage({ action: 'stopSession' });
+                },
+                pickPath: function(options) {
+                  options = options || {};
+                  var id = 'pk_' + (++pickCounter) + '_' + Date.now();
+                  return new Promise(function(resolve) {
+                    pendingPicks[id] = resolve;
+                    window.webkit.messageHandlers.\(bridgeMessageName).postMessage({
+                      action: 'pickPath',
+                      requestId: id,
+                      kind: options.kind || 'folder',
+                      title: options.title || null
+                    });
+                  });
+                }
+              };
+              window.__copilotPickPathResult = function(id, path) {
+                var resolver = pendingPicks[id];
+                if (resolver) { delete pendingPicks[id]; resolver(path || null); }
+              };
+            })();
             """,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
@@ -104,6 +125,42 @@ private struct WebViewWrapper: NSViewRepresentable {
             webView?.evaluateJavaScript("document.body.style.zoom = '\(scale)'", completionHandler: nil)
         }
 
+        @MainActor
+        func presentOpenPanel(kind: String, title: String?, completion: @escaping (String?) -> Void) {
+            let panel = NSOpenPanel()
+            let pickingFolder = (kind == "folder")
+            panel.canChooseFiles = !pickingFolder
+            panel.canChooseDirectories = pickingFolder
+            panel.allowsMultipleSelection = false
+            panel.resolvesAliases = true
+            panel.title = title ?? (pickingFolder ? "Choose a folder" : "Choose a file")
+            panel.prompt = "Add"
+
+            // Attach to the app's key window so the sheet feels anchored.
+            if let window = webView?.window ?? NSApp.keyWindow ?? NSApp.mainWindow {
+                panel.beginSheetModal(for: window) { response in
+                    let path = (response == .OK) ? panel.url?.path : nil
+                    completion(path)
+                }
+            } else {
+                let response = panel.runModal()
+                let path = (response == .OK) ? panel.url?.path : nil
+                completion(path)
+            }
+        }
+
+        func deliverPickResult(requestId: String, path: String?) {
+            let payload: Any = path ?? NSNull()
+            let data = (try? JSONSerialization.data(withJSONObject: [requestId, payload])) ?? Data()
+            guard let raw = String(data: data, encoding: .utf8) else { return }
+            // raw looks like: ["pk_1_12345", "/Users/…/path"]  — strip outer brackets, pass as args
+            let inner = raw.dropFirst().dropLast()
+            let js = "window.__copilotPickPathResult && window.__copilotPickPathResult(\(inner));"
+            DispatchQueue.main.async {
+                self.webView?.evaluateJavaScript(js, completionHandler: nil)
+            }
+        }
+
         func pushError(_ message: String) {
             // JSON-escape by serializing an array, then strip the brackets
             let data = (try? JSONSerialization.data(withJSONObject: [message])) ?? Data()
@@ -139,6 +196,13 @@ private struct WebViewWrapper: NSViewRepresentable {
                     )
                 case "stopSession":
                     self.sessionManager.stopSessionFromWeb()
+                case "pickPath":
+                    let requestId = (body["requestId"] as? String) ?? ""
+                    let kind = (body["kind"] as? String) ?? "folder"
+                    let title = body["title"] as? String
+                    self.presentOpenPanel(kind: kind, title: title) { path in
+                        self.deliverPickResult(requestId: requestId, path: path)
+                    }
                 default:
                     appLog("[Bridge] Unknown action: \(action)")
                 }
