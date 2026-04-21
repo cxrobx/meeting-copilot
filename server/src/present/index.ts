@@ -670,6 +670,88 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
   .idle-form input:focus, .idle-form textarea:focus { border-color: var(--gb-blue); }
 
+  /* ─── Agenda extraction editor ─────────────────────────────── */
+  .agenda-helper {
+    font-size: 10px;
+    color: var(--gb-subtext0);
+    margin-top: 4px;
+    line-height: 1.4;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .agenda-edit-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+    flex-wrap: wrap;
+  }
+  .agenda-edit-actions .btn {
+    font-size: 11px;
+    padding: 4px 10px;
+  }
+  .agenda-edit-status {
+    font-size: 10px;
+    color: var(--gb-subtext0);
+    line-height: 1.4;
+  }
+  .agenda-edit-status.error { color: var(--gb-red); }
+  .agenda-edit-status.empty { color: var(--gb-peach); }
+  .agenda-edit-spinner {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border: 1.5px solid var(--gb-overlay1);
+    border-top-color: var(--gb-blue);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+    margin-right: 5px;
+  }
+  .agenda-editor-list {
+    border: 1px solid var(--gb-surface2);
+    border-radius: 5px;
+    background: var(--gb-surface1);
+    padding: 4px;
+    max-height: 260px;
+    overflow-y: auto;
+  }
+  .agenda-editor-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 2px;
+  }
+  .agenda-editor-row + .agenda-editor-row { margin-top: 2px; }
+  .agenda-editor-input {
+    flex: 1 1 auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 5px 8px;
+    border: 1px solid var(--gb-surface2);
+    border-radius: 4px;
+    background: var(--gb-base);
+    color: var(--gb-text);
+    outline: none;
+  }
+  .agenda-editor-input:focus { border-color: var(--gb-blue); }
+  .agenda-editor-remove {
+    flex: 0 0 auto;
+    width: 22px; height: 22px;
+    border: none; background: transparent;
+    color: var(--gb-overlay2);
+    cursor: pointer;
+    font-size: 14px;
+    border-radius: 3px;
+  }
+  .agenda-editor-remove:hover { color: var(--gb-red); background: var(--gb-surface0); }
+  .agenda-editor-count {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--gb-overlay2);
+  }
+
   .proj-grid {
     max-height: 180px;
     overflow-y: auto;
@@ -1343,6 +1425,187 @@ const PRESENT_HTML = `<!DOCTYPE html>
     availableContextSources = d.items || [];
   }).catch(function() {});
 
+  // ─── Agenda Editor (session setup) ─────────────────────────
+  // State machine for the agenda input area on the idle screen.
+  // kind: 'raw'         — textarea visible, Extract available, Start active
+  //       'extracting'  — textarea read-only, spinner, Start DISABLED
+  //       'extracted'   — editable list replaces textarea, Start active
+  //       'empty'       — textarea + notice "no items found", Start active (uses raw)
+  //       'error'       — textarea + red notice, Start active (uses raw)
+  var agendaState = { kind: 'raw' };
+  var agendaRawSnapshot = ''; // preserves the original paste across revert
+  var agendaAbortController = null;
+  var agendaExtractGen = 0;
+
+  function setAgendaState(next) {
+    agendaState = next;
+    renderAgendaEditor();
+    refreshStartButton();
+  }
+
+  function refreshStartButton() {
+    var btn = document.getElementById('startBtn');
+    if (!btn) return;
+    var wsConnected = ws && ws.readyState === WebSocket.OPEN;
+    btn.disabled = !wsConnected || agendaState.kind === 'extracting';
+  }
+
+  function currentTextareaValue() {
+    var ta = document.getElementById('startAgenda');
+    return ta ? ta.value : '';
+  }
+
+  function snapshotEditorItems() {
+    var inputs = document.querySelectorAll('.agenda-editor-input');
+    var out = [];
+    for (var i = 0; i < inputs.length; i++) {
+      var v = inputs[i].value.trim();
+      if (v) out.push(v);
+    }
+    return out;
+  }
+
+  function renderAgendaEditor() {
+    var host = document.getElementById('agendaEditor');
+    if (!host) return;
+
+    if (agendaState.kind === 'extracted') {
+      var items = agendaState.items || [];
+      var listHtml = '<div class="agenda-editor-list" id="agendaItemList">';
+      for (var i = 0; i < items.length; i++) {
+        listHtml += '<div class="agenda-editor-row">' +
+          '<input type="text" class="agenda-editor-input" value="' + escapeHtml(items[i]) + '">' +
+          '<button type="button" class="agenda-editor-remove" onclick="removeAgendaItem(' + i + ')" title="Remove">×</button>' +
+        '</div>';
+      }
+      listHtml += '</div>';
+      host.innerHTML = listHtml +
+        '<div class="agenda-edit-actions">' +
+          '<button type="button" class="btn btn-ghost" onclick="addAgendaItem()">+ Add item</button>' +
+          '<button type="button" class="btn btn-ghost" onclick="revertToRawAgenda()">Start over with raw text</button>' +
+          '<span class="agenda-editor-count">' + items.length + ' item' + (items.length === 1 ? '' : 's') + '</span>' +
+        '</div>';
+      return;
+    }
+
+    // raw / extracting / empty / error — all show the textarea.
+    var readonly = agendaState.kind === 'extracting' ? ' readonly' : '';
+    var value = agendaRawSnapshot || '';
+    var textarea = '<textarea id="startAgenda" rows="5" placeholder="Confirm Q1 hiring plan&#10;Review campaign results&#10;Paste notes / a prep doc and click Extract" oninput="onAgendaTextareaInput()"' + readonly + '>' + escapeHtml(value) + '</textarea>';
+    var helper = '<div class="agenda-helper">One item per line, or paste notes / a prep doc and click Extract.</div>';
+
+    var buttonLabel, disabled = '';
+    if (agendaState.kind === 'extracting') {
+      buttonLabel = '<span class="agenda-edit-spinner"></span>Extracting…';
+      disabled = ' disabled';
+    } else {
+      buttonLabel = 'Extract items from notes';
+      if (!(agendaRawSnapshot && agendaRawSnapshot.trim())) disabled = ' disabled';
+    }
+
+    var status = '';
+    if (agendaState.kind === 'empty') {
+      status = '<span class="agenda-edit-status empty">' + escapeHtml(agendaState.message || 'No items found — edit and try again, or start with the raw text.') + '</span>';
+    } else if (agendaState.kind === 'error') {
+      status = '<span class="agenda-edit-status error">' + escapeHtml(agendaState.message || 'Extraction failed.') + '</span>';
+    }
+
+    host.innerHTML = textarea + helper +
+      '<div class="agenda-edit-actions">' +
+        '<button type="button" class="btn btn-ghost" id="extractAgendaBtn" onclick="extractAgendaFromNotes()"' + disabled + '>' + buttonLabel + '</button>' +
+        status +
+      '</div>';
+  }
+
+  window.onAgendaTextareaInput = function() {
+    agendaRawSnapshot = currentTextareaValue();
+    // Only flip to 'raw' when we're exiting a terminal state. When already
+    // 'raw' we just update the button's disabled flag without a full re-render
+    // so focus and caret are preserved.
+    if (agendaState.kind === 'raw') {
+      var btn = document.getElementById('extractAgendaBtn');
+      if (btn) btn.disabled = !agendaRawSnapshot.trim();
+      return;
+    }
+    if (agendaState.kind === 'empty' || agendaState.kind === 'error') {
+      setAgendaState({ kind: 'raw' });
+    }
+  };
+
+  window.extractAgendaFromNotes = function() {
+    var raw = currentTextareaValue().trim();
+    if (!raw) return;
+    agendaRawSnapshot = raw;
+
+    // Abort any prior in-flight extract, bump the generation token
+    if (agendaAbortController) {
+      try { agendaAbortController.abort(); } catch (e) {}
+    }
+    agendaAbortController = new AbortController();
+    var gen = ++agendaExtractGen;
+
+    setAgendaState({ kind: 'extracting' });
+
+    fetch('/agenda/extract', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ raw: raw }),
+      signal: agendaAbortController.signal,
+    }).then(function(r) {
+      return r.json().then(function(d) { return { ok: r.ok, data: d }; });
+    }).then(function(res) {
+      if (gen !== agendaExtractGen) return; // stale result — ignore
+      if (!res.ok || res.data.error) {
+        setAgendaState({ kind: 'error', message: res.data.error || 'Extraction failed' });
+        return;
+      }
+      var items = (res.data.items || []).filter(function(s) { return typeof s === 'string' && s.trim(); });
+      if (items.length === 0) {
+        setAgendaState({ kind: 'empty', message: 'No items found — edit and try again, or start with the raw text.' });
+        return;
+      }
+      setAgendaState({ kind: 'extracted', items: items });
+    }).catch(function(err) {
+      if (gen !== agendaExtractGen) return; // aborted or superseded
+      if (err && err.name === 'AbortError') return;
+      setAgendaState({ kind: 'error', message: 'Network error — is the server running?' });
+    });
+  };
+
+  window.addAgendaItem = function() {
+    if (agendaState.kind !== 'extracted') return;
+    var current = snapshotEditorItems();
+    current.push('');
+    setAgendaState({ kind: 'extracted', items: current });
+    // Focus the newly added input
+    setTimeout(function() {
+      var inputs = document.querySelectorAll('.agenda-editor-input');
+      if (inputs.length > 0) inputs[inputs.length - 1].focus();
+    }, 0);
+  };
+
+  window.removeAgendaItem = function(idx) {
+    if (agendaState.kind !== 'extracted') return;
+    var current = snapshotEditorItems();
+    current.splice(idx, 1);
+    setAgendaState({ kind: 'extracted', items: current });
+  };
+
+  window.revertToRawAgenda = function() {
+    if (agendaAbortController) {
+      try { agendaAbortController.abort(); } catch (e) {}
+    }
+    agendaExtractGen++;
+    setAgendaState({ kind: 'raw' });
+  };
+
+  function collectAgendaString() {
+    if (agendaState.kind === 'extracted') {
+      return snapshotEditorItems().join('\\n');
+    }
+    return currentTextareaValue();
+  }
+
   // ─── Context Source Management ─────────────────────────────
   var ctxAddingType = null; // 'file' or 'folder' when input is visible
   var ctxError = ''; // error message to display
@@ -1743,8 +2006,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
       '<p>Start a session to begin capturing and analyzing your meeting.</p>' +
       '<div class="idle-form">' +
         '<label>Title</label><input id="startTitle" placeholder="Weekly sync, 1:1, etc.">' +
-        '<label>Agenda <span style="font-weight:400;text-transform:none;letter-spacing:0">(one item per line — tracked live)</span></label>' +
-        '<textarea id="startAgenda" rows="5" placeholder="Confirm Q1 hiring plan&#10;Review campaign results&#10;Decide on launch date"><\\/textarea>' +
+        '<label>Agenda <span style="font-weight:400;text-transform:none;letter-spacing:0">(tracked live)</span></label>' +
+        '<div id="agendaEditor"></div>' +
         '<label>Attendees</label><input id="startAttendees" placeholder="Chris, Alex, Sam">' +
         projectsHtml +
         contextHtml +
@@ -1756,8 +2019,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
       '<span class="sessions-link" onclick="showSessionHistory()">View Past Sessions</span>' +
     '</div></div>';
 
-    // Populate context list after DOM is built
+    // Populate context list and agenda editor after DOM is built
     renderContextList();
+    renderAgendaEditor();
   }
 
   function showQuickActions() {
@@ -1843,8 +2107,12 @@ const PRESENT_HTML = `<!DOCTYPE html>
   };
 
   window.startSession = function() {
+    // Block start while an extraction is in flight — Start Session must not
+    // race against an about-to-settle extract.
+    if (agendaState.kind === 'extracting') return;
+
     var title = (document.getElementById('startTitle') || {}).value || '';
-    var agenda = (document.getElementById('startAgenda') || {}).value || '';
+    var agenda = collectAgendaString();
     var attendees = (document.getElementById('startAttendees') || {}).value || '';
 
     // Collect selected projects
@@ -2291,9 +2559,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
     ws.onopen = function() {
       wsRetries = 0;
       statusDot.className = 'status-dot connected';
-      // Enable start button if on idle screen
-      var startBtn = document.getElementById('startBtn');
-      if (startBtn) startBtn.disabled = false;
+      // Enable start button if on idle screen (respects agenda extraction state)
+      refreshStartButton();
       var connMsg = idleOverlay.querySelector('p[style*="red"]');
       if (connMsg) connMsg.remove();
       // Check current session state

@@ -20,6 +20,7 @@ import {
   removeContextItem,
   getContextItemInfo,
 } from './context/index.js';
+import { extractAgendaItemsFromNotes } from './intelligence/agenda.js';
 import type { ContextItemConfig } from './context/index.js';
 
 interface RouteContext {
@@ -258,6 +259,35 @@ export function createRoutes(ctx: RouteContext): Router {
       label: body.label,
     });
     res.json({ success: true, items: items.map((c) => getContextItemInfo(c)) });
+  });
+
+  // Extract trackable agenda items from freeform notes / markdown prep docs.
+  // User-initiated, one-shot. Route handler is thin — all logic in
+  // `extractAgendaItemsFromNotes` so it can be unit-tested without HTTP.
+  router.post('/agenda/extract', async (req, res) => {
+    const body = req.body as { raw?: unknown };
+    const raw = body?.raw;
+    if (typeof raw !== 'string') {
+      res.status(400).json({ error: 'Expected { raw: string }' });
+      return;
+    }
+    if (raw.trim().length === 0) {
+      res.status(400).json({ error: 'Notes are empty' });
+      return;
+    }
+    if (raw.length > 100_000) {
+      res.status(400).json({ error: 'Notes too long (max 100,000 characters)' });
+      return;
+    }
+
+    try {
+      const items = await extractAgendaItemsFromNotes(raw);
+      res.json({ items });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('[Agenda] Extraction failed:', message);
+      res.status(502).json({ error: 'Extraction failed — try again or edit manually' });
+    }
   });
 
   // Remove a context source

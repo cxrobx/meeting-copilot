@@ -1,8 +1,14 @@
 import { EventEmitter } from 'node:events';
-import { claudeTriage } from '../claude-cli.js';
+import { claudeTriage, claudeChat } from '../claude-cli.js';
 
 const EVAL_INTERVAL_MS = 30_000;
 const MIN_NEW_WORDS_BEFORE_EVAL = 25;
+
+const EXTRACT_MAX_ITEMS = 20;
+const EXTRACT_ITEM_MAX_CHARS = 150;
+const BULLET_PREFIX_RE = /^[\s\-\*•‣]+/;
+const NUMBERED_PREFIX_RE = /^\d+[\.\)]\s*/;
+const TRAILING_PUNCTUATION_RE = /[\s.,;:!?]+$/;
 
 export type AgendaItemState = 'pending' | 'partial' | 'covered';
 
@@ -342,4 +348,164 @@ function normalizeState(s: string): AgendaItemState {
   if (v === 'covered' || v === 'done' || v === 'complete') return 'covered';
   if (v === 'partial' || v === 'partially' || v === 'in_progress') return 'partial';
   return 'pending';
+}
+
+// ─── Agenda extraction from freeform notes ──────────────────────────────────
+
+type ChatFn = (
+  prompt: string,
+  options: { systemPrompt?: string; model?: string; signal?: AbortSignal },
+) => Promise<string>;
+
+export interface ExtractAgendaDeps {
+  chat?: ChatFn;
+  signal?: AbortSignal;
+}
+
+const AGENDA_EXTRACT_SYSTEM = `You extract a meeting-tracking agenda from freeform notes, prep docs, or markdown briefs. Given the user's input, return 5–15 short concrete items they want to make sure they COVER or ASK during the meeting.
+
+Rules:
+- Each item is one short imperative or phrase, under 100 characters.
+- Prefer the user's own wording where present — don't paraphrase if their phrasing is already tight.
+- Exclude: post-meeting follow-ups, topics the user explicitly marks as hold-back / don't-raise / ask-after-the-call, attendee lists, scheduling or logistics metadata, the user's own scoring or evaluation criteria, and general commentary.
+- If the input is already a clean one-per-line list, return those items as-is.
+- If the user clearly wrote fewer than 5 items, return what they wrote — don't invent.
+
+Respond with JSON only. No prose, no code fences.`;
+
+function buildAgendaExtractPrompt(raw: string): string {
+  return `<notes>
+${raw}
+</notes>
+
+Respond with JSON:
+{ "items": ["short phrase 1", "short phrase 2", ...] }`;
+}
+
+/**
+ * Extract a list of trackable agenda items from freeform notes.
+ *
+ * Uses Sonnet via claudeChat() — the extraction is user-initiated, one-shot,
+ * and benefits from the larger/stricter model. Retries once on schema failure
+ * before giving up. Normalizes, dedupes (case-insensitive), caps at 20.
+ *
+ * Returns `[]` for empty input (no LLM call) and for unrecoverable parse
+ * failures.
+ */
+export async function extractAgendaItemsFromNotes(
+  raw: string,
+  deps: ExtractAgendaDeps = {},
+): Promise<string[]> {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return [];
+
+  const chat = deps.chat ?? (claudeChat as ChatFn);
+  const signal = deps.signal;
+
+  const firstPrompt = buildAgendaExtractPrompt(trimmed);
+  let response: string;
+  try {
+    response = await chat(firstPrompt, {
+      systemPrompt: AGENDA_EXTRACT_SYSTEM,
+      model: 'claude-sonnet-4-6',
+      signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === 'Aborted') throw err;
+    throw new Error(
+      `Extraction failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  let parsed = parseExtractResponse(response);
+  if (!parsed) {
+    // One retry with a clarifying follow-up.
+    const retryPrompt = `${firstPrompt}
+
+Your previous reply was not valid JSON matching the required shape. Return JSON only, with no prose and no code fences:
+{ "items": ["..."] }`;
+    try {
+      const retry = await chat(retryPrompt, {
+        systemPrompt: AGENDA_EXTRACT_SYSTEM,
+        model: 'claude-sonnet-4-6',
+        signal,
+      });
+      parsed = parseExtractResponse(retry);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Aborted') throw err;
+      // Retry call failed — fall through to empty result.
+    }
+  }
+
+  if (!parsed) return [];
+  return normalizeExtractedItems(parsed);
+}
+
+/**
+ * Parses the raw model response into a string[] of raw item text, or null if
+ * the response doesn't match the expected shape. Handles:
+ *   - bare JSON objects
+ *   - ```json fenced code blocks
+ *   - leading/trailing prose around a JSON object
+ */
+export function parseExtractResponse(raw: string): string[] | null {
+  if (!raw || typeof raw !== 'string') return null;
+
+  // Strip ```json / ``` fences if present.
+  let cleaned = raw.trim();
+  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch && fenceMatch[1]) {
+    cleaned = fenceMatch[1].trim();
+  }
+
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== 'object') return null;
+  const items = (parsed as { items?: unknown }).items;
+  if (!Array.isArray(items)) return null;
+
+  const out: string[] = [];
+  for (const entry of items) {
+    if (typeof entry !== 'string') continue;
+    const text = entry.trim();
+    if (!text) continue;
+    if (text.length > EXTRACT_ITEM_MAX_CHARS) continue;
+    out.push(text);
+  }
+  return out;
+}
+
+/**
+ * Normalize a raw extracted list: strip bullet/number prefixes, trim trailing
+ * punctuation, collapse whitespace, dedupe case-insensitively on the result,
+ * cap at EXTRACT_MAX_ITEMS.
+ */
+export function normalizeExtractedItems(items: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of items) {
+    if (typeof raw !== 'string') continue;
+    const cleaned = raw
+      .replace(BULLET_PREFIX_RE, '')
+      .replace(NUMBERED_PREFIX_RE, '')
+      .replace(/\s+/g, ' ')
+      .replace(TRAILING_PUNCTUATION_RE, '')
+      .trim();
+    if (!cleaned) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+    if (out.length >= EXTRACT_MAX_ITEMS) break;
+  }
+  return out;
 }

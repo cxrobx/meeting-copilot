@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { AgendaTracker, parseAgenda, type AgendaStatus } from '../intelligence/agenda.js';
+import {
+  AgendaTracker,
+  parseAgenda,
+  extractAgendaItemsFromNotes,
+  normalizeExtractedItems,
+  parseExtractResponse,
+  type AgendaStatus,
+} from '../intelligence/agenda.js';
 
 type TriageFn = (prompt: string, systemPrompt: string, signal?: AbortSignal) => Promise<string>;
 
@@ -282,5 +289,165 @@ describe('AgendaTracker', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(errors).toHaveLength(0);
+  });
+});
+
+describe('parseExtractResponse', () => {
+  it('parses a bare JSON object', () => {
+    const raw = JSON.stringify({ items: ['one', 'two', 'three'] });
+    expect(parseExtractResponse(raw)).toEqual(['one', 'two', 'three']);
+  });
+
+  it('parses a ```json fenced response', () => {
+    const raw = '```json\n{ "items": ["alpha", "beta"] }\n```';
+    expect(parseExtractResponse(raw)).toEqual(['alpha', 'beta']);
+  });
+
+  it('parses a plain ``` fenced response', () => {
+    const raw = '```\n{"items":["gamma"]}\n```';
+    expect(parseExtractResponse(raw)).toEqual(['gamma']);
+  });
+
+  it('parses JSON wrapped in explanatory prose', () => {
+    const raw = 'Sure — here are the items:\n{ "items": ["a", "b"] }\nLet me know if you need more.';
+    expect(parseExtractResponse(raw)).toEqual(['a', 'b']);
+  });
+
+  it('returns null for malformed JSON', () => {
+    expect(parseExtractResponse('not valid')).toBeNull();
+    expect(parseExtractResponse('{ "items": [broken }')).toBeNull();
+  });
+
+  it('returns null when items field is missing or wrong type', () => {
+    expect(parseExtractResponse('{ "foo": "bar" }')).toBeNull();
+    expect(parseExtractResponse('{ "items": "not an array" }')).toBeNull();
+  });
+
+  it('drops non-string entries and overly long entries', () => {
+    const longItem = 'x'.repeat(200);
+    const raw = JSON.stringify({ items: ['good', 42, null, longItem, 'also good'] });
+    expect(parseExtractResponse(raw)).toEqual(['good', 'also good']);
+  });
+});
+
+describe('normalizeExtractedItems', () => {
+  it('strips bullet and number prefixes', () => {
+    const result = normalizeExtractedItems([
+      '- Confirm hiring plan',
+      '* Review results',
+      '1. First question',
+      '2) Second question',
+    ]);
+    expect(result).toEqual([
+      'Confirm hiring plan',
+      'Review results',
+      'First question',
+      'Second question',
+    ]);
+  });
+
+  it('strips trailing punctuation and collapses whitespace', () => {
+    const result = normalizeExtractedItems([
+      'Ask about the audit?',
+      'Confirm  the  date.',
+      'Discuss   plans,',
+    ]);
+    expect(result).toEqual([
+      'Ask about the audit',
+      'Confirm the date',
+      'Discuss plans',
+    ]);
+  });
+
+  it('dedupes case-insensitively, first occurrence wins', () => {
+    const result = normalizeExtractedItems([
+      'Confirm the plan',
+      'confirm the PLAN',
+      'CONFIRM the plan',
+      'Something else',
+    ]);
+    expect(result).toEqual(['Confirm the plan', 'Something else']);
+  });
+
+  it('caps at 20 items', () => {
+    const items = Array.from({ length: 50 }, (_, i) => `item ${i + 1}`);
+    const result = normalizeExtractedItems(items);
+    expect(result).toHaveLength(20);
+    expect(result[0]).toBe('item 1');
+    expect(result[19]).toBe('item 20');
+  });
+
+  it('skips empty and non-string entries', () => {
+    // @ts-expect-error — deliberately pass junk to exercise the guard
+    const result = normalizeExtractedItems(['keep', '', '  ', null, undefined, 42, 'also']);
+    expect(result).toEqual(['keep', 'also']);
+  });
+});
+
+describe('extractAgendaItemsFromNotes', () => {
+  it('returns [] for empty or whitespace-only input without calling the model', async () => {
+    const chat = vi.fn();
+    expect(await extractAgendaItemsFromNotes('', { chat })).toEqual([]);
+    expect(await extractAgendaItemsFromNotes('   \n\t ', { chat })).toEqual([]);
+    expect(chat).not.toHaveBeenCalled();
+  });
+
+  it('extracts, normalizes, dedupes, and caps items from a successful response', async () => {
+    const chat = vi.fn().mockResolvedValueOnce(JSON.stringify({
+      items: [
+        '- Confirm Q1 hiring plan',
+        'Review campaign results.',
+        'CONFIRM Q1 hiring plan',  // dup (normalized) — dropped
+        'Decide on launch date?',
+      ],
+    }));
+
+    const out = await extractAgendaItemsFromNotes('some notes', { chat });
+    expect(out).toEqual([
+      'Confirm Q1 hiring plan',
+      'Review campaign results',
+      'Decide on launch date',
+    ]);
+    expect(chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries once when the first response is malformed, then returns parsed items', async () => {
+    const chat = vi.fn()
+      .mockResolvedValueOnce('I cannot parse this.')
+      .mockResolvedValueOnce(JSON.stringify({ items: ['ask about schema', 'confirm audit date'] }));
+
+    const out = await extractAgendaItemsFromNotes('some notes', { chat });
+    expect(out).toEqual(['ask about schema', 'confirm audit date']);
+    expect(chat).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns [] when both the first call and the retry fail to parse', async () => {
+    const chat = vi.fn()
+      .mockResolvedValueOnce('garbage')
+      .mockResolvedValueOnce('still garbage');
+
+    const out = await extractAgendaItemsFromNotes('some notes', { chat });
+    expect(out).toEqual([]);
+    expect(chat).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws when the chat call fails (non-abort error)', async () => {
+    const chat = vi.fn().mockRejectedValue(new Error('network down'));
+    await expect(extractAgendaItemsFromNotes('notes', { chat })).rejects.toThrow(/Extraction failed/);
+  });
+
+  it('propagates Aborted as-is so callers can distinguish cancellation', async () => {
+    const chat = vi.fn().mockRejectedValue(new Error('Aborted'));
+    await expect(extractAgendaItemsFromNotes('notes', { chat })).rejects.toThrow('Aborted');
+  });
+
+  it('passes through an AbortSignal to the chat call', async () => {
+    const chat = vi.fn().mockResolvedValue(JSON.stringify({ items: ['a', 'b'] }));
+    const controller = new AbortController();
+    await extractAgendaItemsFromNotes('notes', { chat, signal: controller.signal });
+    expect(chat).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ signal: controller.signal }),
+    );
   });
 });
