@@ -1818,6 +1818,10 @@ const PRESENT_HTML = `<!DOCTYPE html>
     var total = status.items.length;
     var progressText = covered + ' / ' + total + ' covered';
     if (partial > 0) progressText += ' · ' + partial + ' partial';
+    if (status.lastEvalAt) {
+      var secs = Math.max(1, Math.round((Date.now() - status.lastEvalAt) / 1000));
+      progressText += ' · checked ' + (secs < 60 ? secs + 's' : Math.round(secs / 60) + 'm') + ' ago';
+    }
     agendaProgressEl.textContent = progressText;
     agendaProgressEl.className = 'agenda-progress' + (covered === total ? ' all-covered' : '');
 

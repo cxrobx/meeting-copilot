@@ -155,7 +155,14 @@ agendaTracker.on('status', (status: AgendaStatus) => {
 });
 
 agendaTracker.on('error', (msg: string) => {
-  debugLog(`[Agenda] ${msg}`);
+  debugLog(`[Agenda] error: ${msg}`);
+});
+
+agendaTracker.on('eval', (info: Record<string, unknown>) => {
+  // Diagnostic event — emitted on every schedule/skip/completion so
+  // server.log captures enough to explain "why didn't it update?"
+  debugLog(`[Agenda] ${JSON.stringify(info)}`);
+  eventLogger?.log('agenda.eval', info);
 });
 
 // Register workers

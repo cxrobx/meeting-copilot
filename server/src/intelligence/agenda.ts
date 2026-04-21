@@ -1,8 +1,11 @@
 import { EventEmitter } from 'node:events';
 import { claudeTriage, claudeChat } from '../claude-cli.js';
 
-const EVAL_INTERVAL_MS = 30_000;
-const MIN_NEW_WORDS_BEFORE_EVAL = 25;
+const EVAL_INTERVAL_MS = 15_000;
+const MIN_NEW_WORDS_BEFORE_EVAL = 15;
+// First eval fires when transcript reaches this total word count — doesn't
+// require waiting for MIN_NEW_WORDS_BEFORE_EVAL of growth.
+const MIN_TOTAL_WORDS_FOR_FIRST_EVAL = 15;
 
 const EXTRACT_MAX_ITEMS = 20;
 const EXTRACT_ITEM_MAX_CHARS = 150;
@@ -178,10 +181,24 @@ export class AgendaTracker extends EventEmitter {
   }
 
   private async scheduleEval(): Promise<void> {
-    if (!this.running || this.currentEval || this.items.length === 0) return;
+    if (!this.running || this.items.length === 0) return;
+    if (this.currentEval) {
+      this.emit('eval', { skipped: 'in-flight' });
+      return;
+    }
 
     const currentWordCount = this.wordCountProvider();
-    if (currentWordCount - this.lastEvalWordCount < MIN_NEW_WORDS_BEFORE_EVAL) {
+    const isFirstEval = this.lastEvalAt === 0;
+    const gateReason = isFirstEval
+      ? currentWordCount < MIN_TOTAL_WORDS_FOR_FIRST_EVAL
+        ? `first-eval: ${currentWordCount}/${MIN_TOTAL_WORDS_FOR_FIRST_EVAL} words`
+        : null
+      : currentWordCount - this.lastEvalWordCount < MIN_NEW_WORDS_BEFORE_EVAL
+        ? `growth: +${currentWordCount - this.lastEvalWordCount}/${MIN_NEW_WORDS_BEFORE_EVAL}`
+        : null;
+
+    if (gateReason) {
+      this.emit('eval', { skipped: gateReason });
       return;
     }
 
@@ -223,15 +240,23 @@ export class AgendaTracker extends EventEmitter {
     transcript: string,
     signal: AbortSignal,
   ): Promise<void> {
+    const startedAt = Date.now();
+    this.emit('eval', { started: true, words: this.wordCountProvider() });
     try {
       const prompt = buildAgendaEvalPrompt(this.items, transcript, this.sessionTitle);
       const raw = await this.triage(prompt, AGENDA_EVAL_SYSTEM, signal);
 
       // Stale-guard: drop the result if the session changed while we awaited.
-      if (gen !== this.generation) return;
+      if (gen !== this.generation) {
+        this.emit('eval', { stale: true });
+        return;
+      }
 
       const parsed = parseAgendaResponse(raw);
-      if (!parsed) return;
+      if (!parsed) {
+        this.emit('eval', { parseFailed: true, rawSnippet: raw.slice(0, 200) });
+        return;
+      }
 
       let changed = false;
       const byId = new Map(parsed.items.map((r) => [r.id, r]));
@@ -268,9 +293,21 @@ export class AgendaTracker extends EventEmitter {
       this.lastEvalAt = Date.now();
       this.lastEvalWordCount = this.wordCountProvider();
 
-      if (changed) {
-        this.emit('status', this.getStatus());
-      }
+      // Always emit status on a successful eval so consumers see lastEvalAt
+      // advance and can confirm the tracker is live, even when the LLM
+      // returned no state changes. Broadcasting identical payloads back-to-
+      // back is cheap (JSON serialization) and makes the feature observable.
+      const covered = this.items.filter((i) => i.state === 'covered').length;
+      const partial = this.items.filter((i) => i.state === 'partial').length;
+      this.emit('eval', {
+        completed: true,
+        changed,
+        covered,
+        partial,
+        total: this.items.length,
+        latencyMs: Date.now() - startedAt,
+      });
+      this.emit('status', this.getStatus());
     } catch (err) {
       if (gen !== this.generation) return; // session changed — swallow silently
       const msg = err instanceof Error ? err.message : String(err);

@@ -92,7 +92,7 @@ describe('AgendaTracker', () => {
     });
   }
 
-  it('gates evaluations on the min-word growth threshold', async () => {
+  it('gates evaluations on the min-word thresholds', async () => {
     const triage = vi.fn<TriageFn>().mockResolvedValue(
       agendaResponse([
         { id: 'a1', state: 'pending' },
@@ -109,33 +109,33 @@ describe('AgendaTracker', () => {
       wordCountProvider: () => words,
     });
 
-    // Empty transcript — skipped
-    await vi.advanceTimersByTimeAsync(30_000);
+    // Empty transcript — first-eval gate not met (<15 total)
+    await vi.advanceTimersByTimeAsync(15_000);
     expect(triage).not.toHaveBeenCalled();
 
-    // Growth below threshold (needs 25+) — skipped
+    // Total < first-eval threshold (15) — still skipped
     words = 10;
     transcript = 'short bit of content';
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(15_000);
     expect(triage).not.toHaveBeenCalled();
 
-    // Growth above threshold — should run once
-    words = 40;
+    // Total crosses first-eval threshold — should run once
+    words = 25;
     transcript = 'this is now a long enough transcript to actually evaluate against the agenda items';
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(15_000);
     await Promise.resolve();
     await Promise.resolve();
     expect(triage).toHaveBeenCalledTimes(1);
 
-    // Modest additional growth (<25 since last eval at 40) — skipped again
-    words = 55;
-    await vi.advanceTimersByTimeAsync(30_000);
+    // Modest additional growth (<15 since last eval at 25) — skipped again
+    words = 35;
+    await vi.advanceTimersByTimeAsync(15_000);
     await Promise.resolve();
     expect(triage).toHaveBeenCalledTimes(1);
 
-    // Clear the threshold from last eval — runs once more
-    words = 80;
-    await vi.advanceTimersByTimeAsync(30_000);
+    // Clear the growth threshold — runs once more
+    words = 60;
+    await vi.advanceTimersByTimeAsync(15_000);
     await Promise.resolve();
     await Promise.resolve();
     expect(triage).toHaveBeenCalledTimes(2);
