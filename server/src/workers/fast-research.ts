@@ -61,23 +61,41 @@ export class FastResearchWorker implements Worker {
       let sources: FastResearchSource[] = [];
 
       if (isOpenAiApiAvailable()) {
-        const result = await openaiFastResearchStream({
-          systemPrompt,
-          userContent,
-          signal,
-          onDelta,
-        });
-        text = result.text;
-        sources = result.sources;
+        try {
+          const result = await openaiFastResearchStream({
+            systemPrompt,
+            userContent,
+            signal,
+            onDelta,
+          });
+          text = result.text;
+          sources = result.sources;
 
-        // Append sources to the rendered artifact so the user can click
-        // through. The streamed deltas already landed in the action card;
-        // the final artifact gets a consolidated citations block appended.
-        if (sources.length > 0) {
-          const citationLines = sources
-            .map((s, i) => `[${i + 1}] [${s.title || s.url}](${s.url})`)
-            .join('\n');
-          text = `${text}\n\n---\n**Sources**\n${citationLines}`;
+          // Append sources to the rendered artifact so the user can click
+          // through. The streamed deltas already landed in the action card;
+          // the final artifact gets a consolidated citations block appended.
+          if (sources.length > 0) {
+            const citationLines = sources
+              .map((s, i) => `[${i + 1}] [${s.title || s.url}](${s.url})`)
+              .join('\n');
+            text = `${text}\n\n---\n**Sources**\n${citationLines}`;
+          }
+        } catch (apiErr) {
+          // Preserve aborts — don't silently fall back after the user
+          // cancelled. For any other failure (bad key, rate limit, network,
+          // 5xx), fall through to the Claude CLI path so the action card
+          // still renders something useful.
+          if (signal.aborted) throw apiErr;
+          const msg = apiErr instanceof Error ? apiErr.message : String(apiErr);
+          if (msg === 'Aborted') throw apiErr;
+          text = await claudeSuggest(
+            userContent,
+            systemPrompt,
+            signal,
+            ['WebSearch', 'WebFetch'],
+            { onDelta, model: 'claude-haiku-4-5-20251001' },
+          );
+          text = `_(OpenAI unavailable — fell back to Claude: ${msg})_\n\n${text}`;
         }
       } else {
         text = await claudeSuggest(

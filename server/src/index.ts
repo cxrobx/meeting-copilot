@@ -856,6 +856,14 @@ intelligence.on('intelligence.eval', (data) => {
 
 intelligence.on('intelligence.error', (data) => {
   eventLogger?.log('intelligence.error', data);
+  // Also surface to server.log so `grep '[openai-triage]' server.log` (and
+  // similar tag-based workflows) pick up failures without having to open the
+  // per-session JSONL.
+  try {
+    debugLog(`[intelligence.error] ${JSON.stringify(data)}`);
+  } catch {
+    debugLog(`[intelligence.error] (unserializable payload)`);
+  }
 });
 
 // ─── Startup ───────────────────────────────────────────────────────────────
