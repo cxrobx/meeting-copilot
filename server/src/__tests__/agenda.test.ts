@@ -1,0 +1,286 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { AgendaTracker, parseAgenda, type AgendaStatus } from '../intelligence/agenda.js';
+
+type TriageFn = (prompt: string, systemPrompt: string, signal?: AbortSignal) => Promise<string>;
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (err: unknown) => void;
+}
+
+function defer<T>(): Deferred<T> {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+function agendaResponse(
+  items: Array<{ id: string; state: 'covered' | 'partial' | 'pending'; evidence?: string }>,
+  missing: string[] = [],
+): string {
+  return JSON.stringify({ items, missing_warnings: missing });
+}
+
+describe('parseAgenda', () => {
+  it('returns empty list for empty/whitespace input', () => {
+    expect(parseAgenda('')).toEqual([]);
+    expect(parseAgenda('   \n  \t  ')).toEqual([]);
+  });
+
+  it('splits on newlines by default', () => {
+    const items = parseAgenda('Confirm hiring plan\nReview campaign results\nDecide launch date');
+    expect(items).toHaveLength(3);
+    expect(items.map((i) => i.text)).toEqual([
+      'Confirm hiring plan',
+      'Review campaign results',
+      'Decide launch date',
+    ]);
+    expect(items.every((i) => i.state === 'pending')).toBe(true);
+    expect(items.map((i) => i.id)).toEqual(['a1', 'a2', 'a3']);
+  });
+
+  it('strips bullet markers (-, *, •) and numbered prefixes', () => {
+    const items = parseAgenda(`- First item\n* Second item\n• Third item\n1. Fourth\n2) Fifth`);
+    expect(items.map((i) => i.text)).toEqual([
+      'First item',
+      'Second item',
+      'Third item',
+      'Fourth',
+      'Fifth',
+    ]);
+  });
+
+  it('falls back to comma/semicolon split for single-line input', () => {
+    const items = parseAgenda('topic one, topic two; topic three');
+    expect(items).toHaveLength(3);
+    expect(items.map((i) => i.text)).toEqual(['topic one', 'topic two', 'topic three']);
+  });
+
+  it('returns a single item when a single line has no separators', () => {
+    const items = parseAgenda('just one thing to cover');
+    expect(items).toEqual([{ id: 'a1', text: 'just one thing to cover', state: 'pending' }]);
+  });
+});
+
+describe('AgendaTracker', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  function make(triage: TriageFn) {
+    const tracker = new AgendaTracker({ triage });
+    return tracker;
+  }
+
+  function startWith(
+    tracker: AgendaTracker,
+    opts: { agenda?: string; transcript?: string; words?: number } = {},
+  ) {
+    return tracker.start({
+      agenda: opts.agenda ?? 'Confirm hiring plan\nReview campaign results',
+      transcriptProvider: () => opts.transcript ?? 'x'.repeat(100),
+      wordCountProvider: () => opts.words ?? 100,
+    });
+  }
+
+  it('gates evaluations on the min-word growth threshold', async () => {
+    const triage = vi.fn<TriageFn>().mockResolvedValue(
+      agendaResponse([
+        { id: 'a1', state: 'pending' },
+        { id: 'a2', state: 'pending' },
+      ]),
+    );
+    const tracker = make(triage);
+
+    let words = 0;
+    let transcript = '';
+    tracker.start({
+      agenda: 'A\nB',
+      transcriptProvider: () => transcript,
+      wordCountProvider: () => words,
+    });
+
+    // Empty transcript — skipped
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(triage).not.toHaveBeenCalled();
+
+    // Growth below threshold (needs 25+) — skipped
+    words = 10;
+    transcript = 'short bit of content';
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(triage).not.toHaveBeenCalled();
+
+    // Growth above threshold — should run once
+    words = 40;
+    transcript = 'this is now a long enough transcript to actually evaluate against the agenda items';
+    await vi.advanceTimersByTimeAsync(30_000);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(triage).toHaveBeenCalledTimes(1);
+
+    // Modest additional growth (<25 since last eval at 40) — skipped again
+    words = 55;
+    await vi.advanceTimersByTimeAsync(30_000);
+    await Promise.resolve();
+    expect(triage).toHaveBeenCalledTimes(1);
+
+    // Clear the threshold from last eval — runs once more
+    words = 80;
+    await vi.advanceTimersByTimeAsync(30_000);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(triage).toHaveBeenCalledTimes(2);
+  });
+
+  it('evaluateNow waits for an in-flight eval before starting a new one', async () => {
+    const first = defer<string>();
+    const second = defer<string>();
+    const triage = vi.fn<TriageFn>()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+
+    const tracker = make(triage);
+    let words = 100;
+    tracker.start({
+      agenda: 'A\nB',
+      transcriptProvider: () => 'transcript text long enough for evaluation',
+      wordCountProvider: () => words,
+    });
+
+    // Kick off the scheduled eval (grow words so the gating lets it run).
+    words = 200;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(triage).toHaveBeenCalledTimes(1);
+
+    // evaluateNow is called while the first eval is mid-flight.
+    const forced = tracker.evaluateNow();
+
+    // Let the first settle.
+    first.resolve(agendaResponse([
+      { id: 'a1', state: 'covered', evidence: 'first eval' },
+      { id: 'a2', state: 'pending' },
+    ]));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // A second triage call should now be in-flight (forced eval ran).
+    expect(triage).toHaveBeenCalledTimes(2);
+    second.resolve(agendaResponse([
+      { id: 'a1', state: 'covered', evidence: 'first eval' },
+      { id: 'a2', state: 'covered', evidence: 'second eval picked it up' },
+    ]));
+    await forced;
+
+    const status = tracker.getStatus();
+    expect(status.items.find((i) => i.id === 'a2')?.state).toBe('covered');
+  });
+
+  it('discards a stale in-flight result after stop() so it cannot bleed into a new session', async () => {
+    const first = defer<string>();
+    const triage = vi.fn<TriageFn>()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementation(() => Promise.resolve(agendaResponse([
+        { id: 'a1', state: 'pending' },
+      ])));
+
+    const tracker = make(triage);
+    const events: AgendaStatus[] = [];
+    tracker.on('status', (s: AgendaStatus) => events.push(s));
+
+    let words = 100;
+    tracker.start({
+      agenda: 'Original item one\nOriginal item two',
+      transcriptProvider: () => 'plenty of transcript text for the evaluator',
+      wordCountProvider: () => words,
+    });
+    words = 300;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(triage).toHaveBeenCalledTimes(1);
+
+    // Stop (e.g. meeting ended) and immediately start a fresh session.
+    tracker.stop();
+    startWith(tracker, { agenda: 'Fresh topic only' });
+
+    // Resolve the old eval — it references ids a1/a2 that belong to the prior
+    // session. It must NOT mutate the new session's state.
+    first.resolve(agendaResponse([
+      { id: 'a1', state: 'covered', evidence: 'stale result' },
+      { id: 'a2', state: 'covered', evidence: 'stale result' },
+    ]));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const status = tracker.getStatus();
+    expect(status.items).toHaveLength(1);
+    expect(status.items[0]!.text).toBe('Fresh topic only');
+    expect(status.items[0]!.state).toBe('pending');
+    // No status events should have been emitted from the stale result.
+    expect(events).toHaveLength(0);
+  });
+
+  it('clears item evidence when a prior covered/partial item transitions back to pending', async () => {
+    const triage = vi.fn<TriageFn>()
+      .mockResolvedValueOnce(agendaResponse([
+        { id: 'a1', state: 'covered', evidence: 'they confirmed' },
+      ]))
+      .mockResolvedValueOnce(agendaResponse([
+        { id: 'a1', state: 'pending' },
+      ]));
+
+    const tracker = make(triage);
+    let words = 100;
+    tracker.start({
+      agenda: 'Confirm hiring plan',
+      transcriptProvider: () => 'long enough transcript content here',
+      wordCountProvider: () => words,
+    });
+
+    words = 200;
+    await vi.advanceTimersByTimeAsync(30_000);
+    await Promise.resolve();
+    expect(tracker.getStatus().items[0]).toMatchObject({
+      state: 'covered',
+      evidence: 'they confirmed',
+    });
+
+    words = 400;
+    await vi.advanceTimersByTimeAsync(30_000);
+    await Promise.resolve();
+    const after = tracker.getStatus().items[0]!;
+    expect(after.state).toBe('pending');
+    expect(after.evidence).toBeUndefined();
+  });
+
+  it('aborts the in-flight triage call on stop() without emitting an error', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const triage = vi.fn<TriageFn>().mockImplementation((_p, _s, signal) => {
+      capturedSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new Error('Aborted')));
+      });
+    });
+
+    const tracker = make(triage);
+    const errors: string[] = [];
+    tracker.on('error', (e: string) => errors.push(e));
+
+    let words = 100;
+    tracker.start({
+      agenda: 'A',
+      transcriptProvider: () => 'plenty of content for triage',
+      wordCountProvider: () => words,
+    });
+    words = 300;
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(capturedSignal?.aborted).toBe(false);
+    tracker.stop();
+    expect(capturedSignal?.aborted).toBe(true);
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(errors).toHaveLength(0);
+  });
+});

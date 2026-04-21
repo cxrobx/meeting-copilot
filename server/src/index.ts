@@ -17,6 +17,7 @@ import dotenv from 'dotenv';
 
 import { TranscriptionService } from './transcription/index.js';
 import { IntelligenceEngine } from './intelligence/index.js';
+import { AgendaTracker, type AgendaStatus } from './intelligence/agenda.js';
 import { WorkerRegistry } from './workers/registry.js';
 import { ResearchWorker } from './workers/research.js';
 import { FastResearchWorker } from './workers/fast-research.js';
@@ -112,6 +113,10 @@ type OutboundMessage =
   | {
       type: 'metrics';
       data: any;
+    }
+  | {
+      type: 'agenda.status';
+      status: AgendaStatus;
     };
 
 // ─── App State ─────────────────────────────────────────────────────────────
@@ -132,8 +137,26 @@ let whisperAvailable: boolean | null = null;
 
 const transcription = new TranscriptionService();
 const intelligence = new IntelligenceEngine();
+const agendaTracker = new AgendaTracker();
 const registry = new WorkerRegistry();
 const debug = new DebugHandler(transcription, intelligence, registry);
+
+// Snapshot of last broadcast agenda status — served to late-joining clients
+let lastAgendaStatus: AgendaStatus | null = null;
+
+agendaTracker.on('status', (status: AgendaStatus) => {
+  lastAgendaStatus = status;
+  eventLogger?.log('agenda.status', {
+    covered: status.items.filter((i) => i.state === 'covered').length,
+    total: status.items.length,
+    missing: status.missing,
+  });
+  broadcast({ type: 'agenda.status', status });
+});
+
+agendaTracker.on('error', (msg: string) => {
+  debugLog(`[Agenda] ${msg}`);
+});
 
 // Register workers
 registry.register(new ResearchWorker());
@@ -198,6 +221,12 @@ function handleWsConnection(ws: WebSocket, label: string): void {
     sessionId: sessionStore?.id,
   };
   ws.send(JSON.stringify(stateMsg));
+
+  // Replay the latest agenda status so late-joining clients (e.g., browser reload)
+  // see the current coverage without waiting for the next 30s evaluation.
+  if (sessionActive && lastAgendaStatus && lastAgendaStatus.items.length > 0) {
+    ws.send(JSON.stringify({ type: 'agenda.status', status: lastAgendaStatus }));
+  }
 
   ws.on('message', async (raw) => {
     try {
@@ -307,6 +336,37 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       // Set meeting context on intelligence engine
       if (message.agenda || message.attendees) {
         intelligence.setMeetingContext({ agenda: message.agenda, attendees: message.attendees });
+      }
+
+      // Start agenda tracker if the user supplied agenda items
+      lastAgendaStatus = null;
+      if (message.agenda && message.agenda.trim()) {
+        const items = agendaTracker.start({
+          agenda: message.agenda,
+          sessionTitle: message.title,
+          transcriptProvider: () => {
+            if (!sessionStore) return '';
+            return sessionStore
+              .getTranscript()
+              .map((r) => `${r.label} ${r.text}`)
+              .join('\n');
+          },
+          wordCountProvider: () => {
+            if (!sessionStore) return 0;
+            return sessionStore.getTranscript().reduce((sum, r) => sum + (r.wordCount || 0), 0);
+          },
+        });
+        if (items.length > 0) {
+          const initial: AgendaStatus = {
+            items,
+            missing: [],
+            lastEvalAt: 0,
+            fullyCovered: false,
+          };
+          lastAgendaStatus = initial;
+          broadcast({ type: 'agenda.status', status: initial });
+          eventLogger.log('agenda.start', { itemCount: items.length });
+        }
       }
 
       // Load project context if specified
@@ -438,6 +498,14 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       }
       rollingSummaryId = null;
       rollingSummaryWordCount = 0;
+
+      // Run a final agenda evaluation so the wrap-up state is captured before stop
+      try {
+        await agendaTracker.evaluateNow();
+      } catch {
+        // Non-critical — don't block shutdown
+      }
+      agendaTracker.stop();
 
       // Stop intelligence
       intelligence.stop();
@@ -851,8 +919,9 @@ let tcpServerRef: ReturnType<typeof createServer> | null = null;
 async function shutdown(signal: string): Promise<void> {
   console.log(`\n[Server] Received ${signal}, shutting down...`);
 
-  // Stop intelligence
+  // Stop intelligence + agenda
   intelligence.stop();
+  agendaTracker.stop();
 
   // Close WebSocket connections
   for (const client of clients) {

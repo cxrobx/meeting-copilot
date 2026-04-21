@@ -1111,6 +1111,111 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .toc-heading:hover { color: var(--gb-subtext1); background: var(--gb-surface1); }
   .toc-heading.active { color: var(--gb-text); background: rgba(69,133,136,0.1); border-left: 2px solid var(--gb-blue); padding-left: 16px; }
   .toc-heading.active.depth-3 { padding-left: 26px; }
+
+  /* ─── Agenda Tracker Panel ─────────────────────────────────── */
+  .agenda-panel {
+    padding: 8px 4px 12px;
+    border-bottom: 1px solid var(--gb-surface2);
+    margin-bottom: 12px;
+  }
+  .agenda-panel.hidden { display: none; }
+  .agenda-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    padding: 0 4px;
+  }
+  .agenda-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--gb-overlay2);
+  }
+  .agenda-progress {
+    font-size: 10px;
+    color: var(--gb-subtext0);
+    font-weight: 600;
+  }
+  .agenda-progress.all-covered { color: var(--gb-green); }
+  .agenda-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 4px 4px;
+    font-size: 11px;
+    line-height: 1.4;
+    border-radius: 3px;
+  }
+  .agenda-item + .agenda-item { margin-top: 2px; }
+  .agenda-dot {
+    flex: 0 0 auto;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    margin-top: 2px;
+    border: 1.5px solid var(--gb-overlay1);
+    background: transparent;
+    position: relative;
+  }
+  .agenda-item.state-covered .agenda-dot {
+    border-color: var(--gb-green);
+    background: var(--gb-green);
+  }
+  .agenda-item.state-covered .agenda-dot::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: -1px;
+    width: 4px;
+    height: 7px;
+    border: solid #fff;
+    border-width: 0 1.5px 1.5px 0;
+    transform: rotate(45deg);
+  }
+  .agenda-item.state-partial .agenda-dot {
+    border-color: var(--gb-yellow);
+    background: linear-gradient(90deg, var(--gb-yellow) 50%, transparent 50%);
+  }
+  .agenda-text {
+    flex: 1 1 auto;
+    color: var(--gb-subtext1);
+    word-break: break-word;
+  }
+  .agenda-item.state-covered .agenda-text {
+    color: var(--gb-overlay2);
+    text-decoration: line-through;
+    text-decoration-color: var(--gb-overlay0);
+  }
+  .agenda-item.state-partial .agenda-text { color: var(--gb-text); }
+  .agenda-item.state-pending .agenda-text { color: var(--gb-text); }
+  .agenda-evidence {
+    font-size: 10px;
+    color: var(--gb-overlay2);
+    margin-top: 2px;
+    padding-left: 18px;
+    font-style: italic;
+    line-height: 1.35;
+  }
+  .agenda-warnings {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    background: rgba(204,36,29,0.08);
+    border-left: 2px solid var(--gb-red);
+    font-size: 11px;
+    color: var(--gb-red);
+    line-height: 1.4;
+  }
+  .agenda-warnings-title {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 4px;
+  }
+  .agenda-warning-item + .agenda-warning-item { margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -1171,6 +1276,14 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   <!-- TOC Sidebar -->
   <nav class="toc" id="toc">
+    <div class="agenda-panel hidden" id="agendaPanel">
+      <div class="agenda-header">
+        <span class="agenda-title">Agenda</span>
+        <span class="agenda-progress" id="agendaProgress">0 / 0</span>
+      </div>
+      <div id="agendaItems"></div>
+      <div id="agendaWarnings"></div>
+    </div>
     <div class="toc-title">Outline</div>
     <div id="tocEntries"></div>
   </nav>
@@ -1195,6 +1308,10 @@ const PRESENT_HTML = `<!DOCTYPE html>
   var quickActionsSlot = document.getElementById('quickActionsSlot');
   var resultsEl = document.getElementById('results');
   var tocEntries = document.getElementById('tocEntries');
+  var agendaPanel = document.getElementById('agendaPanel');
+  var agendaItemsEl = document.getElementById('agendaItems');
+  var agendaWarningsEl = document.getElementById('agendaWarnings');
+  var agendaProgressEl = document.getElementById('agendaProgress');
 
   // ─── State ──────────────────────────────────────────────────
   var params = new URLSearchParams(window.location.search);
@@ -1370,6 +1487,61 @@ const PRESENT_HTML = `<!DOCTYPE html>
     return signals;
   }
 
+  // ─── Agenda Tracker ────────────────────────────────────────
+  function renderAgendaStatus(status) {
+    if (!status || !status.items || status.items.length === 0) {
+      agendaPanel.className = 'agenda-panel hidden';
+      return;
+    }
+
+    agendaPanel.className = 'agenda-panel';
+
+    var covered = 0;
+    var partial = 0;
+    var html = '';
+    for (var i = 0; i < status.items.length; i++) {
+      var item = status.items[i];
+      var state = item.state || 'pending';
+      if (state === 'covered') covered++;
+      else if (state === 'partial') partial++;
+
+      html += '<div class="agenda-item state-' + state + '" title="' + escapeHtml(state) + '">' +
+        '<span class="agenda-dot"></span>' +
+        '<span class="agenda-text">' + escapeHtml(item.text) + '</span>' +
+      '</div>';
+      if (item.evidence && state !== 'pending') {
+        html += '<div class="agenda-evidence">“' + escapeHtml(item.evidence) + '”</div>';
+      }
+    }
+    agendaItemsEl.innerHTML = html;
+
+    var total = status.items.length;
+    var progressText = covered + ' / ' + total + ' covered';
+    if (partial > 0) progressText += ' · ' + partial + ' partial';
+    agendaProgressEl.textContent = progressText;
+    agendaProgressEl.className = 'agenda-progress' + (covered === total ? ' all-covered' : '');
+
+    if (status.missing && status.missing.length > 0) {
+      var warnHtml = '<div class="agenda-warnings">' +
+        '<div class="agenda-warnings-title">Might be missing</div>';
+      for (var j = 0; j < status.missing.length; j++) {
+        warnHtml += '<div class="agenda-warning-item">' + escapeHtml(status.missing[j]) + '</div>';
+      }
+      warnHtml += '</div>';
+      agendaWarningsEl.innerHTML = warnHtml;
+    } else {
+      agendaWarningsEl.innerHTML = '';
+    }
+  }
+
+  function clearAgenda() {
+    agendaPanel.className = 'agenda-panel hidden';
+    agendaItemsEl.innerHTML = '';
+    agendaWarningsEl.innerHTML = '';
+    agendaProgressEl.textContent = '0 / 0';
+    agendaProgressEl.className = 'agenda-progress';
+  }
+
   // ─── Utilities ─────────────────────────────────────────────
   function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
@@ -1534,7 +1706,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
       '<p>Start a session to begin capturing and analyzing your meeting.</p>' +
       '<div class="idle-form">' +
         '<label>Title</label><input id="startTitle" placeholder="Weekly sync, 1:1, etc.">' +
-        '<label>Agenda</label><textarea id="startAgenda" rows="2" placeholder="Topics to discuss..."><\\/textarea>' +
+        '<label>Agenda <span style="font-weight:400;text-transform:none;letter-spacing:0">(one item per line — tracked live)</span></label>' +
+        '<textarea id="startAgenda" rows="5" placeholder="Confirm Q1 hiring plan&#10;Review campaign results&#10;Decide on launch date"><\\/textarea>' +
         '<label>Attendees</label><input id="startAttendees" placeholder="Chris, Alex, Sam">' +
         projectsHtml +
         contextHtml +
@@ -1578,6 +1751,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     totalWords = 0; micWords = 0; meetingWords = 0;
     segCountEl.textContent = '0';
     sessionTimerEl.textContent = '';
+    clearAgenda();
     updateUI();
   };
 
@@ -2131,8 +2305,11 @@ const PRESENT_HTML = `<!DOCTYPE html>
             startTimer();
           } else if (msg.state === 'archived') {
             // Session just ended — keep transcript visible so the user can
-            // review what was said. Only stop the running clock.
+            // review what was said. Only stop the running clock. Agenda
+            // tracking is live-only; clear the panel so stale coverage
+            // doesn't sit in the TOC after the meeting ends.
             stopTimer();
+            clearAgenda();
           } else if (msg.state === 'idle') {
             // Hard reset for a new meeting (user clicked "New Meeting").
             stopTimer();
@@ -2141,6 +2318,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
             segments = [];
             transcriptFeed.innerHTML = '';
             segCountEl.textContent = '0';
+            clearAgenda();
           }
           updateUI();
           break;
@@ -2178,6 +2356,10 @@ const PRESENT_HTML = `<!DOCTYPE html>
               completedAt: msg.state === 'completed' || msg.state === 'failed' ? new Date().toISOString() : null,
             });
           }
+          break;
+
+        case 'agenda.status':
+          if (msg.status) renderAgendaStatus(msg.status);
           break;
 
         case 'action.stream':
