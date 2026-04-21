@@ -12,6 +12,7 @@ build/
 *.wav
 *.pcm
 .env*
+!.env.example
 *.log
 .vscode/
 .idea/

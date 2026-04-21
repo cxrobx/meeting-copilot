@@ -12,9 +12,11 @@
     "postinstall": "npm rebuild better-sqlite3"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
     "better-sqlite3": "^11.7.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.1",
+    "openai": "^6.34.0",
     "uuid": "^11.0.3",
     "ws": "^8.18.0"
   },

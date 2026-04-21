@@ -37,9 +37,18 @@ import type { ProjectContext } from './project/index.js';
 import { loadContextDocs, loadContextConfig, buildContextBlock } from './context/index.js';
 import type { ContextItemConfig } from './context/index.js';
 import type { ActionSuggestion, ActionLifecycle } from './workers/types.js';
+import { isAnthropicApiAvailable } from './api/anthropic.js';
+import { isOpenAiApiAvailable } from './api/openai.js';
 
-// Load environment
-dotenv.config();
+// Load environment — prefer ~/.meeting-copilot/.env so a packaged .app
+// user has a stable, user-writable location for API keys that survives
+// reinstalling the bundle. Falls back to the cwd .env (dev mode).
+const USER_ENV_PATH = join(homedir(), '.meeting-copilot', '.env');
+if (existsSync(USER_ENV_PATH)) {
+  dotenv.config({ path: USER_ENV_PATH });
+} else {
+  dotenv.config();
+}
 
 // ─── Shared Transcript Config ─────────────────────────────────────────────
 if (process.env.SHARE_TRANSCRIPT === 'false') {
@@ -887,6 +896,15 @@ async function start(): Promise<void> {
       console.log(`[Whisper] Endpoint: ${whisperInfo.endpoint}`);
     }
   }
+
+  // Report which LLM providers are wired up for each realtime path so
+  // first-run users can tell whether they're on the fast API path or the
+  // CLI fallback. Keys missing is not an error — CLI chain still works.
+  const openaiOk = isOpenAiApiAvailable();
+  const anthropicOk = isAnthropicApiAvailable();
+  debugLog(`[LLM] triage=${openaiOk ? 'openai:gpt-5.4-mini' : 'cli:claudeTriage'} suggest=${anthropicOk ? 'anthropic:sonnet-4-6(+cache)' : 'cli:claudeSuggest'} fast-research=${openaiOk ? 'openai:gpt-5.4-mini+web_search' : 'cli:haiku+WebSearch'}`);
+  if (!openaiOk) debugLog('[LLM] OPENAI_API_KEY not set — triage and Fast Research fall back to CLI (slower)');
+  if (!anthropicOk) debugLog('[LLM] ANTHROPIC_API_KEY not set — Sonnet suggestions fall back to CLI (slower, no cache)');
 
   // Start listening on Unix domain socket
   server.listen(SOCKET_PATH, () => {

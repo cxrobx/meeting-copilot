@@ -30,23 +30,34 @@ export interface SonnetSuggestionResult {
   params: Record<string, any>;
 }
 
-export function buildSonnetSuggestPrompt(
+/**
+ * Build the prompt as two halves: a session-stable prefix suitable for
+ * prompt caching, and a per-call tail that changes on every invocation.
+ *
+ * The API path (Anthropic SDK with cache_control) uses this split so the
+ * system+project+context prefix is cached after the first call and later
+ * calls only pay full input cost for the transcript window + triage tail.
+ *
+ * CLI callers can still use `buildSonnetSuggestPrompt()` below which is
+ * the old monolithic builder — it now delegates to this one.
+ */
+export function buildSonnetSuggestPromptSplit(
   transcriptWindow: string,
   triageResult: { reason: string; triggerQuote: string },
   projectBriefs?: string[],
   contextBlock?: string,
-): string {
-  let prompt = `Based on this meeting transcript and the identified actionable moment, generate a specific action suggestion that an AI worker can execute immediately.`;
+): { staticPrefix: string; dynamicTail: string } {
+  let staticPrefix = `Based on this meeting transcript and the identified actionable moment, generate a specific action suggestion that an AI worker can execute immediately.`;
 
   if (projectBriefs?.length) {
-    prompt += `\n\n<project_context>\n${projectBriefs.join('\n\n---\n\n')}\n</project_context>\nGround suggestions in the actual codebase. Reference real files, services, and patterns. For codegen, include target file paths. For research, focus on the project's tech stack.`;
+    staticPrefix += `\n\n<project_context>\n${projectBriefs.join('\n\n---\n\n')}\n</project_context>\nGround suggestions in the actual codebase. Reference real files, services, and patterns. For codegen, include target file paths. For research, focus on the project's tech stack.`;
   }
 
   if (contextBlock) {
-    prompt += `\n\n<context_documents>\n${contextBlock}\n</context_documents>\nUse these reference documents to ground your suggestions. Cite specific details from the documents when relevant.`;
+    staticPrefix += `\n\n<context_documents>\n${contextBlock}\n</context_documents>\nUse these reference documents to ground your suggestions. Cite specific details from the documents when relevant.`;
   }
 
-  prompt += `\n\n<transcript>\n${transcriptWindow}\n</transcript>
+  const dynamicTail = `\n\n<transcript>\n${transcriptWindow}\n</transcript>
 
 <triage_analysis>
 Reason: ${triageResult.reason}
@@ -69,5 +80,21 @@ Respond with JSON:
     // For analysis: { "topic": "...", "context": "...", "compareOptions": [...] }
   }
 }`;
-  return prompt;
+
+  return { staticPrefix, dynamicTail };
+}
+
+export function buildSonnetSuggestPrompt(
+  transcriptWindow: string,
+  triageResult: { reason: string; triggerQuote: string },
+  projectBriefs?: string[],
+  contextBlock?: string,
+): string {
+  const { staticPrefix, dynamicTail } = buildSonnetSuggestPromptSplit(
+    transcriptWindow,
+    triageResult,
+    projectBriefs,
+    contextBlock,
+  );
+  return staticPrefix + dynamicTail;
 }
