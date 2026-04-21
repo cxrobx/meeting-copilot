@@ -205,6 +205,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
 <title>Meeting Copilot</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"><\/script>
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"><\/script>
@@ -212,35 +213,53 @@ const PRESENT_HTML = `<!DOCTYPE html>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
 <style>
-  /* ─── AnuPpuccin Gruvbox Light ─────────────────────────────── */
+  /* ─── CXMail palette (warm neutrals + iOS-blue accent) ───────
+     Light-only by design. 'color-scheme: light' pins native UA
+     surfaces (scrollbars, form controls, highlight.js fallback)
+     even when the OS is in dark mode.
+     Variable names kept as --gb-* so the 1,000+ CSS rules below
+     don't need renaming.
+     Note: --gb-green is repointed to iOS blue so "LIVE/connected/
+     success" semantics use blue accents instead of green.          */
   :root {
-    --gb-base:     rgb(249,245,215);
-    --gb-mantle:   rgb(236,225,196);
-    --gb-crust:    rgb(230,215,178);
-    --gb-surface0: rgb(242,229,188);
-    --gb-surface1: rgb(235,219,179);
-    --gb-surface2: rgb(214,196,161);
-    --gb-overlay0: rgb(189,174,147);
-    --gb-overlay1: rgb(168,153,133);
-    --gb-overlay2: rgb(149,131,106);
-    --gb-text:     rgb(40,40,40);
-    --gb-subtext1: rgb(80,73,69);
-    --gb-subtext0: rgb(102,92,84);
-    --gb-red:      rgb(204,36,29);
-    --gb-maroon:   rgb(204,49,29);
-    --gb-peach:    rgb(214,93,14);
-    --gb-yellow:   rgb(215,153,33);
-    --gb-green:    rgb(152,151,26);
-    --gb-teal:     rgb(102,152,26);
-    --gb-sky:      rgb(26,152,76);
-    --gb-sapphire: rgb(26,133,152);
-    --gb-blue:     rgb(69,133,136);
-    --gb-lavender: rgb(146,111,175);
-    --gb-mauve:    rgb(177,98,134);
-    --gb-pink:     rgb(177,98,118);
-    --gb-rosewater:rgb(243,128,25);
-    --gb-flamingo: rgb(207,162,174);
+    color-scheme: light;
+    /* Backgrounds (warm cream, light) */
+    --gb-base:     rgb(251,248,243);
+    --gb-mantle:   rgb(248,243,235);
+    --gb-crust:    rgb(241,234,223);
+    --gb-surface0: rgb(245,239,228);
+    --gb-surface1: rgb(241,234,223);
+    --gb-surface2: rgb(213,205,189);
+    /* Overlays / muted text ramp */
+    --gb-overlay0: rgb(213,205,189);
+    --gb-overlay1: rgb(155,148,135);
+    --gb-overlay2: rgb(115,108,95);
+    --gb-text:     rgb(30,25,15);
+    --gb-subtext0: rgb(70,60,45);
+    --gb-subtext1: rgb(100,90,75);
+    /* Semantic (constant across modes — CXMail keeps these steady) */
+    --gb-red:      rgb(212,118,106); /* warm coral error    */
+    --gb-maroon:   rgb(190,90,80);
+    --gb-peach:    rgb(212,150,110);
+    --gb-yellow:   rgb(212,168,90);  /* warm gold warning   */
+    --gb-green:    rgb(10,132,255);  /* success → iOS blue (no green in UI) */
+    --gb-teal:     rgb(50,150,220);
+    --gb-sky:      rgb(120,180,200);
+    --gb-sapphire: rgb(50,150,220);
+    --gb-blue:     rgb(10,132,255);  /* iOS-blue accent     */
+    /* Warm-neutral variants of CXMail ai-accent for signal colors */
+    --gb-lavender: rgb(180,160,140);
+    --gb-mauve:    rgb(200,150,130);
+    --gb-pink:     rgb(210,160,150);
+    --gb-rosewater:rgb(200,170,150);
+    --gb-flamingo: rgb(210,170,160);
+    /* New polish tokens (CXMail idioms) */
+    --accent:      var(--gb-blue);
+    --accent-hover: rgb(8,106,204);
+    --accent-soft: color-mix(in srgb, var(--gb-blue) 15%, transparent);
+    --focus-ring:  color-mix(in srgb, var(--gb-blue) 40%, transparent);
   }
+
 
   * { margin:0; padding:0; box-sizing:border-box; }
 
@@ -319,8 +338,12 @@ const PRESENT_HTML = `<!DOCTYPE html>
     color: white;
   }
   .state-pill.idle { background: var(--gb-overlay2); }
-  .state-pill.live { background: var(--gb-green); }
-  .state-pill.priming, .state-pill.ending { background: var(--gb-blue); }
+  .state-pill.live { background: var(--gb-blue); }
+  .state-pill.priming, .state-pill.ending {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border: 1px solid var(--accent);
+  }
   .state-pill.degraded { background: var(--gb-yellow); }
   .state-pill.error { background: var(--gb-red); }
   .state-pill.archived { background: var(--gb-subtext0); }
@@ -377,10 +400,11 @@ const PRESENT_HTML = `<!DOCTYPE html>
     border-radius: 6px;
     border: 1px solid transparent;
     cursor: pointer;
-    transition: opacity 0.15s;
+    transition: background-color 120ms, filter 120ms, border-color 120ms;
   }
-  .btn:hover { opacity: 0.85; }
+  .btn:hover { filter: brightness(1.08); }
   .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
   .btn-green { background: var(--gb-green); color: white; }
   .btn-red { background: var(--gb-red); color: white; }
@@ -595,7 +619,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     border-radius: 2px;
     letter-spacing: 0.04em;
   }
-  .signal-tag.action { background: rgba(152,151,26,0.12); color: var(--gb-green); }
+  .signal-tag.action { background: rgba(10,132,255,0.12); color: var(--gb-green); }
   .signal-tag.decision { background: rgba(69,133,136,0.12); color: var(--gb-blue); }
   .signal-tag.question { background: rgba(146,111,175,0.12); color: var(--gb-lavender); }
   .signal-tag.risk { background: rgba(204,36,29,0.12); color: var(--gb-red); }
@@ -662,13 +686,17 @@ const PRESENT_HTML = `<!DOCTYPE html>
     width: 100%;
     padding: 7px 10px;
     border: 1px solid var(--gb-surface2);
-    border-radius: 5px;
-    background: var(--gb-surface1);
+    border-radius: 6px;
+    background: var(--gb-surface0);
     color: var(--gb-text);
     outline: none;
     resize: vertical;
+    transition: border-color 120ms, box-shadow 120ms;
   }
-  .idle-form input:focus, .idle-form textarea:focus { border-color: var(--gb-blue); }
+  .idle-form input:focus, .idle-form textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--focus-ring);
+  }
 
   /* ─── Agenda extraction editor ─────────────────────────────── */
   .agenda-helper {
@@ -919,7 +947,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
   .ctx-input-row input.drag-over {
     border-color: var(--gb-green);
-    background: rgba(152,151,26,0.06);
+    background: rgba(10,132,255,0.06);
   }
 
   .idle-actions {
@@ -953,16 +981,17 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .session-item {
     background: var(--gb-surface0);
     border: 1px solid var(--gb-surface2);
+    border-left: 2px solid transparent;
     border-radius: 6px;
     padding: 12px 16px;
     margin-bottom: 8px;
     cursor: pointer;
-    transition: border-color 0.15s;
+    transition: background-color 120ms, border-color 120ms;
     display: flex;
     justify-content: space-between;
     align-items: center;
   }
-  .session-item:hover { border-color: var(--gb-blue); }
+  .session-item:hover { background: var(--gb-surface1); border-left-color: var(--accent); }
   .session-item-title { font-weight: 600; color: var(--gb-text); font-size: 13px; }
   .session-item-meta { font-size: 11px; color: var(--gb-subtext0); }
   .session-item-stats { font-size: 10px; color: var(--gb-overlay2); text-align: right; }
@@ -1050,7 +1079,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     padding: 2px 7px;
     border-radius: 4px;
   }
-  .card-type.research { background: rgba(152,151,26,0.12); color: var(--gb-green); }
+  .card-type.research { background: rgba(10,132,255,0.12); color: var(--gb-green); }
   .card-type.summary { background: rgba(215,153,33,0.12); color: var(--gb-yellow); }
   .card-type.mockup { background: rgba(177,98,134,0.12); color: var(--gb-mauve); }
   .card-type.codegen { background: rgba(69,133,136,0.12); color: var(--gb-blue); }
@@ -1172,7 +1201,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     letter-spacing: 0.04em; padding: 1px 4px; border-radius: 3px;
     display: inline; vertical-align: middle; margin-right: 3px;
   }
-  .toc-badge.research { background: rgba(152,151,26,0.15); color: var(--gb-green); }
+  .toc-badge.research { background: rgba(10,132,255,0.15); color: var(--gb-green); }
   .toc-badge.summary { background: rgba(215,153,33,0.15); color: var(--gb-yellow); }
   .toc-badge.mockup { background: rgba(177,98,134,0.15); color: var(--gb-mauve); }
   .toc-badge.codegen { background: rgba(69,133,136,0.15); color: var(--gb-blue); }
