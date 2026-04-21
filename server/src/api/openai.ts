@@ -1,7 +1,16 @@
 import OpenAI from 'openai';
+import { appendFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 
 const TRIAGE_MODEL = 'gpt-5.4-mini';
 const FAST_RESEARCH_MODEL = 'gpt-5.4-mini';
+
+const LOG_FILE = join(homedir(), '.meeting-copilot', 'server.log');
+function log(msg: string): void {
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  try { appendFileSync(LOG_FILE, line); } catch {}
+}
 
 let cachedClient: OpenAI | null = null;
 
@@ -27,9 +36,11 @@ export async function openaiTriageJson(
     name: string;
     schema: Record<string, unknown>;
   },
-  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  options: { signal?: AbortSignal; timeoutMs?: number; label?: string } = {},
 ): Promise<string> {
   const client = getClient();
+  const tag = options.label ?? 'triage';
+  const started = Date.now();
   const res = await client.responses.create(
     {
       model: TRIAGE_MODEL,
@@ -52,6 +63,10 @@ export async function openaiTriageJson(
       signal: options.signal,
     },
   );
+  const elapsed = Date.now() - started;
+  const u: any = res.usage;
+  const cached = u?.input_tokens_details?.cached_tokens ?? 0;
+  log(`[api/openai] ${tag} latencyMs=${elapsed} in=${u?.input_tokens ?? 0} out=${u?.output_tokens ?? 0} cached=${cached}`);
 
   return res.output_text;
 }
@@ -76,8 +91,12 @@ export async function openaiFastResearchStream(params: {
   userContent: string;
   signal?: AbortSignal;
   onDelta?: (text: string) => void;
+  label?: string;
 }): Promise<FastResearchResult> {
   const client = getClient();
+  const tag = params.label ?? 'fast-research';
+  const started = Date.now();
+  let firstTokenAt = 0;
 
   const stream = await client.responses.create(
     {
@@ -98,6 +117,7 @@ export async function openaiFastResearchStream(params: {
 
   for await (const event of stream) {
     if (event.type === 'response.output_text.delta') {
+      if (firstTokenAt === 0) firstTokenAt = Date.now();
       accumulated += event.delta;
       try {
         params.onDelta?.(event.delta);
@@ -125,5 +145,8 @@ export async function openaiFastResearchStream(params: {
     }
   }
 
+  const elapsed = Date.now() - started;
+  const ttft = firstTokenAt > 0 ? firstTokenAt - started : -1;
+  log(`[api/openai] ${tag} ttftMs=${ttft} totalMs=${elapsed} sources=${sources.length} chars=${accumulated.length}`);
   return { text: accumulated, sources };
 }

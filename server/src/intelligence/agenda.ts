@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { claudeChat } from '../claude-cli.js';
+import { isAnthropicApiAvailable, anthropicHaikuCachedJson } from '../api/anthropic.js';
 
 const EVAL_INTERVAL_MS = 15_000;
 const MIN_NEW_WORDS_BEFORE_EVAL = 15;
@@ -254,8 +255,28 @@ export class AgendaTracker extends EventEmitter {
     const startedAt = Date.now();
     this.emit('eval', { started: true, words: this.wordCountProvider() });
     try {
-      const prompt = buildAgendaEvalPrompt(this.items, transcript, this.sessionTitle);
-      const raw = await this.triage(prompt, AGENDA_EVAL_SYSTEM, signal);
+      // Prefer the Anthropic API with prompt caching. The agenda list +
+      // session title are stable across a session, so after the first call
+      // the cache hits and only the transcript window pays input cost.
+      // CLI path stays as the fallback so no key = still works.
+      let raw: string;
+      if (isAnthropicApiAvailable()) {
+        const { staticPrefix, dynamicTail } = buildAgendaEvalPromptSplit(
+          this.items,
+          transcript,
+          this.sessionTitle,
+        );
+        raw = await anthropicHaikuCachedJson({
+          systemPrompt: AGENDA_EVAL_SYSTEM,
+          staticContext: staticPrefix,
+          dynamicTail,
+          signal,
+          label: 'agenda-eval',
+        });
+      } else {
+        const prompt = buildAgendaEvalPrompt(this.items, transcript, this.sessionTitle);
+        raw = await this.triage(prompt, AGENDA_EVAL_SYSTEM, signal);
+      }
 
       // Stale-guard: drop the result if the session changed while we awaited.
       if (gen !== this.generation) {
@@ -346,15 +367,17 @@ Warnings:
 
 Respond with JSON only. No other text.`;
 
-function buildAgendaEvalPrompt(
+function buildAgendaEvalPromptSplit(
   items: AgendaItem[],
   transcript: string,
   sessionTitle: string,
-): string {
+): { staticPrefix: string; dynamicTail: string } {
   const agendaList = items.map((i) => `  ${i.id}: ${i.text}`).join('\n');
   const titleLine = sessionTitle ? `Meeting: ${sessionTitle}\n\n` : '';
-  return `${titleLine}Agenda items to track:
-${agendaList}
+  const staticPrefix = `${titleLine}Agenda items to track:
+${agendaList}`;
+
+  const dynamicTail = `
 
 Transcript so far:
 <transcript>
@@ -370,6 +393,16 @@ Respond with JSON:
   ],
   "missing_warnings": ["human-readable sentence for any agenda item that still looks un-addressed as the meeting wraps up (only if wrap-up signals are present)"]
 }`;
+  return { staticPrefix, dynamicTail };
+}
+
+function buildAgendaEvalPrompt(
+  items: AgendaItem[],
+  transcript: string,
+  sessionTitle: string,
+): string {
+  const { staticPrefix, dynamicTail } = buildAgendaEvalPromptSplit(items, transcript, sessionTitle);
+  return staticPrefix + dynamicTail;
 }
 
 function parseAgendaResponse(raw: string): AgendaEvalResponse | null {
