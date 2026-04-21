@@ -3,6 +3,8 @@ import ScreenCaptureKit
 import AVFoundation
 import CoreMedia
 import CoreAudio
+import CoreGraphics
+import AppKit
 
 // MARK: - Audio Capture Manager
 
@@ -146,6 +148,22 @@ final class AudioCaptureManager: NSObject {
     // MARK: - System Audio (ScreenCaptureKit)
 
     private func startSystemAudioCapture() async throws {
+        // Menubar apps (LSUIElement=true) need to be activated to reliably show
+        // the Screen Recording permission prompt. `CGRequestScreenCaptureAccess`
+        // returns synchronously with the current status AND triggers the dialog
+        // if no decision has been recorded yet.
+        if !CGPreflightScreenCaptureAccess() {
+            await MainActor.run {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            _ = CGRequestScreenCaptureAccess()
+            // If the user must still grant permission, surface a clear error
+            // instead of the generic -3801 that SCShareableContent produces.
+            if !CGPreflightScreenCaptureAccess() {
+                throw AudioCaptureError.screenRecordingPermissionRequired
+            }
+        }
+
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
 
         guard let display = content.displays.first else {
@@ -536,12 +554,15 @@ enum AudioCaptureError: Error, LocalizedError {
     case noDisplayFound
     case microphoneUnavailable
     case screenCapturePermissionDenied
+    case screenRecordingPermissionRequired
 
     var errorDescription: String? {
         switch self {
         case .noDisplayFound: return "No display found for screen capture"
         case .microphoneUnavailable: return "Microphone is not available"
         case .screenCapturePermissionDenied: return "Screen recording permission not granted"
+        case .screenRecordingPermissionRequired:
+            return "Screen Recording permission is required. After enabling Meeting Copilot in System Settings → Privacy & Security → Screen Recording, quit and relaunch the app."
         }
     }
 }

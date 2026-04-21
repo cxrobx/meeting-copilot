@@ -325,6 +325,40 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .state-pill.error { background: var(--gb-red); }
   .state-pill.archived { background: var(--gb-subtext0); }
 
+  /* Audio activity indicator: a small red dot that pulses when audio chunks
+     arrive, so the user can see the mic/system audio is actually flowing. */
+  .audio-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--gb-red);
+    margin-right: 10px;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  .audio-indicator.visible { opacity: 1; }
+  .audio-indicator .audio-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--gb-red);
+    animation: rec-pulse 1.4s ease-in-out infinite;
+  }
+  .audio-indicator .audio-dot.flash {
+    animation: rec-flash 0.25s ease-out;
+  }
+  @keyframes rec-pulse {
+    0%, 100% { opacity: 0.4; transform: scale(0.9); }
+    50% { opacity: 1; transform: scale(1.1); }
+  }
+  @keyframes rec-flash {
+    0% { transform: scale(1.6); opacity: 1; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+
   .session-timer {
     font-size: 16px;
     font-weight: 600;
@@ -406,14 +440,22 @@ const PRESENT_HTML = `<!DOCTYPE html>
     display: flex;
   }
 
+  /* Narrow: drop the TOC (right col) first — the live transcript is the most
+     important view during a session and must stay visible. */
   @media (max-width: 1400px) {
-    .layout.three-col { grid-template-columns: 1fr 260px; }
-    .layout.three-col .transcript-col { display: none; }
-  }
-  @media (max-width: 1100px) {
-    .layout.three-col { grid-template-columns: 1fr; }
-    .layout.three-col .transcript-col { display: none; }
+    .layout.three-col { grid-template-columns: 260px minmax(0, 1fr); }
     .layout.three-col .toc { display: none; }
+  }
+  /* Very narrow: stack — keep transcript at the top so it's always reachable. */
+  @media (max-width: 900px) {
+    .layout.three-col {
+      grid-template-columns: 1fr;
+      grid-template-rows: minmax(220px, 35vh) 1fr;
+    }
+    .layout.three-col .transcript-col {
+      border-right: none;
+      border-bottom: 1px solid var(--gb-overlay0);
+    }
   }
 
   /* ─── Transcript Column ────────────────────────────────────── */
@@ -1081,6 +1123,10 @@ const PRESENT_HTML = `<!DOCTYPE html>
   </div>
   <div class="header-center" id="headerTitle"></div>
   <div class="header-right">
+    <span class="audio-indicator" id="audioIndicator">
+      <span class="audio-dot" id="audioDot"></span>
+      <span>REC</span>
+    </span>
     <span class="state-pill idle" id="statePill">Idle</span>
     <span class="session-timer" id="sessionTimer"></span>
     <button class="btn btn-ghost" id="newMeetingBtn" style="display:none" onclick="newMeeting()">&larr; New Meeting</button>
@@ -1392,6 +1438,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
     statePill.className = 'state-pill ' + sessionState;
     statePill.textContent = sessionState.charAt(0).toUpperCase() + sessionState.slice(1);
 
+    // Show REC indicator while a session is live or degraded
+    var audioIndicator = document.getElementById('audioIndicator');
+    if (audioIndicator) {
+      var recActive = (sessionState === 'live' || sessionState === 'degraded') && !isReplay;
+      audioIndicator.className = 'audio-indicator' + (recActive ? ' visible' : '');
+    }
+
     // Header title
     headerTitle.textContent = sessionTitle || '';
 
@@ -1439,6 +1492,16 @@ const PRESENT_HTML = `<!DOCTYPE html>
     }
   }
   window.updateUI = updateUI;
+
+  // Briefly flash the REC indicator to show audio is actively being transcribed.
+  function flashAudioIndicator() {
+    var dot = document.getElementById('audioDot');
+    if (!dot) return;
+    dot.classList.remove('flash');
+    // Force reflow so the animation can restart on rapid chunks
+    void dot.offsetWidth;
+    dot.classList.add('flash');
+  }
 
   function showIdleState() {
     var wsConnected = ws && ws.readyState === WebSocket.OPEN;
@@ -1518,9 +1581,50 @@ const PRESENT_HTML = `<!DOCTYPE html>
     updateUI();
   };
 
+  // When running inside the Meeting Copilot app, WKWebView injects
+  // window.__copilotNativeBridge so session start/stop routes through the
+  // Swift SessionManager (which wires up audio capture). Outside the app
+  // (plain browser for debugging), we fall back to direct WebSocket messages.
+  function hasNativeBridge() {
+    return typeof window.__copilotNativeBridge !== 'undefined';
+  }
+
+  // Called by Swift when a native error occurs (e.g., missing Screen Recording
+  // permission). Renders as a persistent banner the user can dismiss.
+  window.__copilotShowNativeError = function(message) {
+    var existing = document.getElementById('nativeErrorBanner');
+    if (existing) existing.remove();
+    var banner = document.createElement('div');
+    banner.id = 'nativeErrorBanner';
+    banner.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);' +
+      'z-index:9999;background:var(--gb-red,#cc241d);color:#fff;padding:12px 18px;' +
+      'border-radius:6px;font-family:inherit;font-size:12px;max-width:620px;' +
+      'box-shadow:0 4px 16px rgba(0,0,0,0.2);line-height:1.5;';
+    var close = document.createElement('span');
+    close.textContent = '\u00d7';
+    close.style.cssText = 'float:right;margin-left:14px;cursor:pointer;font-weight:700;font-size:14px;';
+    close.onclick = function() { banner.remove(); };
+    banner.appendChild(close);
+    var text = document.createElement('span');
+    text.textContent = message;
+    banner.appendChild(text);
+    document.body.appendChild(banner);
+  };
+
   window.toggleSession = function() {
     if (sessionState === 'live' || sessionState === 'degraded') {
-      wsSend({ type: 'session.stop' });
+      // Optimistic UI: the server may take several seconds to finish stopping
+      // (auto-summary, action completion, etc.) before it broadcasts
+      // session.state=archived. Flip to "ending" immediately so the user
+      // sees their click register; the authoritative broadcast will settle
+      // the final state when the server catches up.
+      sessionState = 'ending';
+      updateUI();
+      if (hasNativeBridge()) {
+        window.__copilotNativeBridge.stopSession();
+      } else {
+        wsSend({ type: 'session.stop' });
+      }
     } else {
       // Start with values from form if available, otherwise empty
       startSession();
@@ -1544,6 +1648,18 @@ const PRESENT_HTML = `<!DOCTYPE html>
       selectedContextPaths.push(cb.value);
     });
 
+    if (hasNativeBridge()) {
+      window.__copilotNativeBridge.startSession({
+        title: title,
+        agenda: agenda,
+        attendees: attendees,
+        projectNames: selectedProjects,
+        contextPaths: selectedContextPaths,
+      });
+      return;
+    }
+
+    // Browser-only fallback (no audio capture — for dashboard debugging)
     var msg = {
       type: 'session.start',
       title: title || undefined,
@@ -2013,7 +2129,12 @@ const PRESENT_HTML = `<!DOCTYPE html>
           if (msg.state === 'live' && !sessionStartTime) {
             sessionStartTime = Date.now();
             startTimer();
-          } else if (msg.state === 'idle' || msg.state === 'archived') {
+          } else if (msg.state === 'archived') {
+            // Session just ended — keep transcript visible so the user can
+            // review what was said. Only stop the running clock.
+            stopTimer();
+          } else if (msg.state === 'idle') {
+            // Hard reset for a new meeting (user clicked "New Meeting").
             stopTimer();
             sessionStartTime = null;
             totalWords = 0; micWords = 0; meetingWords = 0;
@@ -2026,6 +2147,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
         case 'transcript.update':
           if (msg.segment) addSegment(msg.segment);
+          flashAudioIndicator();
           break;
 
         case 'action.suggested':

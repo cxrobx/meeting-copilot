@@ -160,6 +160,11 @@ app.use(createRoutes({
   debug,
   getSession: () => ({ store: sessionStore, logger: eventLogger, active: sessionActive }),
   getWhisperAvailable: () => whisperAvailable,
+  probeWhisperAvailable: async () => {
+    const ok = await transcription.isProviderAvailable();
+    whisperAvailable = ok;
+    return ok;
+  },
   getRetentionDays: () => configuredRetentionDays,
   setRetentionDays: (days) => { configuredRetentionDays = days; },
 }));
@@ -199,10 +204,11 @@ function handleWsConnection(ws: WebSocket, label: string): void {
       const message = JSON.parse(raw.toString()) as InboundMessage;
       await handleInboundMessage(message);
     } catch (error) {
-      console.error(
-        `[${label}] Failed to handle message:`,
-        error instanceof Error ? error.message : String(error),
-      );
+      const msg = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error && error.stack ? `\n${error.stack}` : '';
+      // Use debugLog (writes to server.log) so handler failures are diagnosable
+      // without needing to capture the child process's stderr pipe.
+      debugLog(`[${label}] Handler error: ${msg}${stack}`);
     }
   });
 

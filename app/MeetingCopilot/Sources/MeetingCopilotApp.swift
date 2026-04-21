@@ -192,7 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func showPanel() {
         // Web dashboard — loads the Gruvbox-themed /present page in a WKWebView.
         // The web UI handles session control, transcript, approvals, and action results.
-        let panelContent = WebDashboardView()
+        let panelContent = WebDashboardView(sessionManager: sessionManager)
 
         // NOTE: To restore the native SwiftUI panel, uncomment below and comment out the WebDashboardView line above:
         // let panelContent = ActionPanelView(sessionManager: sessionManager)

@@ -45,12 +45,16 @@ final class ProcessSupervisor {
     }
 
     private var whisperPath: String {
-        // Prefer bundle path when running as a packaged app
+        // Prefer bundle path when running as a packaged app.
+        // The bundled layout is Resources/whisper/{bin,lib}/ so the binary's
+        // baked-in rpath (@loader_path/../lib) finds its dylib deps.
         if isPackaged, let bundlePath = Bundle.main.resourcePath {
-            let bundleWhisper = "\(bundlePath)/whisper-server"
+            let bundleWhisper = "\(bundlePath)/whisper/bin/whisper-server"
             if FileManager.default.fileExists(atPath: bundleWhisper) {
                 return bundleWhisper
             }
+            // Back-compat: older bundles placed the binary directly in Resources
+            // without its dylibs — skip those (they can't launch anyway).
         }
         // Development fallback: try homebrew, then project bin
         let homebrewPath = "/opt/homebrew/bin/whisper-server"

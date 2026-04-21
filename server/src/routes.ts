@@ -29,6 +29,7 @@ interface RouteContext {
   debug: DebugHandler;
   getSession: () => { store: SessionStore | null; logger: EventLogger | null; active: boolean };
   getWhisperAvailable: () => boolean | null;
+  probeWhisperAvailable: () => Promise<boolean>;
   getRetentionDays: () => number;
   setRetentionDays: (days: number) => void;
 }
@@ -142,13 +143,16 @@ export function createRoutes(ctx: RouteContext): Router {
   // GET /debug
   router.get('/debug', ctx.debug.handler());
 
-  // Health check
-  router.get('/health', (_req, res) => {
+  // Health check — re-probes whisper so the response reflects the current
+  // subprocess state, not just the boot-time snapshot. The probe has a 1s
+  // timeout in WhisperProvider.isAvailable() so this stays cheap.
+  router.get('/health', async (_req, res) => {
     const { store, active } = ctx.getSession();
+    const whisperAvailable = await ctx.probeWhisperAvailable();
     res.json({
       status: 'ok',
       session: active ? store?.id : null,
-      whisperAvailable: ctx.getWhisperAvailable(),
+      whisperAvailable,
     });
   });
 
@@ -175,9 +179,10 @@ export function createRoutes(ctx: RouteContext): Router {
     });
   });
 
-  // Preflight check
-  router.get('/preflight', (_req, res) => {
-    const checks = runPreflightChecks(ctx.getWhisperAvailable());
+  // Preflight check — re-probes whisper to reflect current state
+  router.get('/preflight', async (_req, res) => {
+    const whisperOk = await ctx.probeWhisperAvailable();
+    const checks = runPreflightChecks(whisperOk);
     const allOk = checks.every((c) => c.ok);
     res.json({ ok: allOk, checks });
   });

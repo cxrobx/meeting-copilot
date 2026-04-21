@@ -134,6 +134,33 @@ final class SessionManager {
         }
     }
 
+    /// Start a session initiated from the embedded web UI.
+    /// The web form already collected title/agenda/etc. and the user's click on
+    /// "Start Session" is treated as consent, so we skip the native consent sheet
+    /// and flow straight into the normal startSession() path which wires up audio.
+    func startSessionFromWeb(title: String, agenda: String, attendees: String, projectNames: [String], contextPaths: [String]) {
+        guard serverReady else {
+            surfaceError("Server not ready yet.")
+            return
+        }
+        guard state == .idle || state == .archived else {
+            appLog("[Session] startSessionFromWeb ignored — state=\(state.rawValue)")
+            return
+        }
+        meetingTitle = title
+        meetingAgenda = agenda
+        meetingAttendees = attendees
+        selectedProjectNames = projectNames
+        selectedContextPaths = contextPaths
+        Task { await startSession() }
+    }
+
+    /// Stop a session initiated from the embedded web UI.
+    func stopSessionFromWeb() {
+        guard state == .live || state == .degraded else { return }
+        stopSession()
+    }
+
     func consentDenied() {
         showingConsentDialog = false
         selectedProjectNames = []
@@ -321,8 +348,19 @@ final class SessionManager {
             )
         } catch {
             appLog("[Session] Audio capture FAILED: \(error)")
-            surfaceError("Audio capture failed: \(error.localizedDescription)")
+            let description = error.localizedDescription
+            // -3801 = user declined TCC for screen/audio capture
+            let isTCCDecline = description.contains("TCC") || description.contains("declined") || (error as NSError).code == -3801
+            if isTCCDecline {
+                surfaceError("Screen Recording permission is required to capture meeting audio. Open System Settings → Privacy & Security → Screen Recording, enable Meeting Copilot, then quit and relaunch the app.")
+            } else {
+                surfaceError("Audio capture failed: \(description)")
+            }
+            // Roll back to idle so the user can retry (e.g., after granting permission)
+            // instead of getting stuck in .error until relaunch.
             _ = handleStateTransition(to: .error)
+            _ = handleStateTransition(to: .idle)
+            currentSession = nil
             return
         }
         appLog("[Session] Audio capture started OK")
@@ -432,8 +470,13 @@ final class SessionManager {
 
     // MARK: - Error Surfacing
 
+    /// External observer for error messages (e.g., the web dashboard bridges these
+    /// into a JS toast so the user sees them without a native error panel).
+    var onError: ((String) -> Void)?
+
     func surfaceError(_ message: String) {
         errorMessage = message
+        onError?(message)
         // Auto-dismiss after 8 seconds
         Task {
             try? await Task.sleep(nanoseconds: 8_000_000_000)

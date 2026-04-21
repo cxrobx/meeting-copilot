@@ -4,19 +4,46 @@ import WebKit
 /// Wraps WKWebView to display the web dashboard at /present.
 /// Replaces the SwiftUI ActionPanelView with the Gruvbox-themed web UI.
 struct WebDashboardView: View {
+    let sessionManager: SessionManager
+
     var body: some View {
-        WebViewWrapper()
+        WebViewWrapper(sessionManager: sessionManager)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
 private let dashboardURL = URL(string: "http://localhost:17890/present")!
+private let bridgeMessageName = "copilotBridge"
 
 private struct WebViewWrapper: NSViewRepresentable {
+    let sessionManager: SessionManager
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+
+        // Install the native bridge so the web UI can invoke SessionManager directly
+        // (e.g., "Start Session" starts audio capture instead of just sending WS frames).
+        let userContent = WKUserContentController()
+        userContent.add(context.coordinator, name: bridgeMessageName)
+        let bridgeScript = WKUserScript(
+            source: """
+            window.__copilotNativeBridge = {
+              startSession: function(payload) {
+                window.webkit.messageHandlers.\(bridgeMessageName).postMessage(
+                  Object.assign({ action: 'startSession' }, payload || {})
+                );
+              },
+              stopSession: function() {
+                window.webkit.messageHandlers.\(bridgeMessageName).postMessage({ action: 'stopSession' });
+              }
+            };
+            """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        )
+        userContent.addUserScript(bridgeScript)
+        config.userContentController = userContent
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
@@ -25,6 +52,11 @@ private struct WebViewWrapper: NSViewRepresentable {
         // Don't load immediately — wait for server to be ready
         context.coordinator.webView = webView
         context.coordinator.loadWhenReady(webView: webView)
+
+        // Forward SessionManager errors into the web UI
+        sessionManager.onError = { [weak coordinator = context.coordinator] message in
+            coordinator?.pushError(message)
+        }
 
         // Enable Cmd+/- browser-style zoom via CSS font-size scaling
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
@@ -54,17 +86,63 @@ private struct WebViewWrapper: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {}
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(sessionManager: sessionManager)
     }
 
-    class Coordinator: NSObject, WKNavigationDelegate {
+    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        let sessionManager: SessionManager
         weak var webView: WKWebView?
         var zoomLevel: Int = 100
         private var retryCount = 0
 
+        init(sessionManager: SessionManager) {
+            self.sessionManager = sessionManager
+        }
+
         func applyZoom() {
             let scale = Double(zoomLevel) / 100.0
             webView?.evaluateJavaScript("document.body.style.zoom = '\(scale)'", completionHandler: nil)
+        }
+
+        func pushError(_ message: String) {
+            // JSON-escape by serializing an array, then strip the brackets
+            let data = (try? JSONSerialization.data(withJSONObject: [message])) ?? Data()
+            let escaped = String(data: data, encoding: .utf8)?
+                .dropFirst().dropLast() ?? "\"\""
+            let js = "window.__copilotShowNativeError && window.__copilotShowNativeError(\(escaped));"
+            DispatchQueue.main.async {
+                self.webView?.evaluateJavaScript(js, completionHandler: nil)
+            }
+        }
+
+        // MARK: - Native Bridge
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == bridgeMessageName,
+                  let body = message.body as? [String: Any],
+                  let action = body["action"] as? String else { return }
+
+            Task { @MainActor in
+                switch action {
+                case "startSession":
+                    let title = (body["title"] as? String) ?? ""
+                    let agenda = (body["agenda"] as? String) ?? ""
+                    let attendees = (body["attendees"] as? String) ?? ""
+                    let projectNames = (body["projectNames"] as? [String]) ?? []
+                    let contextPaths = (body["contextPaths"] as? [String]) ?? []
+                    self.sessionManager.startSessionFromWeb(
+                        title: title,
+                        agenda: agenda,
+                        attendees: attendees,
+                        projectNames: projectNames,
+                        contextPaths: contextPaths
+                    )
+                case "stopSession":
+                    self.sessionManager.stopSessionFromWeb()
+                default:
+                    appLog("[Bridge] Unknown action: \(action)")
+                }
+            }
         }
 
         /// Retry delay: 1s for first 30 attempts, then 5s thereafter.

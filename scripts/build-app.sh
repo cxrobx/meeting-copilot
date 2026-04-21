@@ -77,11 +77,31 @@ if [ -f "$PROJECT_DIR/server/.env" ]; then
   echo "  Copied .env"
 fi
 
-# Bundle whisper-server binary if available
-WHISPER_BIN="/opt/homebrew/bin/whisper-server"
-if [ -f "$WHISPER_BIN" ]; then
-  cp "$WHISPER_BIN" "$APP_BUNDLE/Contents/Resources/whisper-server"
-  echo "  Bundled whisper-server"
+# Bundle whisper-server + its dylib dependencies.
+# The homebrew binary is linked with rpath `@loader_path/../lib`, so we preserve
+# the layout by copying both bin/ and lib/ from the Cellar's libexec/.
+WHISPER_PREFIX="$(brew --prefix whisper-cpp 2>/dev/null || true)"
+WHISPER_LIBEXEC=""
+if [ -n "$WHISPER_PREFIX" ] && [ -d "$WHISPER_PREFIX/libexec" ]; then
+  WHISPER_LIBEXEC="$WHISPER_PREFIX/libexec"
+elif [ -d "/opt/homebrew/opt/whisper-cpp/libexec" ]; then
+  WHISPER_LIBEXEC="/opt/homebrew/opt/whisper-cpp/libexec"
+fi
+
+if [ -n "$WHISPER_LIBEXEC" ] && [ -x "$WHISPER_LIBEXEC/bin/whisper-server" ]; then
+  WHISPER_BUNDLE="$APP_BUNDLE/Contents/Resources/whisper"
+  mkdir -p "$WHISPER_BUNDLE/bin" "$WHISPER_BUNDLE/lib"
+  cp "$WHISPER_LIBEXEC/bin/whisper-server" "$WHISPER_BUNDLE/bin/whisper-server"
+  # Copy only the dylibs whisper-server depends on (plus their symlink aliases).
+  for name in libwhisper libggml libggml-cpu libggml-blas libggml-metal libggml-base; do
+    for f in "$WHISPER_LIBEXEC/lib/$name".*.dylib "$WHISPER_LIBEXEC/lib/$name.dylib"; do
+      [ -e "$f" ] && cp -a "$f" "$WHISPER_BUNDLE/lib/"
+    done
+  done
+  LIB_COUNT="$(find "$WHISPER_BUNDLE/lib" -name '*.dylib' | wc -l | tr -d ' ')"
+  echo "  Bundled whisper-server + $LIB_COUNT dylib(s) from $WHISPER_LIBEXEC"
+else
+  echo "  WARNING: whisper-cpp not found via Homebrew — bundle will not include whisper-server"
 fi
 
 # Bundle whisper model if available
@@ -145,10 +165,40 @@ PLIST
 
 echo "  Bundle assembled: $APP_BUNDLE"
 
-# ── Step 4: Ad-hoc code sign ─────────────────────────────────────────────
+# ── Step 4: Code sign ────────────────────────────────────────────────────
+#
+# Prefer a stable signing identity so TCC permissions (Screen Recording,
+# Microphone) persist across rebuilds. Ad-hoc signing binds permissions to
+# the binary's CDHash, which changes every build — macOS silently revokes
+# the grant even though the System Settings toggle still shows "on".
+#
+# Resolution order:
+#   1. $CODESIGN_IDENTITY env var (explicit override)
+#   2. "Developer ID Application" certificate from login keychain (stable)
+#   3. Fallback: ad-hoc (expect permissions to be re-prompted each rebuild)
 
 echo ""
-echo "[4/6] Code signing (ad-hoc)..."
+echo "[4/6] Code signing..."
+
+resolve_identity() {
+  if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+    echo "$CODESIGN_IDENTITY"
+    return
+  fi
+  # Pick the first "Developer ID Application" identity available
+  local found
+  found="$(security find-identity -v -p codesigning 2>/dev/null \
+    | grep 'Developer ID Application' \
+    | head -n 1 \
+    | sed -n 's/.*) \([0-9A-F]\{40\}\) .*/\1/p')"
+  if [ -n "$found" ]; then
+    echo "$found"
+    return
+  fi
+  echo "-"
+}
+
+SIGN_IDENTITY="$(resolve_identity)"
 
 # Create entitlements
 ENTITLEMENTS="$BUILD_DIR/entitlements.plist"
@@ -163,8 +213,17 @@ cat > "$ENTITLEMENTS" << 'PLIST'
 </plist>
 PLIST
 
-codesign --force --deep --sign - --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
-echo "  Signed (ad-hoc)"
+if [ "$SIGN_IDENTITY" = "-" ]; then
+  codesign --force --deep --sign - --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
+  echo "  Signed (ad-hoc) — TCC permissions will be revoked on next rebuild."
+  echo "  To persist permissions, set CODESIGN_IDENTITY or install a 'Developer ID Application' cert."
+else
+  # NOTE: no --options runtime. Hardened runtime blocks spawning the node
+  # child process without extra entitlements (allow-unsigned-executable-memory,
+  # disable-library-validation). Only add it back when preparing for notarization.
+  codesign --force --deep --sign "$SIGN_IDENTITY" --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
+  echo "  Signed with: $SIGN_IDENTITY"
+fi
 
 # ── Step 5: Install to /Applications ─────────────────────────────────────
 
