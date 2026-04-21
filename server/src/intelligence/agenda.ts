@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { claudeTriage, claudeChat } from '../claude-cli.js';
+import { claudeChat } from '../claude-cli.js';
 
 const EVAL_INTERVAL_MS = 15_000;
 const MIN_NEW_WORDS_BEFORE_EVAL = 15;
@@ -103,7 +103,18 @@ export class AgendaTracker extends EventEmitter {
 
   constructor(deps: AgendaEvalDeps = {}) {
     super();
-    this.triage = deps.triage ?? claudeTriage;
+    // Use Haiku directly via claudeChat rather than the Gemini→Haiku→Codex
+    // triage chain. The chain is tuned for the 15s intelligence loop with a
+    // small 5-minute transcript window; for agenda eval with the full
+    // growing transcript, Gemini was stalling out for 30–40s on first runs
+    // before falling back to Haiku anyway. Skipping straight to Haiku keeps
+    // latency in the 2–5s range and makes the panel responsive.
+    this.triage = deps.triage ?? ((prompt, systemPrompt, signal) =>
+      claudeChat(prompt, {
+        systemPrompt,
+        model: 'claude-haiku-4-5-20251001',
+        signal,
+      }));
   }
 
   start(options: {
@@ -319,13 +330,19 @@ export class AgendaTracker extends EventEmitter {
 
 const AGENDA_EVAL_SYSTEM = `You track whether a meeting is covering its planned agenda items. You read the full transcript so far and the agenda list, and mark each item as covered, partially addressed, or still pending. You also flag items that seem to be running out of time to discuss.
 
-Rules:
-- "covered" = the topic was genuinely discussed (not just mentioned in passing). Evidence must exist in the transcript.
-- "partial" = touched briefly but not fully addressed, or only one speaker discussed it.
-- "pending" = not yet discussed at all.
-- Be lenient on wording — the transcript uses everyday language; the agenda may use shorthand. Match by intent.
-- Evidence must be a short direct quote from the transcript (under 120 chars).
-- Only produce missing_warnings if the transcript shows the meeting is wrapping up (wrap-up/summary/farewell language) AND items remain pending.
+State definitions:
+- "covered" = both sides engaged with the topic — the question was raised AND at least a substantive answer or back-and-forth followed. Evidence must exist in the transcript.
+- "partial" = the topic has clearly surfaced but isn't fully resolved. THIS INCLUDES: the user asking or raising an agenda question even if no answer has been given yet. Asking counts. A reasonable phrasing of the agenda item appearing in the transcript is enough for "partial" even without a response.
+- "pending" = the topic has not appeared in the transcript at all.
+
+Matching rules:
+- Be lenient on wording. The transcript is everyday spoken language with transcription errors; the agenda may use shorthand. Match by intent, not exact phrasing.
+- If the user paraphrases or approximates an agenda item, it still counts. E.g. "walk us through month one, the first 20 hours" matches "Walk us through month 1 — how are the first 20 hours spent".
+- An item can be "partial" even if the transcript barely scratches the surface. Err on the side of "partial" over "pending" when a reasonable connection exists.
+- Evidence must be a short direct quote from the transcript (under 120 chars). Quote the moment the item surfaced, not a generic line.
+
+Warnings:
+- Only produce missing_warnings if the transcript shows wrap-up/summary/farewell language AND items remain pending.
 
 Respond with JSON only. No other text.`;
 

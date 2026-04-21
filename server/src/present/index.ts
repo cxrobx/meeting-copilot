@@ -1938,9 +1938,15 @@ const PRESENT_HTML = `<!DOCTYPE html>
         if (sessionState === 'live' || sessionState === 'degraded') {
           startStopBtn.textContent = 'Stop';
           startStopBtn.className = 'btn btn-red';
+          startStopBtn.disabled = false;
+        } else if (sessionState === 'ending') {
+          startStopBtn.textContent = 'Ending…';
+          startStopBtn.className = 'btn btn-ghost';
+          startStopBtn.disabled = true;
         } else {
           startStopBtn.textContent = 'Start';
           startStopBtn.className = 'btn btn-green';
+          startStopBtn.disabled = false;
         }
       }
     }
@@ -2098,6 +2104,11 @@ const PRESENT_HTML = `<!DOCTYPE html>
       // sees their click register; the authoritative broadcast will settle
       // the final state when the server catches up.
       sessionState = 'ending';
+      // Freeze the displayed duration at end-press. The server may take
+      // many seconds (auto-summary + up to 60s worker grace period) before
+      // it broadcasts session.state=archived, and the meeting is logically
+      // over the moment the user clicks End.
+      stopTimer();
       updateUI();
       if (hasNativeBridge()) {
         window.__copilotNativeBridge.stopSession();
