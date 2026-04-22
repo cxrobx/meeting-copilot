@@ -2,13 +2,11 @@ import { writeFileSync, appendFileSync, unlinkSync, mkdirSync, existsSync, openS
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { TranscriptSegment } from '../transcription/types.js';
+import { CHUNK_DURATION_SECONDS } from '../audio/chunkConfig.js';
 
 const SHARED_DIR = join(homedir(), '.meeting-shared');
 const PRESENCE_FILE = join(SHARED_DIR, 'active-session.json');
 const TRANSCRIPT_FILE = join(SHARED_DIR, 'live-transcript.jsonl');
-
-// Audio chunk duration in seconds (matches Swift app's capture interval)
-const CHUNK_DURATION_SECONDS = 10;
 
 // Tracks session start time for converting epoch-ms timestamps to relative seconds
 let sessionStartMs = 0;
@@ -80,11 +78,33 @@ export function appendTranscript(segment: TranscriptSegment): void {
   if (!sharingEnabled) return;
 
   try {
-    // Convert epoch-ms timestamp to session-relative seconds.
-    // companionTranscript.js expects seconds for CSV (start*1000) and merged (formatTimestamp).
+    // Prefer the Swift-stamped capture time over segment.timestamp (which is
+    // server-finalized, so it lags by chunk wait + whisper decode — 1–4s).
+    // notes4chris and the CSV/MD exports want TRUE audio time: when the words
+    // were spoken. Fallbacks: captureEndedAt - audioDurationSec, then the old
+    // server-finalized timestamp.
+    let absoluteMs: number | null = null;
+    if (segment.captureStartedAt) {
+      const parsed = Date.parse(segment.captureStartedAt);
+      if (!Number.isNaN(parsed)) absoluteMs = parsed;
+    }
+    if (absoluteMs === null && segment.captureEndedAt && segment.audioDurationSec) {
+      const parsed = Date.parse(segment.captureEndedAt);
+      if (!Number.isNaN(parsed)) {
+        absoluteMs = parsed - segment.audioDurationSec * 1000;
+      }
+    }
+    if (absoluteMs === null) {
+      absoluteMs = segment.timestamp;
+    }
+
     const relativeSeconds = sessionStartMs > 0
-      ? (segment.timestamp - sessionStartMs) / 1000
+      ? (absoluteMs - sessionStartMs) / 1000
       : 0;
+
+    // Prefer the real audio duration from the segment; fall back to the
+    // fixed chunk constant if an older producer sent 0 / undefined.
+    const audioDuration = segment.audioDurationSec || CHUNK_DURATION_SECONDS;
 
     const line = JSON.stringify({
       id: segment.id,
@@ -92,7 +112,7 @@ export function appendTranscript(segment: TranscriptSegment): void {
       source: segment.source,
       label: segment.label,
       timestamp: relativeSeconds,
-      duration: CHUNK_DURATION_SECONDS,
+      duration: audioDuration,
       wordCount: segment.wordCount,
     }) + '\n';
 

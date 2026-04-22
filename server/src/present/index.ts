@@ -2675,6 +2675,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
             transcriptFeed.innerHTML = '';
             segCountEl.textContent = '0';
             clearAgenda();
+            resultsEl.innerHTML = '';
+            actionCards.clear();
           }
           updateUI();
           break;

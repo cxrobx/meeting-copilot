@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 11 items, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 13 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -17,6 +17,13 @@ Organized by category. 11 items, condensed format. Original numbering preserved 
 | 9 | Claude CLI JSON output has escape sequences | Backend |
 | 10 | Claude CLI has no --max-tokens flag | Backend |
 | 11 | WKWebView needs health polling before load | Frontend |
+| 12 | ScreenCaptureKit silent frames — ARK.driver in coreaudiod | Environment |
+| 13 | Claude CLI at `~/.local/bin` not on bundle's PATH | Environment |
+| 14 | Native-module ABI mismatch between build and runtime Node | Deployment |
+| 15 | Bundle PATH and app.log vs stderr — diagnostics go missing | Environment |
+| 16 | Silero VAD model required for silence handling + latency; whisper-cpp version gate | Environment |
+| 17 | TranscriptSegment.duration is deprecated — use audioDurationSec / transcriptionLatencyMs | Backend |
+| — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
 
@@ -74,11 +81,108 @@ Standard categories: Environment, Database, Backend, Frontend, Security, Deploym
 **Solution**: Removed `--max-tokens` from `claudeChat()` args.
 **Pattern**: `server/src/claude-cli.ts:31`
 
+### 12. ScreenCaptureKit Silent Frames — ARK.driver in coreaudiod (Applied Workaround)
+**Symptom**: Meeting-audio transcript is entirely whisper's silence hallucinations (`you`, `(bell dings)`), while mic transcript is normal. `[Audio] Chunk received … source: meeting` arrives at full cadence with the right byte count. `[AudioCapture] meeting peak=0.0000` every single second in `~/.meeting-copilot/app.log`.
+**Root cause** (confirmed cross-app 2026-04-21; affects notes4chris too, i.e. anything using `SCStream`): **Rogue Amoeba's `ARK.driver` has loaded inside `coreaudiod`**. Once ARK is in the HAL graph, a display-scoped `SCContentFilter(display:excludingApplications:[])` returns valid-sized buffers full of zeros because the audio has already been tapped upstream. Confirm with:
+```
+sudo sample coreaudiod 5 2>&1 | grep -i ARK.driver
+```
+(non-empty grep = ARK is loaded). Also check `kextstat 2>/dev/null | grep -iE "ARK|ACE"` and `launchctl list | grep rogueamoeba`. Bluetooth output (AirPods) and aggregate/virtual devices (BlackHole, Muse, ZoomAudioDevice) also trigger the same display-filter silence path on macOS 14.x.
+**Solution** (applied): Switched `SCContentFilter` to the per-app form: `SCContentFilter(display: display, including: capturedApps, exceptingWindows: [])`, where `capturedApps = content.applications.filter { $0.processID != ownPid }`. This taps per-app audio directly rather than the display's mix, bypassing the ARK interference. Diagnostics are mandatory — `[AudioCapture] meeting peak=…` is logged per second and the output device is logged at stream start, so the next incident is diagnosable in one grep.
+**Pattern**: `app/MeetingCopilot/Sources/Core/Audio/AudioCaptureManager.swift:167-225` (filter + per-second peak log + device snapshot)
+
+### 13. Claude CLI Lives at `~/.local/bin/claude`, Not on Bundle's Injected PATH
+**Symptom**: Agenda extraction (`/agenda/extract`) returns 502 "Extraction failed — try again or edit manually". Worker cards that call the CLI silently fail. No helpful trace in `server.log` — `execFile` throws `ENOENT` before anything is logged.
+**Cause**: `ProcessSupervisor.processEnvironment()` injects `/opt/homebrew/bin`, `/opt/homebrew/sbin`, `/usr/local/bin` into PATH before spawning the server. The Claude CLI is installed via `npm -g` into `~/.local/bin/claude`, which is not on that list. `execFile('claude', …)` resolves via PATH and returns ENOENT.
+**Solution**: Two prongs.
+  1. `processEnvironment()` now also appends `~/.local/bin` and every `~/.nvm/versions/node/*/bin` directory (globbed at startup) so CLIs installed via npm / nvm remain discoverable after Node version changes.
+  2. `extractAgendaItemsFromNotes` prefers the direct Anthropic API via `anthropicTriageJson` when `ANTHROPIC_API_KEY` is set — same path the agenda-eval loop already uses — falling back to the CLI only when no key is present. Sidesteps PATH issues entirely.
+**Pattern**: `app/MeetingCopilot/Sources/Core/Process/ProcessSupervisor.swift:69-105` (PATH injection), `server/src/intelligence/agenda.ts:830-900` (API-first extract).
+
+### 14. Native-Module ABI Mismatch Between Build and Runtime Node
+**Symptom**: Start Session fails silently; `server.log` shows `WS/TCP Handler error: NODE_MODULE_VERSION 137 … requires 115` with `better_sqlite3.node` in the stack. Every `session.start` throws in `new Database()` before the session is created, which also breaks anything downstream (extraction, agenda tracker) that depended on that session.
+**Cause**: `./scripts/build-app.sh` ran `npm ci` using the shell's default Node (e.g. nvm's v24, ABI 137), but `ProcessSupervisor` spawns the server with PATH prepended to include `/opt/homebrew/bin:/usr/local/bin`, where `node` is v20 (ABI 115). The compiled `better-sqlite3.node` is an older-Node binary from the build shell's perspective; at runtime the older Node refuses to load it.
+**Solution**: `build-app.sh` now pins `PATH` to the first existing Node in `/opt/homebrew/bin` → `/usr/local/bin` (the same resolution order `ProcessSupervisor` uses), then verifies the native module loads under that runtime Node with `node -e "require('…/better-sqlite3')"` before the bundle is considered good. If it doesn't, the build aborts with a clear rebuild hint instead of shipping a broken bundle.
+**Pattern**: `scripts/build-app.sh:11-40` (Node pin + sanity check).
+
+### 15. Diagnostics Go Missing: `fputs(stderr)` ≠ `~/.meeting-copilot/app.log`
+**Symptom**: Swift-side `fputs("…", stderr)` lines never appear in `~/.meeting-copilot/app.log` even though "stderr is captured" seems plausible.
+**Cause**: `app.log` is written only by the `appLog(_:)` function in `SessionManager.swift`, which calls `FileHandle.seekToEndOfFile()` directly. Nothing redirects the Swift process's stderr to that file — stderr goes to the launchd-backed system log instead. Child processes (node server, whisper) also write to `server.log` directly, not via `app.log`.
+**Solution**: All diagnostic logging from the Swift side must use `appLog("…")` (free function, globally accessible). Reserve `fputs(stderr)` for absolute last-resort fallbacks (e.g. `NotificationManager` failure path).
+**Pattern**: `app/MeetingCopilot/Sources/Core/Session/SessionManager.swift:6-17` (appLog definition).
+
+### 16. Silero VAD Model Required; whisper-cpp Version Gate
+**Symptom**: Transcript panel shows lots of "you"/"[ Silence ]"/"[typing sounds]" hallucinations on silent audio, AND chunks on sparse-speech audio take as long to transcribe as chunks on fully-spoken audio.
+**Cause**: Silero VAD (`ggml-silero-v5.1.2.bin`) trims silent regions INSIDE `whisper_full()` before decoding. Without it, whisper runs the decoder on silence and emits hallucinations (and the text filter catches them after the fact). The flag `--vad-model` was added in a recent whisper-cpp release; older Homebrew installs reject it.
+**Solution** (applied): Model is downloaded by `scripts/setup.sh` into `~/.meeting-copilot/models/`, bundled by `scripts/build-app.sh` into `Contents/Resources/models/`, and passed to whisper-server via `--vad --vad-model <path>`. Both `scripts/start.sh` and `ProcessSupervisor.launchWhisper()` first check `whisper-server --help` for `--vad-model`; if absent, they log a loud warning and launch without VAD (graceful degrade — text-level hallucination filter still catches residuals).
+**Pattern**: `scripts/start.sh:46-76`, `app/MeetingCopilot/Sources/Core/Process/ProcessSupervisor.swift:79-120` (vadModelPath + whisperSupportsVAD), `scripts/build-app.sh:153-162` (bundling).
+
+### 17. TranscriptSegment.duration Is Deprecated (v2)
+**Symptom**: Code reads `segment.duration` and gets inconsistent values — sometimes audio length (seconds), sometimes whisper latency (ms).
+**Cause**: Historical conflation — `server/src/transcription/index.ts` wrote whisper latency into `duration`, but `shared.ts` and UI treated it as audio seconds.
+**Solution** (applied): Split into two explicit fields — `audioDurationSec` (real audio length in seconds) and `transcriptionLatencyMs` (provider processing time in milliseconds). `duration` kept as alias of `audioDurationSec` during v2 rollout; remove after Swift decoder + any external consumers migrate.
+**Pattern**: `server/src/transcription/types.ts`, `app/MeetingCopilot/Sources/Models/TranscriptSegment.swift`.
+
 ### 11. WKWebView Needs Health Polling Before Loading Localhost
 **Symptom**: Blank white panel on app launch
 **Cause**: WKWebView loads `/present` before the Node server finishes starting. Failed navigation shows blank page, `reload()` does nothing after failed provisional navigation.
 **Solution**: `WebDashboardView.Coordinator.loadWhenReady()` polls `/health` until 200, then loads. Retries on navigation failure with `load(URLRequest(...))` not `reload()`.
 **Pattern**: `app/MeetingCopilot/Sources/Features/WebPanel/WebDashboardView.swift`
+
+---
+
+## Recovery Playbook
+
+When the app or session is stuck, work this ladder top-to-bottom. Each step is cheap and narrows the cause.
+
+### A. Is the server even up?
+```
+lsof -i :17890 -i :8078                # ports (17890 server, 8078 whisper)
+pgrep -fl "Meeting Copilot.app|whisper-server|meeting-copilot/server"
+tail -30 ~/.meeting-copilot/server.log
+tail -30 ~/.meeting-copilot/app.log
+```
+- No listener on :17890 → server crashed or never started; app will be in degraded mode. Relaunch the app (ProcessSupervisor respawns). If it won't come up, check `server.log` for the real error.
+- `NODE_MODULE_VERSION … requires 115` → gotcha #14. Run `./scripts/build-app.sh` — the new script self-verifies native modules.
+
+### B. Zombie / orphan processes after start-stop cycles
+```
+# Safe: only targets our server + whisper, not other Node apps.
+pkill -f "Meeting Copilot.app/Contents/Resources/server"
+pkill -f whisper-server
+sleep 1
+lsof -i :17890 -i :8078
+```
+Relaunch the app. `ProcessSupervisor.cleanupOrphans()` also targets :17890 on its own at startup, but only the server port — whisper (8078) is intentionally not killed because notes4chris may share it.
+
+### C. Meeting audio silent while mic works
+```
+grep "peak=" ~/.meeting-copilot/app.log | tail -20
+```
+- `meeting peak=0.0000` consistently → gotcha #12. Identify ARK.driver:
+  ```
+  sudo sample coreaudiod 5 2>&1 | grep -i ARK.driver
+  sudo launchctl list | grep rogueamoeba
+  ```
+  If ARK is loaded, the `including: apps` filter workaround (already in code) should already be capturing audio — if it still isn't, quarantine the Rogue Amoeba daemons during the session:
+  ```
+  sudo launchctl bootout system/com.rogueamoeba.arkaudiod 2>/dev/null
+  sudo launchctl bootout system/com.rogueamoeba.loopbackd 2>/dev/null
+  ```
+- `mic peak=0.0000` while speaking → macOS TCC issue. Reset and re-grant:
+  ```
+  tccutil reset Microphone com.christopherrobinson.meeting-copilot
+  tccutil reset ScreenCapture com.christopherrobinson.meeting-copilot
+  ```
+
+### D. Extraction / worker cards failing silently
+```
+grep -E "Extraction failed|api/anthropic|api/openai" ~/.meeting-copilot/server.log | tail -20
+```
+With `ANTHROPIC_API_KEY` set in `~/.meeting-copilot/.env`, extraction goes directly to the API (no CLI). If you see no API log line and a bare 502, the key isn't loading — verify `grep ANTHROPIC_API_KEY ~/.meeting-copilot/.env` returns a line and the server was restarted after you added it.
+
+### E. Nothing else has worked
+Restart the Mac. This genuinely clears stuck CoreAudio tap state (ARK, HAL plug-ins, aggregate devices) that no userspace command resets. Reserve for after A-D, but don't hesitate if they all come up clean and the symptom persists.
 
 ---
 

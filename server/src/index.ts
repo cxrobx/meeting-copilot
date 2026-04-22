@@ -16,6 +16,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import dotenv from 'dotenv';
 
 import { TranscriptionService } from './transcription/index.js';
+import { TranscriptDedup } from './transcription/dedup.js';
 import { IntelligenceEngine } from './intelligence/index.js';
 import { AgendaTracker, type AgendaStatus } from './intelligence/agenda.js';
 import { WorkerRegistry } from './workers/registry.js';
@@ -66,9 +67,14 @@ const SOCKET_PATH = join(COPILOT_DIR, 'copilot.sock');
 type InboundMessage =
   | {
       type: 'audio_chunk';
-      data: string; // base64 PCM
+      data: string; // base64 WAV
       source: 'mic' | 'meeting';
+      audioDurationSec?: number;
+      captureStartedAt?: string;
+      captureEndedAt?: string;
+      sequence?: number;
     }
+  | { type: 'audio.flush' }
   | { type: 'session.start'; title?: string; projectNames?: string[]; agenda?: string; attendees?: string; contextPaths?: string[]; contextDirPaths?: string[] }
   | { type: 'session.stop' }
   | { type: 'action.approve'; actionId: string }
@@ -86,7 +92,12 @@ type OutboundMessage =
         source: string;
         label: string;
         timestamp: string; // ISO-8601
-        duration: number;
+        audioDurationSec: number;
+        transcriptionLatencyMs: number;
+        captureStartedAt?: string;
+        captureEndedAt?: string;
+        sequence?: number;
+        duration: number; // @deprecated — alias of audioDurationSec
         wordCount: number;
       };
     }
@@ -145,6 +156,7 @@ let whisperAvailable: boolean | null = null;
 // ─── Initialize Core Services ──────────────────────────────────────────────
 
 const transcription = new TranscriptionService();
+const transcriptDedup = new TranscriptDedup();
 const intelligence = new IntelligenceEngine();
 const agendaTracker = new AgendaTracker();
 const registry = new WorkerRegistry();
@@ -287,27 +299,65 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       debugLog(`[Audio] Chunk received: ${wavBuffer.length} bytes, source: ${message.source}`);
       debug.recordAudioChunk(wavBuffer.length);
 
+      // Snapshot the session id BEFORE the await. Short chunks mean more
+      // in-flight work; a session.stop during transcription must not cause
+      // us to persist or broadcast a stale segment into a new session.
+      const chunkSessionId = sessionStore.id;
+
       try {
         const segment = await transcription.transcribeChunk(
           wavBuffer,
           message.source,
+          {
+            audioDurationSec: message.audioDurationSec,
+            captureStartedAt: message.captureStartedAt,
+            captureEndedAt: message.captureEndedAt,
+            sequence: message.sequence,
+          },
         );
 
+        if (!sessionActive || sessionStore?.id !== chunkSessionId) {
+          debugLog('[Audio] Dropping in-flight chunk — session changed during transcription');
+          break;
+        }
+
         if (segment.text) {
-          // Store and process
-          if (sessionStore) {
-            sessionStore.addTranscript(segment);
+          // Phase 4: strip chunk-boundary overlap before persistence. Since
+          // Swift emits 4s chunks every 3s, each chunk's first ~1s is the
+          // previous chunk's last ~1s. Dedup in-place on `segment.text` so
+          // SQLite / broadcast / shared JSONL are all clean (summaries and
+          // exports read from SQLite).
+          const dedupedText = transcriptDedup.dedup(
+            segment.source,
+            segment.text,
+            segment.timestamp,
+          );
+          if (!dedupedText) {
+            debugLog(`[Dedup] Dropped duplicate segment from ${segment.source}: "${segment.text.slice(0, 60)}"`);
+            break;
           }
+          if (dedupedText !== segment.text) {
+            debugLog(`[Dedup] Trimmed ${segment.source}: "${segment.text}" → "${dedupedText}"`);
+            segment.text = dedupedText;
+            segment.wordCount = dedupedText.split(/\s+/).filter(Boolean).length;
+          }
+
+          sessionStore.addTranscript(segment);
           intelligence.addTranscript(segment);
           debug.recordTranscriptWords(segment.wordCount);
+          debug.recordTranscriptSegment(segment);
 
           eventLogger?.log('transcript.chunk', {
             segmentId: segment.id,
             source: segment.source,
             wordCount: segment.wordCount,
+            audioDurationSec: segment.audioDurationSec,
+            transcriptionLatencyMs: segment.transcriptionLatencyMs,
+            sequence: segment.sequence,
           });
 
-          // Broadcast to Swift (dates as ISO-8601 for Swift Codable)
+          // Broadcast to Swift (dates as ISO-8601 for Swift Codable).
+          // `duration` kept during v2 rollout for backward compat.
           broadcast({
             type: 'transcript.update',
             segment: {
@@ -316,12 +366,16 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
               source: segment.source,
               label: segment.label,
               timestamp: new Date(segment.timestamp).toISOString(),
-              duration: segment.duration ?? 10,
+              audioDurationSec: segment.audioDurationSec,
+              transcriptionLatencyMs: segment.transcriptionLatencyMs,
+              captureStartedAt: segment.captureStartedAt,
+              captureEndedAt: segment.captureEndedAt,
+              sequence: segment.sequence,
+              duration: segment.audioDurationSec,
               wordCount: segment.wordCount,
             },
           });
 
-          // Append to shared transcript for companion apps
           appendTranscript(segment);
         }
       } catch (error) {
@@ -329,6 +383,18 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
           '[Transcription] Error:',
           error instanceof Error ? error.message : String(error),
         );
+      }
+      break;
+    }
+
+    case 'audio.flush': {
+      // Phase 3 hook — Swift side signals a session-stop flush to drain the
+      // VAD emitter's buffered partial utterance. Today a no-op (timer
+      // emitter doesn't buffer); wired up now so the flow is already there.
+      try {
+        await transcription.flushPending();
+      } catch (err) {
+        console.warn('[Transcription] flushPending failed:', err);
       }
       break;
     }
@@ -348,6 +414,21 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
 
       debug.setSessionStartTime(Date.now());
       debug.recordStateTransition();
+      debug.resetSessionMetrics();
+      transcription.resetSessionMetrics();
+      transcriptDedup.reset();
+
+      // Seed whisper's initial_prompt with attendees + topics so proper
+      // nouns (names, project names, keywords) transcribe accurately from
+      // the first chunk. Capped at ~1500 chars in setSessionPrompt().
+      const promptParts: string[] = [];
+      if (message.attendees?.trim()) {
+        promptParts.push(`Meeting attendees: ${message.attendees.trim()}.`);
+      }
+      if (message.agenda?.trim()) {
+        promptParts.push(`Topics: ${message.agenda.trim().slice(0, 800)}.`);
+      }
+      transcription.setSessionPrompt(promptParts.join(' '));
 
       // Set meeting context on intelligence engine
       if (message.agenda || message.attendees) {
@@ -504,8 +585,19 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         return;
       }
 
-      eventLogger?.log('session.stop', { sessionId: sessionStore.id });
+      eventLogger?.log('session.stop', {
+        sessionId: sessionStore.id,
+        metrics: debug.getSessionSnapshot(),
+      });
       debug.recordStateTransition();
+
+      // Drain any VAD-buffered partial utterance (Phase 3 hook — no-op today).
+      try {
+        await transcription.flushPending();
+      } catch {
+        /* non-critical */
+      }
+      transcription.clearSessionPrompt();
 
       // Stop rolling summary
       if (rollingSummaryTimer) {
@@ -941,6 +1033,12 @@ async function start(): Promise<void> {
   tcpServer.listen(TCP_PORT, '127.0.0.1', () => {
     console.log(`[Server] Listening on http://127.0.0.1:${TCP_PORT}`);
     debugLog('[Server] Meeting Copilot server ready');
+    // Fire-and-forget: pay whisper's Metal JIT cost now so the user's
+    // first real chunk lands in ~500ms instead of ~3s. Safe to run even
+    // before a session starts — whisper-server caches the model.
+    transcription.prewarm().catch(() => {
+      /* logged inside prewarm() */
+    });
   });
 }
 

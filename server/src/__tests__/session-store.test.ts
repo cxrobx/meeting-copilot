@@ -58,7 +58,9 @@ describe('SessionStore', () => {
       source: 'mic',
       label: '[You]',
       timestamp: Date.now(),
-      duration: 500,
+      audioDurationSec: 4,
+      transcriptionLatencyMs: 500,
+      duration: 4,
       wordCount: 2,
     });
 
@@ -132,7 +134,9 @@ describe('SessionStore', () => {
       source: 'meeting',
       label: '[Meeting]',
       timestamp: Date.now(),
-      duration: 500,
+      audioDurationSec: 4,
+      transcriptionLatencyMs: 500,
+      duration: 4,
       wordCount: 6,
     });
 
@@ -157,7 +161,9 @@ describe('SessionStore', () => {
       source: 'mic',
       label: '[You]',
       timestamp: Date.now(),
-      duration: 100,
+      audioDurationSec: 4,
+      transcriptionLatencyMs: 100,
+      duration: 4,
       wordCount: 1,
     });
 

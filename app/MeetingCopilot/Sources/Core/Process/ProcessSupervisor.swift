@@ -8,20 +8,32 @@ import Foundation
 final class ProcessSupervisor {
     // MARK: - Configuration
 
-    private let maxRestartAttempts = 3
-    private let restartDelay: TimeInterval = 5.0
+    // Soft ceiling — if we blow past this in a short window, we alert the user
+    // instead of silently retrying forever. Counter resets whenever the server
+    // stays healthy for `healthCountResetSeconds`.
+    private let maxRestartAttempts = 10
+    private let restartBackoffSeconds: [TimeInterval] = [1, 2, 4, 8, 16, 30]
     private let shutdownTimeout: TimeInterval = 5.0
+    private let healthProbeInterval: TimeInterval = 15.0
+    private let healthFailThreshold = 3           // consecutive /health failures = hung
+    private let healthCountResetSeconds: TimeInterval = 60  // reset restartCount after stability
 
     // MARK: - State
 
     var serverRunning: Bool = false
     var whisperRunning: Bool = false
+    /// Exposed so UI can show "reconnecting…" / "server unhealthy" status.
+    var serverHealthy: Bool = false
 
     private var serverProcess: Process?
     private var whisperProcess: Process?
     private var serverRestartCount = 0
     private var whisperRestartCount = 0
     private var monitorTasks: [Task<Void, Never>] = []
+    private var healthProbeTask: Task<Void, Never>?
+    private var lastHealthyAt: Date?
+    private var consecutiveHealthFailures = 0
+    private var hasAlertedOnCrashLoop = false
 
     // MARK: - Server Paths
 
@@ -64,16 +76,98 @@ final class ProcessSupervisor {
         return NSString("~/Projects/meeting-copilot/bin/whisper-server").expandingTildeInPath
     }
 
-    /// Build a process environment with homebrew paths included.
-    /// Apps launched from Finder have a minimal PATH that misses /opt/homebrew/bin.
+    /// Resolve the Silero VAD model path (user → bundle → nil).
+    /// Trimming silent audio inside whisper_full() eliminates most silence
+    /// hallucinations and cuts decode time on mostly-silent chunks. If this
+    /// returns nil, whisper-server launches without VAD (graceful degrade).
+    ///
+    /// Size gate: a real Silero model is ~864 KB. If setup.sh wrote an error
+    /// body (Hugging Face 404 returns ~15 bytes of plain text), skip it —
+    /// whisper-server would crash loading that as a GGML file.
+    private var vadModelPath: String? {
+        let candidates = [
+            NSString("~/.meeting-copilot/models/ggml-silero-v5.1.2.bin").expandingTildeInPath,
+            Bundle.main.resourcePath.map { "\($0)/models/ggml-silero-v5.1.2.bin" } ?? "",
+        ]
+        for path in candidates where !path.isEmpty {
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+               let size = attrs[.size] as? Int, size >= 500_000 {
+                return path
+            } else {
+                appLog("[ProcessSupervisor] VAD model at \(path) is too small (likely corrupt / error body) — ignoring.")
+            }
+        }
+        return nil
+    }
+
+    /// Quick preflight: confirm the installed whisper-cpp recognises the
+    /// --vad-model flag. Older builds will abort on unknown flag, so we
+    /// detect by checking --help output rather than running a probe.
+    /// Returns true if VAD flags are safe to pass.
+    private func whisperSupportsVAD(at binaryPath: String) -> Bool {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: binaryPath)
+        task.arguments = ["--help"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+        do {
+            try task.run()
+            task.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: data, encoding: .utf8) ?? ""
+            return output.contains("--vad-model")
+        } catch {
+            return false
+        }
+    }
+
+    /// Build a process environment with every location our spawned subprocesses
+    /// rely on. Finder-launched apps get a minimal PATH; the Node server in
+    /// turn spawns `claude`, `gemini`, `codex`, and `node` itself, each of
+    /// which may live in a different directory depending on how the user
+    /// installed them:
+    ///   - Homebrew:   /opt/homebrew/bin, /usr/local/bin
+    ///   - npm global: ~/.local/bin, ~/.nvm/versions/node/*/bin
+    ///   - Claude CLI: ~/.local/bin  (npm -g install @anthropic-ai/claude-code)
+    /// Missing any of these makes extraction/triage/suggestions fail silently
+    /// with ENOENT that never surfaces to the user. Scan the home directory at
+    /// startup so we self-heal against new nvm versions.
     private func processEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        let extraPaths = ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"]
-        let currentPath = env["PATH"] ?? "/usr/bin:/bin"
-        let missing = extraPaths.filter { !currentPath.contains($0) }
-        if !missing.isEmpty {
-            env["PATH"] = missing.joined(separator: ":") + ":" + currentPath
+        let home = NSHomeDirectory()
+        var extraPaths: [String] = [
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "\(home)/.local/bin",
+        ]
+        // Include every nvm-installed Node's bin directory so CLIs installed via
+        // `npm -g` remain discoverable even after the user switches Node versions.
+        let nvmRoot = "\(home)/.nvm/versions/node"
+        if let versionDirs = try? FileManager.default.contentsOfDirectory(atPath: nvmRoot) {
+            for v in versionDirs {
+                let binDir = "\(nvmRoot)/\(v)/bin"
+                if FileManager.default.fileExists(atPath: binDir) {
+                    extraPaths.append(binDir)
+                }
+            }
         }
+        // Build PATH so the system/homebrew paths ALWAYS come first, even if
+        // they already appear later in the inherited PATH. This matters when
+        // the app is launched from a shell where nvm has injected its own
+        // Node bin dir — without this, child processes spawned via `env node`
+        // would pick up a different Node ABI than the one the bundle was
+        // compiled against (gotcha #14). Downstream CLIs spawned by the
+        // Node server (claude, gemini, codex) may still live under ~/.nvm,
+        // so we still append those dirs — just LAST.
+        let currentPath = env["PATH"] ?? "/usr/bin:/bin"
+        let currentComponents = currentPath.split(separator: ":").map(String.init)
+        let priorityPaths = extraPaths // /opt/homebrew/bin, /usr/local/bin, ~/.local/bin, nvm/*
+        let prioritySet = Set(priorityPaths)
+        let leftover = currentComponents.filter { !prioritySet.contains($0) }
+        env["PATH"] = (priorityPaths + leftover).joined(separator: ":")
         return env
     }
 
@@ -133,7 +227,119 @@ final class ProcessSupervisor {
     func startServer() {
         guard !serverRunning else { return }
         serverRestartCount = 0
+        hasAlertedOnCrashLoop = false
         launchServer()
+        startHealthProbe()
+    }
+
+    // MARK: - Health Probe
+
+    /// Periodically poll `/health` to detect servers that are running but
+    /// unresponsive (hung event loop, stuck Node process). When probes fail
+    /// `healthFailThreshold` times in a row we force-restart the server.
+    /// Also resets the restart budget when the server has been healthy for
+    /// `healthCountResetSeconds` — so a long-running session that recovers
+    /// from one hiccup doesn't carry a maxed-out restart counter forever.
+    private func startHealthProbe() {
+        healthProbeTask?.cancel()
+        healthProbeTask = Task.detached { [weak self] in
+            guard let self = self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(self.healthProbeInterval * 1_000_000_000))
+                await self.runHealthProbe()
+            }
+        }
+    }
+
+    @MainActor
+    private func runHealthProbe() async {
+        // Don't probe if we're not supposed to be running
+        guard serverRunning else { return }
+
+        let healthURL = URL(string: "http://localhost:17890/health")!
+        var request = URLRequest(url: healthURL, timeoutInterval: 3.0)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            let ok = (response as? HTTPURLResponse)?.statusCode == 200
+            if ok {
+                onHealthSuccess()
+            } else {
+                onHealthFailure(reason: "non-200")
+            }
+        } catch {
+            onHealthFailure(reason: error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func onHealthSuccess() {
+        serverHealthy = true
+        consecutiveHealthFailures = 0
+        let now = Date()
+        if let lastHealthy = lastHealthyAt,
+           now.timeIntervalSince(lastHealthy) > healthCountResetSeconds,
+           serverRestartCount > 0 {
+            print("[ProcessSupervisor] Server has been healthy — resetting restart count")
+            serverRestartCount = 0
+            hasAlertedOnCrashLoop = false
+        }
+        lastHealthyAt = now
+    }
+
+    @MainActor
+    private func onHealthFailure(reason: String) {
+        serverHealthy = false
+        consecutiveHealthFailures += 1
+        print("[ProcessSupervisor] Health probe failed (\(consecutiveHealthFailures)/\(healthFailThreshold)): \(reason)")
+
+        guard consecutiveHealthFailures >= healthFailThreshold else { return }
+
+        // Server is hung or unreachable for >= threshold * interval seconds.
+        // Force-kill it so the exit monitor relaunches it.
+        consecutiveHealthFailures = 0
+        if let proc = serverProcess, proc.isRunning {
+            print("[ProcessSupervisor] Health probe threshold reached — killing hung server (PID: \(proc.processIdentifier))")
+            kill(proc.processIdentifier, SIGKILL)
+        } else {
+            // Process already gone but we never caught the exit — relaunch directly.
+            print("[ProcessSupervisor] Server process missing — relaunching")
+            launchServer()
+        }
+    }
+
+    @MainActor
+    private func notifyCrashLoop() {
+        guard !hasAlertedOnCrashLoop else { return }
+        hasAlertedOnCrashLoop = true
+        // Surface via appLog (writes to ~/.meeting-copilot/app.log directly —
+        // stderr is NOT redirected there, see gotcha #15) and a user
+        // notification so the user knows to check logs / quit-and-relaunch
+        // instead of waiting for a server that isn't coming back.
+        appLog("[ProcessSupervisor] CRASH LOOP: server has failed \(serverRestartCount) times. Giving up until next manual restart.")
+        NotificationManager.shared.postServerCrashLoopNotification()
+    }
+
+    /// Resolve Node to an absolute path using the same ranked list that
+    /// scripts/build-app.sh uses when compiling native modules. Falling back
+    /// to `env node` lets the PATH the Swift app inherits from its launcher
+    /// (shell / Finder / Xcode) pick a different Node — and when nvm's v24
+    /// (ABI 137) ends up ahead of /usr/local/bin's v20 (ABI 115), the
+    /// better-sqlite3 native module built at bundle time fails to load at
+    /// runtime (gotcha #14). Resolving to an absolute path is immune to
+    /// inherited PATH.
+    private var nodeBinaryPath: String? {
+        let candidates = [
+            "/opt/homebrew/bin/node",
+            "/usr/local/bin/node",
+        ]
+        for candidate in candidates {
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     private func launchServer() {
@@ -143,9 +349,16 @@ final class ProcessSupervisor {
         // In dev: use npx tsx to run TypeScript directly
         // In production: dist/index.js would be pre-compiled
         let distPath = "\(serverDir)/dist/index.js"
-        if FileManager.default.fileExists(atPath: distPath) {
+        if FileManager.default.fileExists(atPath: distPath), let nodePath = nodeBinaryPath {
+            process.executableURL = URL(fileURLWithPath: nodePath)
+            process.arguments = ["dist/index.js"]
+            print("[ProcessSupervisor] Spawning server with \(nodePath)")
+        } else if FileManager.default.fileExists(atPath: distPath) {
+            // Fallback: no system Node on the usual paths — best-effort via env.
+            // Likely to hit ABI mismatch but at least tries to start.
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             process.arguments = ["node", "dist/index.js"]
+            print("[ProcessSupervisor] WARNING: no /opt/homebrew/bin/node or /usr/local/bin/node — falling back to env node")
         } else {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             process.arguments = ["npx", "tsx", "src/index.ts"]
@@ -181,16 +394,25 @@ final class ProcessSupervisor {
                 await MainActor.run {
                     guard let self = self else { return }
                     self.serverRunning = false
+                    self.serverHealthy = false
                     print("[ProcessSupervisor] Server exited (code: \(process.terminationStatus))")
 
-                    // Auto-restart if not intentionally stopped
-                    if process.terminationStatus != 0 && self.serverRestartCount < self.maxRestartAttempts {
-                        self.serverRestartCount += 1
-                        print("[ProcessSupervisor] Restarting server (attempt \(self.serverRestartCount)/\(self.maxRestartAttempts))...")
-                        Task {
-                            try? await Task.sleep(nanoseconds: UInt64(self.restartDelay * 1_000_000_000))
-                            self.launchServer()
-                        }
+                    // Auto-restart on any unexpected exit. Code 0 usually means we
+                    // called stopAll() intentionally; anything else (including
+                    // SIGKILL from the health probe) should trigger recovery.
+                    guard process.terminationStatus != 0 else { return }
+
+                    if self.serverRestartCount >= self.maxRestartAttempts {
+                        self.notifyCrashLoop()
+                        return
+                    }
+                    self.serverRestartCount += 1
+                    let idx = min(self.serverRestartCount - 1, self.restartBackoffSeconds.count - 1)
+                    let delay = self.restartBackoffSeconds[idx]
+                    print("[ProcessSupervisor] Restarting server in \(delay)s (attempt \(self.serverRestartCount)/\(self.maxRestartAttempts))…")
+                    Task {
+                        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                        self.launchServer()
                     }
                 }
             }
@@ -238,7 +460,35 @@ final class ProcessSupervisor {
         } else {
             modelPath = userModelPath // Will fail, but gives a clear error
         }
-        process.arguments = ["--model", modelPath, "--port", "8078", "--threads", "4", "--no-timestamps"]
+        var args: [String] = [
+            "--model", modelPath,
+            "--port", "8078",
+            "--threads", "4",
+            "--no-timestamps",
+        ]
+
+        // VAD: trims silence inside whisper_full(), slashing decode time on
+        // sparse-speech chunks and killing silence hallucinations at the
+        // source. Requires whisper-cpp ≥ the release that added --vad-model.
+        if let vadPath = vadModelPath {
+            if whisperSupportsVAD(at: path) {
+                args.append(contentsOf: [
+                    "--vad",
+                    "--vad-model", vadPath,
+                    "--vad-threshold", "0.50",
+                    "--vad-min-speech-duration-ms", "250",
+                    "--vad-min-silence-duration-ms", "100",
+                    "--vad-speech-pad-ms", "30",
+                ])
+                appLog("[ProcessSupervisor] whisper VAD enabled (\(vadPath))")
+            } else {
+                appLog("[ProcessSupervisor] whisper-cpp is too old for --vad-model; upgrade with `brew upgrade whisper-cpp`. Launching without VAD.")
+            }
+        } else {
+            appLog("[ProcessSupervisor] VAD model not found — run `./scripts/setup.sh` or rebuild the .app to bundle it. Launching without VAD.")
+        }
+
+        process.arguments = args
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -266,9 +516,11 @@ final class ProcessSupervisor {
 
                     if process.terminationStatus != 0 && self.whisperRestartCount < self.maxRestartAttempts {
                         self.whisperRestartCount += 1
-                        print("[ProcessSupervisor] Restarting whisper (attempt \(self.whisperRestartCount)/\(self.maxRestartAttempts))...")
+                        let idx = min(self.whisperRestartCount - 1, self.restartBackoffSeconds.count - 1)
+                        let delay = self.restartBackoffSeconds[idx]
+                        print("[ProcessSupervisor] Restarting whisper in \(delay)s (attempt \(self.whisperRestartCount)/\(self.maxRestartAttempts))…")
                         Task {
-                            try? await Task.sleep(nanoseconds: UInt64(self.restartDelay * 1_000_000_000))
+                            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                             self.launchWhisper()
                         }
                     }
@@ -284,11 +536,14 @@ final class ProcessSupervisor {
     // MARK: - Stop All
 
     func stopAll() async {
-        // Cancel monitor tasks
+        // Cancel monitor + health tasks
         for task in monitorTasks {
             task.cancel()
         }
         monitorTasks = []
+        healthProbeTask?.cancel()
+        healthProbeTask = nil
+        serverHealthy = false
 
         // Graceful shutdown: SIGTERM, wait, then SIGKILL if needed
         await stopProcess(serverProcess, name: "Server")

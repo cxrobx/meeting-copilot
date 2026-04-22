@@ -1,4 +1,4 @@
-import type { TranscriptionProvider } from './types.js';
+import type { TranscribeOptions, TranscriptionProvider } from './types.js';
 
 const DEFAULT_SERVER_URL = 'http://127.0.0.1:8078';
 const INFERENCE_PATH = '/inference';
@@ -32,13 +32,22 @@ export class WhisperProvider implements TranscriptionProvider {
     return { mode: 'whisper-server', endpoint: `${this.serverUrl}${INFERENCE_PATH}` };
   }
 
-  async transcribe(wavBuffer: Buffer): Promise<{ text: string }> {
+  async transcribe(
+    wavBuffer: Buffer,
+    options?: TranscribeOptions,
+  ): Promise<{ text: string }> {
     const form = new FormData();
     form.set(
       'file',
       new Blob([wavBuffer], { type: 'audio/wav' }),
       'chunk.wav',
     );
+    if (options?.prompt) {
+      // whisper-server's /inference endpoint accepts `prompt` as a form
+      // field. Matches the CLI's --prompt flag. Capped at ~1500 chars
+      // upstream to stay within whisper's 448-token context budget.
+      form.set('prompt', options.prompt);
+    }
 
     let response: Response;
     try {

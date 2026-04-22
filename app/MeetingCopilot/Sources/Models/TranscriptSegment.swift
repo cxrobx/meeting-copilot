@@ -6,6 +6,13 @@ struct TranscriptSegment: Identifiable, Codable {
     let source: AudioSource
     let label: String // "[You]" or "[Meeting]"
     let timestamp: Date
+    /// Actual audio length (seconds) covered by this segment.
+    let audioDurationSec: TimeInterval
+    /// Whisper processing latency (milliseconds).
+    let transcriptionLatencyMs: Double
+    /// Monotonically-increasing per-source chunk counter from the Swift capture.
+    let sequence: Int?
+    /// @deprecated — use `audioDurationSec`. Kept during v2 rollout.
     let duration: TimeInterval
     let wordCount: Int
     var isRedacted: Bool = false
@@ -20,7 +27,9 @@ struct TranscriptSegment: Identifiable, Codable {
         text: String,
         source: AudioSource,
         timestamp: Date = Date(),
-        duration: TimeInterval = 0,
+        audioDurationSec: TimeInterval = 0,
+        transcriptionLatencyMs: Double = 0,
+        sequence: Int? = nil,
         isRedacted: Bool = false
     ) {
         self.id = id
@@ -28,12 +37,15 @@ struct TranscriptSegment: Identifiable, Codable {
         self.source = source
         self.label = source == .mic ? "[You]" : "[Meeting]"
         self.timestamp = timestamp
-        self.duration = duration
+        self.audioDurationSec = audioDurationSec
+        self.transcriptionLatencyMs = transcriptionLatencyMs
+        self.sequence = sequence
+        self.duration = audioDurationSec
         self.wordCount = text.split(separator: " ").count
         self.isRedacted = isRedacted
     }
 
-    // Custom decoding with defaults for optional server fields
+    // Custom decoding — tolerates older servers that only sent `duration`.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
@@ -42,7 +54,11 @@ struct TranscriptSegment: Identifiable, Codable {
         label = try container.decodeIfPresent(String.self, forKey: .label)
             ?? (source == .mic ? "[You]" : "[Meeting]")
         timestamp = try container.decodeIfPresent(Date.self, forKey: .timestamp) ?? Date()
-        duration = try container.decodeIfPresent(TimeInterval.self, forKey: .duration) ?? 0
+        let legacyDuration = try container.decodeIfPresent(TimeInterval.self, forKey: .duration) ?? 0
+        audioDurationSec = try container.decodeIfPresent(TimeInterval.self, forKey: .audioDurationSec) ?? legacyDuration
+        transcriptionLatencyMs = try container.decodeIfPresent(Double.self, forKey: .transcriptionLatencyMs) ?? 0
+        sequence = try container.decodeIfPresent(Int.self, forKey: .sequence)
+        duration = audioDurationSec
         wordCount = try container.decodeIfPresent(Int.self, forKey: .wordCount)
             ?? text.split(separator: " ").count
         isRedacted = try container.decodeIfPresent(Bool.self, forKey: .isRedacted) ?? false

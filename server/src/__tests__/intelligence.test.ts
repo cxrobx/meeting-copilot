@@ -9,7 +9,9 @@ function makeSegment(text: string, timestamp?: number): TranscriptSegment {
     source: 'meeting',
     label: '[Meeting]',
     timestamp: timestamp ?? Date.now(),
-    duration: 500,
+    audioDurationSec: 4,
+    transcriptionLatencyMs: 500,
+    duration: 4,
     wordCount: text.split(/\s+/).filter(Boolean).length,
   };
 }

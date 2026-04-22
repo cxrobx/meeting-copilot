@@ -316,7 +316,7 @@ final class SessionManager {
         appLog("[Session] Starting audio capture...")
         do {
             try await audioCaptureManager.startCapture(
-                onChunk: { [weak self] wavData, source in
+                onChunk: { [weak self] wavData, source, meta in
                     Task { [weak self] in
                         guard let self = self else { return }
                         let isConnected = await self.webSocketClient.getIsConnected()
@@ -325,7 +325,14 @@ final class SessionManager {
                         let sourceStr = source == .mic ? "mic" : "meeting"
                         if isConnected && sessionState == .live {
                             do {
-                                try await self.webSocketClient.send(.audioChunk(data: base64, source: sourceStr))
+                                try await self.webSocketClient.send(.audioChunk(
+                                    data: base64,
+                                    source: sourceStr,
+                                    audioDurationSec: meta.audioDurationSec,
+                                    captureStartedAt: meta.captureStartedAt,
+                                    captureEndedAt: meta.captureEndedAt,
+                                    sequence: meta.sequence
+                                ))
                             } catch {
                                 await MainActor.run {
                                     self.handleDegraded(reason: "Server connection lost")
@@ -335,7 +342,7 @@ final class SessionManager {
                         } else if sessionState == .priming || sessionState == .degraded {
                             // Buffer during degraded mode for replay on reconnect
                             await MainActor.run {
-                                self.audioCaptureManager.bufferDegradedChunk(wavData, source: source)
+                                self.audioCaptureManager.bufferDegradedChunk(wavData, source: source, meta: meta)
                             }
                         }
                     }

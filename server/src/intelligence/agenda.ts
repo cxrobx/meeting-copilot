@@ -1,9 +1,13 @@
 import { EventEmitter } from 'node:events';
 import { claudeChat } from '../claude-cli.js';
-import { isAnthropicApiAvailable, anthropicHaikuCachedJson } from '../api/anthropic.js';
+import { isAnthropicApiAvailable, anthropicHaikuCachedJson, anthropicTriageJson } from '../api/anthropic.js';
 
-const EVAL_INTERVAL_MS = 15_000;
-const MIN_NEW_WORDS_BEFORE_EVAL = 15;
+// Tighter cadence so pending → partial transitions land close to when the
+// user hears the topic come up, not 15-30s later. Prompt is explicitly
+// lenient on the partial gate (any hint = partial), so small transcript
+// deltas still produce useful state transitions.
+const EVAL_INTERVAL_MS = 8_000;
+const MIN_NEW_WORDS_BEFORE_EVAL = 5;
 // First eval fires when transcript reaches this total word count — doesn't
 // require waiting for MIN_NEW_WORDS_BEFORE_EVAL of growth.
 const MIN_TOTAL_WORDS_FOR_FIRST_EVAL = 15;
@@ -379,21 +383,30 @@ Your output is consumed by a UI panel that shows a checklist of agenda items wit
 STATE DEFINITIONS
 ============================================================
 
-"covered" — the agenda item has been meaningfully discussed. All three conditions must be true:
-  1. The topic of the agenda item clearly surfaced in the transcript (either someone asked the question or someone directly addressed the subject).
-  2. A substantive response, explanation, or back-and-forth followed. "Substantive" means more than an acknowledgment — at least one speaker actually answered, explained, decided, committed, or reasoned about the topic.
-  3. There is an identifiable quote in the transcript that captures the moment of engagement. You will surface this quote as evidence.
+Bias the whole model toward "covered" and "partial" — a false "pending" makes the user re-ask something they already asked, which is more annoying than a false "covered". Err on the generous side.
 
-"partial" — the agenda item has surfaced but has not been fully resolved. Any of the following qualifies:
-  - The user or another speaker asked the agenda question and no answer (or only a deflection / "we'll get to that" / "let's circle back") has followed yet.
-  - The topic was mentioned in passing without a real discussion.
-  - A partial answer was given but the question plainly has more to cover.
-  - The transcript contains a reasonable paraphrase of the agenda item even if the response is still underway in the current window.
-  Asking COUNTS. The state machine is permissive on the ask side and strict on the answer side, because asking is visible evidence the meeting is heading toward the item.
+"covered" — the agenda item has been discussed. Any ONE of these is enough:
+  1. Someone asked the question and ANY response followed — even a short answer, a "yeah" + reasoning, a "let me come back to that with specifics", or a redirect like "it depends on X". A substantive multi-sentence answer is NOT required.
+  2. The topic was raised and the participants engaged with it for more than a single beat — back-and-forth, clarifying follow-ups, agreement, or a decision, even if the answer is brief.
+  3. The conversation has clearly moved on to a later topic AND this item was engaged with earlier (asked + responded, or just discussed) — once we've moved past it, it is covered, not partial.
+  4. A decision, commitment, or action item was made related to the agenda item.
+  Surface a short quote as evidence — prefer the ask, or the first line where the topic becomes the conversational focus.
 
-"pending" — the topic has not appeared in the transcript at all. No reasonable match, no paraphrase, no one has steered the conversation toward it.
+"partial" — the agenda item has shown ANY sign of appearing. The bar here is intentionally very low:
+  - Any paraphrase, synonym, or near-synonym of the agenda item appears.
+  - Someone mentions the topic even in passing, in a lead-in ("so next up…", "okay so about X"), or as a partial question that trails off.
+  - The conversation has started steering toward the topic (an adjacent or setup question to the agenda item).
+  - A multi-part agenda has one part touched, no matter how briefly.
+  - The question was just asked and the answer hasn't started yet.
+  The goal: as soon as the transcript suggests the topic is coming up, flip to partial. Do NOT wait for a meaningful exchange. If you are deciding between "pending" and "partial" and there is ANY sliver of evidence the topic surfaced, pick partial. Treat partial as a low-commitment "this item is warming up" signal — it is cheap to be wrong in this direction.
 
-Transitions are allowed in both directions. If a previously "covered" item re-surfaces with new information and the transcript window shows the topic is re-opened, downgrade to "partial" so the UI re-prompts. If a "partial" item resolves, upgrade to "covered". If the upstream code resets an item to "pending" (e.g. the agenda list itself was edited), treat that as authoritative for the next eval.
+"pending" — the topic has not appeared in the transcript at all. No paraphrase, no synonym, no adjacent question, no lead-in. Use pending ONLY when you genuinely cannot find any connection, not as a "not confident yet" state.
+
+Transitions:
+  - pending → partial: the item just surfaced.
+  - partial → covered: the answer came, OR the conversation moved on.
+  - covered → partial: rare — only if the item clearly re-opens with new unresolved information. Do not downgrade on normal recall or passing reference.
+  - Upstream-forced pending (e.g. agenda list edited): authoritative for the next eval.
 
 ============================================================
 MATCHING RULES (LENIENT BY DESIGN)
@@ -421,14 +434,17 @@ Agenda: "POC demo". Transcript: "show me the proof of concept". Match.
 Rule 6 — Topical overlap without the exact anchor word.
 If the agenda says "onboarding" and someone asks "how long does it take a new hire to be productive", that matches onboarding even though the literal word "onboarding" never appears.
 
-Rule 7 — Prefer "partial" over "pending" when in doubt.
-The cost of a false "pending" is the user thinks a topic was missed and re-asks it, creating friction. The cost of a false "partial" is a small UI badge that says "in progress" on something that hasn't really started. The second failure mode is cheaper, so tie-break toward "partial".
+Rule 7 — Tie-break generously: covered > partial > pending.
+When in doubt between "partial" and "pending", pick partial. When in doubt between "covered" and "partial" AND the conversation has moved on to a later topic, pick covered. The cost of a false "pending" (user re-asks something already covered) is much higher than the cost of a slightly-generous "covered" badge.
 
 Rule 8 — Do NOT match on pure keyword coincidence.
-If the agenda says "pricing" and the transcript says "the pricing on the Tesla dropped last week" as a throwaway aside, that is NOT a match. Topical match requires the topic to be the conversational focus, not a passing reference.
+If the agenda says "pricing" and the transcript says "the pricing on the Tesla dropped last week" as a throwaway aside, that is NOT a match. Topical match requires the topic to be engaged with, not name-dropped in an unrelated sentence. But a brief on-topic exchange DOES count — don't confuse "not a match" (unrelated usage) with "engagement was short" (which is still covered if the conversation moved on).
 
-Rule 9 — Multi-part agenda items need substantial overlap, not full coverage.
-If the agenda says "timeline, budget, and team", and the transcript only covered timeline, the item is "partial" — not "covered" (since budget and team are still untouched) and not "pending" (since timeline did come up).
+Rule 9 — Multi-part agenda items: partial while on-topic, covered once moved on.
+If the agenda says "timeline, budget, and team" and only timeline was discussed, and the conversation is still on-topic, mark partial. If the conversation has moved on to a different agenda item entirely, mark the item covered — the user's cue to revisit the uncovered parts is the conversation topic, not a stuck partial badge.
+
+Rule 11 — Conversation-moved-on is a strong covered signal.
+If the transcript shows later segments are clearly engaging with a DIFFERENT agenda item (different topic, different question form, different vocabulary), any earlier item that was asked or discussed is now covered, not partial. The user is past it. Don't hold items hostage to "we never got a textbook answer".
 
 Rule 10 — Wrap-up language triggers missing_warnings, not state changes.
 Phrases like "okay let's wrap up", "we're at time", "any last questions before we end", "I'll send you a recap" mean the meeting is closing. If any agenda items remain "pending" or shallow "partial" at that point, include a human-readable missing_warnings entry for each such item. This is the ONLY signal that produces warnings.
@@ -834,17 +850,33 @@ export async function extractAgendaItemsFromNotes(
   const trimmed = (raw ?? '').trim();
   if (!trimmed) return [];
 
-  const chat = deps.chat ?? (claudeChat as ChatFn);
   const signal = deps.signal;
-
   const firstPrompt = buildAgendaExtractPrompt(trimmed);
+
+  // Prefer the Anthropic API when ANTHROPIC_API_KEY is set — sidesteps the
+  // PATH lookup for the `claude` CLI (which lives in ~/.local/bin and isn't
+  // always resolvable from the bundled server's subprocess environment).
+  // Falls back to the CLI when no key is present or when the caller injected
+  // a custom `chat` (tests).
+  const chat = deps.chat ?? (claudeChat as ChatFn);
+  const useApi = deps.chat == null && isAnthropicApiAvailable();
+
   let response: string;
   try {
-    response = await chat(firstPrompt, {
-      systemPrompt: AGENDA_EXTRACT_SYSTEM,
-      model: 'claude-sonnet-4-6',
-      signal,
-    });
+    if (useApi) {
+      response = await anthropicTriageJson(firstPrompt, AGENDA_EXTRACT_SYSTEM, {
+        signal,
+        maxTokens: 1024,
+        timeoutMs: 30_000,
+        label: 'agenda-extract',
+      });
+    } else {
+      response = await chat(firstPrompt, {
+        systemPrompt: AGENDA_EXTRACT_SYSTEM,
+        model: 'claude-sonnet-4-6',
+        signal,
+      });
+    }
   } catch (err) {
     if (err instanceof Error && err.message === 'Aborted') throw err;
     throw new Error(
@@ -860,11 +892,18 @@ export async function extractAgendaItemsFromNotes(
 Your previous reply was not valid JSON matching the required shape. Return JSON only, with no prose and no code fences:
 { "items": ["..."] }`;
     try {
-      const retry = await chat(retryPrompt, {
-        systemPrompt: AGENDA_EXTRACT_SYSTEM,
-        model: 'claude-sonnet-4-6',
-        signal,
-      });
+      const retry = useApi
+        ? await anthropicTriageJson(retryPrompt, AGENDA_EXTRACT_SYSTEM, {
+            signal,
+            maxTokens: 1024,
+            timeoutMs: 30_000,
+            label: 'agenda-extract-retry',
+          })
+        : await chat(retryPrompt, {
+            systemPrompt: AGENDA_EXTRACT_SYSTEM,
+            model: 'claude-sonnet-4-6',
+            signal,
+          });
       parsed = parseExtractResponse(retry);
     } catch (err) {
       if (err instanceof Error && err.message === 'Aborted') throw err;

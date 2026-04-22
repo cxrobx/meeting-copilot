@@ -5,15 +5,32 @@ import Foundation
 enum ClientMessage: Encodable {
     case sessionStart(title: String? = nil, projectNames: [String]? = nil, agenda: String? = nil, attendees: String? = nil, contextPaths: [String]? = nil)
     case sessionStop
-    case audioChunk(data: String, source: String) // base64, "mic"|"meeting"
+    // Audio chunk with capture metadata. Server measures true e2e latency as
+    // (now on receive of transcript broadcast) - captureEndedAt. `sequence`
+    // is per-source so out-of-order delivery is detectable.
+    case audioChunk(
+        data: String,
+        source: String, // "mic"|"meeting"
+        audioDurationSec: Double,
+        captureStartedAt: Date,
+        captureEndedAt: Date,
+        sequence: Int
+    )
     case actionApprove(actionId: String)
     case actionDismiss(actionId: String)
     case actionCancel(actionId: String)
     case actionTrigger(actionType: String, prompt: String?)
 
     private enum CodingKeys: String, CodingKey {
-        case type, data, source, actionId, title, projectNames, agenda, attendees, contextPaths, actionType, prompt
+        case type, data, source, actionId, title, projectNames, agenda, attendees, contextPaths, actionType, prompt,
+             audioDurationSec, captureStartedAt, captureEndedAt, sequence
     }
+
+    private static let iso8601: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -27,10 +44,14 @@ enum ClientMessage: Encodable {
             try container.encodeIfPresent(contextPaths, forKey: .contextPaths)
         case .sessionStop:
             try container.encode("session.stop", forKey: .type)
-        case .audioChunk(let data, let source):
+        case .audioChunk(let data, let source, let audioDurationSec, let captureStartedAt, let captureEndedAt, let sequence):
             try container.encode("audio_chunk", forKey: .type)
             try container.encode(data, forKey: .data)
             try container.encode(source, forKey: .source)
+            try container.encode(audioDurationSec, forKey: .audioDurationSec)
+            try container.encode(Self.iso8601.string(from: captureStartedAt), forKey: .captureStartedAt)
+            try container.encode(Self.iso8601.string(from: captureEndedAt), forKey: .captureEndedAt)
+            try container.encode(sequence, forKey: .sequence)
         case .actionApprove(let actionId):
             try container.encode("action.approve", forKey: .type)
             try container.encode(actionId, forKey: .actionId)

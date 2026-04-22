@@ -6,10 +6,22 @@ import CoreAudio
 import CoreGraphics
 import AppKit
 
+// MARK: - Audio Chunk Metadata
+
+/// Metadata attached to every emitted audio chunk so the server can measure
+/// true end-to-end latency (`captureEndedAt → transcript.broadcast`) and
+/// detect out-of-order delivery. Emitted alongside the WAV buffer.
+struct AudioChunkMeta: Sendable {
+    let audioDurationSec: Double
+    let captureStartedAt: Date
+    let captureEndedAt: Date
+    let sequence: Int
+}
+
 // MARK: - Audio Capture Manager
 
 /// Manages both system audio (via ScreenCaptureKit) and microphone audio (via AVAudioEngine).
-/// Produces 16kHz mono PCM chunks (10s with 2s overlap), base64-encoded for WebSocket transport.
+/// Produces 16kHz mono PCM chunks (4s with 1s overlap post-v2), base64-encoded for WebSocket transport.
 @Observable
 final class AudioCaptureManager: NSObject {
     // MARK: - Configuration
@@ -17,8 +29,11 @@ final class AudioCaptureManager: NSObject {
     static let sampleRate: Int = 16_000
     static let channelCount: Int = 1
     static let bitsPerSample: Int = 16
-    static let chunkDurationSeconds: TimeInterval = 10.0
-    static let chunkOverlapSeconds: TimeInterval = 2.0
+    // Must stay in lockstep with server/src/audio/chunkConfig.ts constants.
+    // Shorter = lower perceived latency (timer fires every
+    // chunkDurationSeconds - chunkOverlapSeconds).
+    static let chunkDurationSeconds: TimeInterval = 4.0
+    static let chunkOverlapSeconds: TimeInterval = 1.0
 
     // MARK: - Published State
 
@@ -37,24 +52,40 @@ final class AudioCaptureManager: NSObject {
 
     private var micPCMBuffer = Data()
     private var meetingPCMBuffer = Data()
+    // Wall-clock timestamp of the oldest sample currently sitting in each
+    // buffer. Updated on append (only when the buffer was empty) and advanced
+    // by (bytesPerChunk - overlapBytes) after each emit. This is what makes
+    // captureStartedAt / captureEndedAt reflect the ACTUAL audio time, not
+    // the timer-fire time — which would undercount e2e latency by up to
+    // one chunk's worth (3–4s) depending on buffer backlog.
+    private var micBufferAudioStart: Date?
+    private var meetingBufferAudioStart: Date?
+    private static let bytesPerSecond: Double = Double(sampleRate) * Double(channelCount) * Double(bitsPerSample) / 8.0
     private let bufferLock = NSLock()
 
     private var chunkTimer: Timer?
-    private var onAudioChunk: ((Data, TranscriptSegment.AudioSource) -> Void)?
+    private var onAudioChunk: ((Data, TranscriptSegment.AudioSource, AudioChunkMeta) -> Void)?
     private var onDeviceChangeError: (() -> Void)?
 
+    // Per-source monotonically-increasing sequence numbers for out-of-order
+    // detection on the server. Reset in stopCapture().
+    private var micSequence: Int = 0
+    private var meetingSequence: Int = 0
+
     // Degraded mode buffering (up to 60s)
-    private var degradedBuffer: [(Data, TranscriptSegment.AudioSource)] = []
+    private var degradedBuffer: [(Data, TranscriptSegment.AudioSource, AudioChunkMeta)] = []
     private let maxDegradedBufferDuration: TimeInterval = 60.0
 
     // MARK: - Start Capture
 
     func startCapture(
-        onChunk: @escaping (Data, TranscriptSegment.AudioSource) -> Void,
+        onChunk: @escaping (Data, TranscriptSegment.AudioSource, AudioChunkMeta) -> Void,
         onDeviceError: @escaping () -> Void
     ) async throws {
         self.onAudioChunk = onChunk
         self.onDeviceChangeError = onDeviceError
+        self.micSequence = 0
+        self.meetingSequence = 0
 
         do {
             // Start system audio capture via ScreenCaptureKit
@@ -113,6 +144,8 @@ final class AudioCaptureManager: NSObject {
         bufferLock.lock()
         micPCMBuffer = Data()
         meetingPCMBuffer = Data()
+        micBufferAudioStart = nil
+        meetingBufferAudioStart = nil
         degradedBuffer = []
         bufferLock.unlock()
 
@@ -123,9 +156,9 @@ final class AudioCaptureManager: NSObject {
     // MARK: - Degraded Mode
 
     /// Buffer a chunk during degraded mode for later replay.
-    func bufferDegradedChunk(_ data: Data, source: TranscriptSegment.AudioSource) {
+    func bufferDegradedChunk(_ data: Data, source: TranscriptSegment.AudioSource, meta: AudioChunkMeta) {
         bufferLock.lock()
-        degradedBuffer.append((data, source))
+        degradedBuffer.append((data, source, meta))
         // Drop oldest chunks when buffer exceeds max duration to preserve recent context
         let maxChunks = Int(maxDegradedBufferDuration / (Self.chunkDurationSeconds - Self.chunkOverlapSeconds))
         while degradedBuffer.count > maxChunks {
@@ -140,8 +173,8 @@ final class AudioCaptureManager: NSObject {
         degradedBuffer = []
         bufferLock.unlock()
 
-        for (data, source) in buffered {
-            onAudioChunk?(data, source)
+        for (data, source, meta) in buffered {
+            onAudioChunk?(data, source, meta)
         }
     }
 
@@ -170,7 +203,20 @@ final class AudioCaptureManager: NSObject {
             throw AudioCaptureError.noDisplayFound
         }
 
-        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+        // Two filter shapes produce different internal audio paths on macOS 14.x.
+        // The display-scoped excluding-empty form goes through the display's
+        // audio mix; the `including: apps` form taps per-app audio directly.
+        // When something else (Rogue Amoeba ARK/ACE, BlackHole aggregate, etc.)
+        // has claimed the display audio bus, the first form yields silent
+        // frames but the per-app form still works. We prefer the per-app form.
+        let ownPid = ProcessInfo.processInfo.processIdentifier
+        let capturedApps = content.applications.filter { $0.processID != ownPid }
+        let filter = SCContentFilter(
+            display: display,
+            including: capturedApps,
+            exceptingWindows: []
+        )
+        appLog("[AudioCapture] Using including-apps filter, apps=\(capturedApps.count)")
 
         let config = SCStreamConfiguration()
         config.capturesAudio = true
@@ -183,11 +229,27 @@ final class AudioCaptureManager: NSObject {
         config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
         config.showsCursor = false
 
+        var meetingPeakWindow: Float = 0.0
+        var meetingPeakLastFlush = Date()
         let delegate = SystemAudioDelegate { [weak self] pcmData, level in
             guard let self = self else { return }
             self.bufferLock.lock()
+            if self.meetingPCMBuffer.isEmpty {
+                // Wall clock of the oldest sample = now - duration of what we're about to append.
+                let appendDuration = Double(pcmData.count) / Self.bytesPerSecond
+                self.meetingBufferAudioStart = Date().addingTimeInterval(-appendDuration)
+            }
             self.meetingPCMBuffer.append(pcmData)
             self.bufferLock.unlock()
+
+            meetingPeakWindow = max(meetingPeakWindow, level)
+            let now = Date()
+            if now.timeIntervalSince(meetingPeakLastFlush) >= 1.0 {
+                appLog("[AudioCapture] meeting peak=\(String(format: "%.4f", meetingPeakWindow))")
+                meetingPeakWindow = 0.0
+                meetingPeakLastFlush = now
+            }
+
             // Update audio level on main thread
             Task { @MainActor in
                 self.audioLevel = level
@@ -204,6 +266,13 @@ final class AudioCaptureManager: NSObject {
 
         try await stream.startCapture()
         self.scStream = stream
+
+        // Snapshot the output device at capture start — invaluable when the
+        // symptom turns out to be output routing (AirPods / aggregate device).
+        let outputName = getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultOutputDevice)
+        let suspiciousTokens = ["BlackHole", "Loopback", "Aggregate", "Multi-Output", "Zoom"]
+        let isVirtual = suspiciousTokens.contains { outputName.localizedCaseInsensitiveContains($0) }
+        appLog("[AudioCapture] ScreenCaptureKit started. output=\"\(outputName)\" virtual=\(isVirtual) input=\"\(getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultInputDevice))\"")
     }
 
     // MARK: - Microphone (AVAudioEngine)
@@ -230,6 +299,8 @@ final class AudioCaptureManager: NSObject {
 
         let captureFormat = (needsConversion && converter != nil) ? hardwareFormat : desiredFormat
 
+        var micPeakWindow: Float = 0.0
+        var micPeakLastFlush = Date()
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: captureFormat) { [weak self] buffer, _ in
             guard let self = self else { return }
 
@@ -265,10 +336,12 @@ final class AudioCaptureManager: NSObject {
             guard let floatData = processBuffer.floatChannelData else { return }
             let frameCount = Int(processBuffer.frameLength)
             var int16Data = Data(capacity: frameCount * MemoryLayout<Int16>.size)
+            var localPeak: Float = 0.0
 
             for i in 0..<frameCount {
                 let sample = floatData[0][i]
                 let clamped = max(-1.0, min(1.0, sample))
+                localPeak = max(localPeak, abs(clamped))
                 let int16Value = Int16(clamped * Float(Int16.max))
                 withUnsafeBytes(of: int16Value.littleEndian) { bytes in
                     int16Data.append(contentsOf: bytes)
@@ -276,8 +349,20 @@ final class AudioCaptureManager: NSObject {
             }
 
             self.bufferLock.lock()
+            if self.micPCMBuffer.isEmpty {
+                let appendDuration = Double(int16Data.count) / Self.bytesPerSecond
+                self.micBufferAudioStart = Date().addingTimeInterval(-appendDuration)
+            }
             self.micPCMBuffer.append(int16Data)
             self.bufferLock.unlock()
+
+            micPeakWindow = max(micPeakWindow, localPeak)
+            let now = Date()
+            if now.timeIntervalSince(micPeakLastFlush) >= 1.0 {
+                appLog("[AudioCapture] mic peak=\(String(format: "%.4f", micPeakWindow))")
+                micPeakWindow = 0.0
+                micPeakLastFlush = now
+            }
         }
 
         engine.prepare()
@@ -303,31 +388,63 @@ final class AudioCaptureManager: NSObject {
     private func emitChunks() {
         let bytesPerChunk = Self.sampleRate * Self.channelCount * (Self.bitsPerSample / 8) * Int(Self.chunkDurationSeconds)
         let overlapBytes = Self.sampleRate * Self.channelCount * (Self.bitsPerSample / 8) * Int(Self.chunkOverlapSeconds)
+        let advanceBytes = bytesPerChunk - overlapBytes
+        let advanceSeconds = Double(advanceBytes) / Self.bytesPerSecond
 
         bufferLock.lock()
 
         // Emit meeting audio chunk
-        if meetingPCMBuffer.count >= bytesPerChunk {
+        if meetingPCMBuffer.count >= bytesPerChunk, let origin = meetingBufferAudioStart {
             let chunkData = meetingPCMBuffer.prefix(bytesPerChunk)
             let wavData = createWAVData(pcmData: Data(chunkData))
-            // Keep overlap for next chunk
-            let removeCount = bytesPerChunk - overlapBytes
-            meetingPCMBuffer.removeFirst(min(removeCount, meetingPCMBuffer.count))
+            // Timestamps derived from the buffer's audio-time origin — NOT
+            // the timer fire time. The emitted chunk covers samples
+            // [origin, origin + chunkDurationSeconds]; the remaining bytes
+            // in the buffer are newer than that window.
+            let capturedStart = origin
+            let capturedEnd = origin.addingTimeInterval(Self.chunkDurationSeconds)
+            meetingPCMBuffer.removeFirst(min(advanceBytes, meetingPCMBuffer.count))
+            // Advance the buffer origin by the non-overlapping prefix we just removed.
+            if meetingPCMBuffer.isEmpty {
+                meetingBufferAudioStart = nil
+            } else {
+                meetingBufferAudioStart = origin.addingTimeInterval(advanceSeconds)
+            }
+            meetingSequence += 1
+            let meta = AudioChunkMeta(
+                audioDurationSec: Self.chunkDurationSeconds,
+                captureStartedAt: capturedStart,
+                captureEndedAt: capturedEnd,
+                sequence: meetingSequence
+            )
             bufferLock.unlock()
-            onAudioChunk?(wavData, .meeting)
+            onAudioChunk?(wavData, .meeting, meta)
         } else {
             bufferLock.unlock()
         }
 
         bufferLock.lock()
         // Emit mic audio chunk
-        if micPCMBuffer.count >= bytesPerChunk {
+        if micPCMBuffer.count >= bytesPerChunk, let origin = micBufferAudioStart {
             let chunkData = micPCMBuffer.prefix(bytesPerChunk)
             let wavData = createWAVData(pcmData: Data(chunkData))
-            let removeCount = bytesPerChunk - overlapBytes
-            micPCMBuffer.removeFirst(min(removeCount, micPCMBuffer.count))
+            let capturedStart = origin
+            let capturedEnd = origin.addingTimeInterval(Self.chunkDurationSeconds)
+            micPCMBuffer.removeFirst(min(advanceBytes, micPCMBuffer.count))
+            if micPCMBuffer.isEmpty {
+                micBufferAudioStart = nil
+            } else {
+                micBufferAudioStart = origin.addingTimeInterval(advanceSeconds)
+            }
+            micSequence += 1
+            let micMeta = AudioChunkMeta(
+                audioDurationSec: Self.chunkDurationSeconds,
+                captureStartedAt: capturedStart,
+                captureEndedAt: capturedEnd,
+                sequence: micSequence
+            )
             bufferLock.unlock()
-            onAudioChunk?(wavData, .mic)
+            onAudioChunk?(wavData, .mic, micMeta)
         } else {
             bufferLock.unlock()
         }

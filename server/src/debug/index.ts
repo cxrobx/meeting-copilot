@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import type { TranscriptionService } from '../transcription/index.js';
 import type { IntelligenceEngine } from '../intelligence/index.js';
 import type { WorkerRegistry } from '../workers/registry.js';
+import type { TranscriptSegment } from '../transcription/types.js';
 
 export interface DebugMetrics {
   audio: {
@@ -14,6 +15,8 @@ export interface DebugMetrics {
     avgLatencyMs: number;
     errorRate: number;
     queueDepth: number;
+    hallucinationsFiltered: number;
+    prewarmDurationMs: number | null;
   };
   intelligence: {
     evalsRun: number;
@@ -30,7 +33,30 @@ export interface DebugMetrics {
     uptimeMs: number;
     stateTransitions: number;
     totalTranscriptWords: number;
+    firstChunkLatencyMs: number | null;
+    e2eLatencyP50Ms: number | null;
+    e2eLatencyP95Ms: number | null;
+    transcriptSegmentsBroadcast: number;
   };
+}
+
+/** True end-to-end latency: when the Swift app finished capturing audio
+ *  to when this server broadcast the resulting transcript. Falls back
+ *  to transcriptionLatencyMs if the Swift side hasn't upgraded yet. */
+function measureE2eLatencyMs(segment: TranscriptSegment): number {
+  if (segment.captureEndedAt) {
+    const capturedAt = Date.parse(segment.captureEndedAt);
+    if (!Number.isNaN(capturedAt)) {
+      return Math.max(0, Date.now() - capturedAt);
+    }
+  }
+  return segment.transcriptionLatencyMs ?? 0;
+}
+
+function percentile(sorted: number[], p: number): number | null {
+  if (sorted.length === 0) return null;
+  const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * p));
+  return sorted[idx] ?? null;
 }
 
 export class DebugHandler {
@@ -41,6 +67,9 @@ export class DebugHandler {
   private stateTransitions = 0;
   private totalTranscriptWords = 0;
   private sessionStartTime: number | null = null;
+  private firstChunkLatencyMs: number | null = null;
+  private e2eLatencySamples: number[] = [];
+  private transcriptSegmentsBroadcast = 0;
 
   constructor(
     private transcription: TranscriptionService,
@@ -72,6 +101,50 @@ export class DebugHandler {
     this.sessionStartTime = time;
   }
 
+  /**
+   * Reset counters that are per-session. Called on session.start so `/debug`
+   * shows only the current run, not the cumulative since process start.
+   * Intentionally keeps process-lifetime state (audioStartTime, deviceChanges,
+   * prewarmDurationMs) — those describe the server, not the session.
+   */
+  resetSessionMetrics(): void {
+    this.totalTranscriptWords = 0;
+    this.firstChunkLatencyMs = null;
+    this.e2eLatencySamples = [];
+    this.transcriptSegmentsBroadcast = 0;
+    this.audioChunksReceived = 0;
+    this.audioBytesReceived = 0;
+    this.audioStartTime = null;
+  }
+
+  /**
+   * Record a successfully-broadcast transcript segment for e2e / first-chunk
+   * latency tracking. Call AFTER hallucination filtering, so silence chunks
+   * don't pollute the percentiles.
+   */
+  recordTranscriptSegment(segment: TranscriptSegment): void {
+    this.transcriptSegmentsBroadcast++;
+    const e2e = measureE2eLatencyMs(segment);
+    this.e2eLatencySamples.push(e2e);
+    // Cap memory — keep only the last 500 samples.
+    if (this.e2eLatencySamples.length > 500) {
+      this.e2eLatencySamples.shift();
+    }
+    if (this.firstChunkLatencyMs === null && this.sessionStartTime !== null) {
+      this.firstChunkLatencyMs = Date.now() - this.sessionStartTime;
+    }
+  }
+
+  /** Snapshot copied into the session.stop event log for offline analysis. */
+  getSessionSnapshot(): Record<string, unknown> {
+    const m = this.getMetrics();
+    return {
+      transcription: m.transcription,
+      session: m.session,
+      audio: m.audio,
+    };
+  }
+
   getMetrics(): DebugMetrics {
     const audioElapsedSec = this.audioStartTime
       ? (Date.now() - this.audioStartTime) / 1000
@@ -91,6 +164,8 @@ export class DebugHandler {
         avgLatencyMs: this.transcription.avgLatencyMs,
         errorRate: this.transcription.errorRate,
         queueDepth: this.transcription.queueDepth,
+        hallucinationsFiltered: this.transcription.hallucinationsFiltered,
+        prewarmDurationMs: this.transcription.prewarmDurationMs,
       },
       intelligence: {
         evalsRun: this.intelligence.evalsRun,
@@ -109,6 +184,16 @@ export class DebugHandler {
           : 0,
         stateTransitions: this.stateTransitions,
         totalTranscriptWords: this.totalTranscriptWords,
+        firstChunkLatencyMs: this.firstChunkLatencyMs,
+        e2eLatencyP50Ms: percentile(
+          [...this.e2eLatencySamples].sort((a, b) => a - b),
+          0.5,
+        ),
+        e2eLatencyP95Ms: percentile(
+          [...this.e2eLatencySamples].sort((a, b) => a - b),
+          0.95,
+        ),
+        transcriptSegmentsBroadcast: this.transcriptSegmentsBroadcast,
       },
     };
   }

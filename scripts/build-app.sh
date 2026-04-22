@@ -11,6 +11,32 @@ APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 echo "=== Building $APP_NAME ==="
 echo ""
 
+# ── Pin Node ─────────────────────────────────────────────────────────────
+#
+# ProcessSupervisor spawns the server via `/usr/bin/env node` with PATH
+# prepended to include /opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin.
+# If the shell running this script has a DIFFERENT Node on PATH (common with
+# nvm / fnm), npm will compile native modules like better-sqlite3 against an
+# ABI the runtime Node can't load — "NODE_MODULE_VERSION" mismatch at
+# session.start. Pin to the exact Node ProcessSupervisor will use so the
+# bundle is self-consistent.
+RUNTIME_NODE=""
+for candidate in /opt/homebrew/bin/node /usr/local/bin/node; do
+  if [ -x "$candidate" ]; then
+    RUNTIME_NODE="$candidate"
+    break
+  fi
+done
+if [ -z "$RUNTIME_NODE" ]; then
+  echo "ERROR: No system Node found in /opt/homebrew/bin or /usr/local/bin."
+  echo "       Install via \`brew install node\` so the runtime + build use the same ABI."
+  exit 1
+fi
+RUNTIME_NODE_DIR="$(dirname "$RUNTIME_NODE")"
+export PATH="$RUNTIME_NODE_DIR:$PATH"
+echo "  Using Node: $RUNTIME_NODE ($("$RUNTIME_NODE" --version))"
+echo ""
+
 # Clean previous build
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
@@ -58,6 +84,16 @@ cp "$PROJECT_DIR/server/package.json" "$APP_BUNDLE/Contents/Resources/server/"
 
 # Copy production node_modules
 cp -R "$PROD_STAGING/node_modules" "$APP_BUNDLE/Contents/Resources/server/"
+
+# Verify native modules load under the runtime Node. Catches ABI mismatches
+# (NODE_MODULE_VERSION) before the user hits a silent crash on session.start.
+if ! "$RUNTIME_NODE" -e "require('$APP_BUNDLE/Contents/Resources/server/node_modules/better-sqlite3')" 2>/dev/null; then
+  echo "ERROR: better-sqlite3 native module does not load under $RUNTIME_NODE."
+  echo "       The build Node and runtime Node likely have different ABIs."
+  echo "       Try:  (cd '$APP_BUNDLE/Contents/Resources/server' && '$RUNTIME_NODE_DIR/npm' rebuild better-sqlite3)"
+  exit 1
+fi
+echo "  Verified: better-sqlite3 loads under runtime Node"
 
 # Copy app icons (icns for Finder, png for in-app usage)
 ICON_ICNS="$PROJECT_DIR/app/MeetingCopilot/Resources/AppIcon.icns"
@@ -110,6 +146,18 @@ if [ -f "$WHISPER_MODEL" ]; then
   mkdir -p "$APP_BUNDLE/Contents/Resources/models"
   cp "$WHISPER_MODEL" "$APP_BUNDLE/Contents/Resources/models/"
   echo "  Bundled whisper model ($(du -h "$WHISPER_MODEL" | cut -f1))"
+fi
+
+# Bundle Silero VAD model if available. Without it, ProcessSupervisor falls
+# back to a non-VAD launch (silence hallucinations pass through). Run
+# ./scripts/setup.sh to populate ~/.meeting-copilot/models/ first.
+VAD_MODEL="$HOME/.meeting-copilot/models/ggml-silero-v5.1.2.bin"
+if [ -f "$VAD_MODEL" ]; then
+  mkdir -p "$APP_BUNDLE/Contents/Resources/models"
+  cp "$VAD_MODEL" "$APP_BUNDLE/Contents/Resources/models/"
+  echo "  Bundled Silero VAD model ($(du -h "$VAD_MODEL" | cut -f1))"
+else
+  echo "  WARNING: Silero VAD model not at $VAD_MODEL — run ./scripts/setup.sh before building. Bundle will launch whisper without VAD."
 fi
 
 # PkgInfo

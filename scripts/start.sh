@@ -44,12 +44,50 @@ WHISPER_BIN=$(command -v whisper-server 2>/dev/null || echo "")
 WHISPER_MODEL="$MODELS_DIR/ggml-base.en.bin"
 
 if [ -n "$WHISPER_BIN" ] && [ -f "$WHISPER_MODEL" ]; then
+    # VAD is optional at the binary level (older whisper-cpp lacks the flag)
+    # but required for the latency/silence-handling story. Detect via --help
+    # so older installs don't blow up on an unknown flag.
+    VAD_MODEL="$MODELS_DIR/ggml-silero-v5.1.2.bin"
+    VAD_ARGS=()
+    if "$WHISPER_BIN" --help 2>&1 | grep -q -- "--vad-model"; then
+        if [ -f "$VAD_MODEL" ]; then
+            # Size gate: a real Silero model is ~864 KB. Hugging Face 404
+            # error bodies are ~15 bytes. Without this check, a stale error
+            # body on disk would be passed to whisper-server, which then
+            # crash-loops on the invalid GGML file. Matches the same gate
+            # in setup.sh and ProcessSupervisor.vadModelPath.
+            VAD_BYTES=$(stat -f%z "$VAD_MODEL" 2>/dev/null || stat -c%s "$VAD_MODEL" 2>/dev/null || echo 0)
+            if [ "$VAD_BYTES" -lt 500000 ]; then
+                echo "  WARNING: VAD model at $VAD_MODEL is only $VAD_BYTES bytes (likely corrupt or a 404 body)."
+                echo "           Run ./scripts/setup.sh to re-download. Continuing without VAD."
+            else
+                VAD_ARGS=(
+                    --vad
+                    --vad-model "$VAD_MODEL"
+                    --vad-threshold 0.50
+                    --vad-min-speech-duration-ms 250
+                    --vad-min-silence-duration-ms 100
+                    --vad-speech-pad-ms 30
+                )
+                echo "  VAD enabled (ggml-silero-v5.1.2)"
+            fi
+        else
+            echo "  WARNING: VAD model missing at $VAD_MODEL — run ./scripts/setup.sh."
+            echo "           Continuing without VAD (silence hallucinations will pass through)."
+        fi
+    else
+        echo "  WARNING: whisper-cpp is too old for --vad-model. Upgrade with:"
+        echo "             brew upgrade whisper-cpp"
+        echo "           Continuing without VAD."
+    fi
+
     echo "Starting whisper-server on port 8078..."
     "$WHISPER_BIN" \
         --model "$WHISPER_MODEL" \
         --port 8078 \
         --threads 4 \
-        --no-timestamps &
+        --no-timestamps \
+        "${VAD_ARGS[@]}" &
     WHISPER_PID=$!
     echo "  whisper-server PID: $WHISPER_PID"
     sleep 2

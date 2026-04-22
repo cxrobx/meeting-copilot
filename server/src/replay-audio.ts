@@ -15,16 +15,22 @@
 import { readFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import WebSocket from 'ws';
+import {
+  CHUNK_DURATION_SECONDS,
+  CHUNK_OVERLAP_SECONDS,
+  SAMPLE_RATE,
+  BYTES_PER_SAMPLE,
+  CHANNELS,
+  BYTES_PER_CHUNK,
+} from './audio/chunkConfig.js';
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
-const CHUNK_DURATION_SEC = 10; // Match Swift app's chunk size
-const SAMPLE_RATE = 16000;
-const BYTES_PER_SAMPLE = 2; // 16-bit
-const CHANNELS = 1;
+const CHUNK_DURATION_SEC = CHUNK_DURATION_SECONDS; // shared with production
+const CHUNK_ADVANCE_SEC = CHUNK_DURATION_SECONDS - CHUNK_OVERLAP_SECONDS;
+const OVERLAP_BYTES =
+  CHUNK_OVERLAP_SECONDS * SAMPLE_RATE * BYTES_PER_SAMPLE * CHANNELS;
 const WAV_HEADER_SIZE = 44;
-
-const BYTES_PER_CHUNK = CHUNK_DURATION_SEC * SAMPLE_RATE * BYTES_PER_SAMPLE * CHANNELS;
 
 // ─── Args ───────────────────────────────────────────────────────────────────
 
@@ -99,11 +105,24 @@ function createWavHeader(dataLength: number): Buffer {
   return header;
 }
 
-/** Split PCM into chunks and prepend a WAV header to each. */
-function chunkWithHeaders(pcm: Buffer, chunkSize: number): Buffer[] {
+/**
+ * Split PCM into overlapping chunks and prepend a WAV header to each.
+ * Matches production: stride = chunkSize - overlapBytes so consecutive
+ * chunks share the last `overlap` bytes. Without this stride, replay
+ * emits non-overlapping 4s windows every 4s, which doesn't exercise the
+ * boundary-duplication or Phase-4 dedup logic at all.
+ */
+function chunkWithHeaders(
+  pcm: Buffer,
+  chunkSize: number,
+  overlapBytes: number = 0,
+): Buffer[] {
   const chunks: Buffer[] = [];
-  for (let offset = 0; offset < pcm.length; offset += chunkSize) {
+  const stride = Math.max(1, chunkSize - overlapBytes);
+  for (let offset = 0; offset < pcm.length; offset += stride) {
     const pcmSlice = pcm.subarray(offset, Math.min(offset + chunkSize, pcm.length));
+    // Drop trailing sub-chunk-sized tails — production doesn't emit partial chunks.
+    if (pcmSlice.length < chunkSize && offset > 0) break;
     const header = createWavHeader(pcmSlice.length);
     chunks.push(Buffer.concat([header, pcmSlice]));
   }
@@ -177,7 +196,7 @@ async function main(): Promise<void> {
   if (manifest.tracks.system?.file) {
     const systemPath = join(recordingDir, manifest.tracks.system.file);
     const pcm = readWavPcm(systemPath);
-    const chunks = chunkWithHeaders(pcm, BYTES_PER_CHUNK);
+    const chunks = chunkWithHeaders(pcm, BYTES_PER_CHUNK, OVERLAP_BYTES);
     tracks.push({ source: 'meeting', chunks });
     const durationSec = pcm.length / (SAMPLE_RATE * BYTES_PER_SAMPLE);
     console.log(`  System audio: ${chunks.length} chunks (${(durationSec / 60).toFixed(1)} min)`);
@@ -186,7 +205,7 @@ async function main(): Promise<void> {
   if (manifest.tracks.mic?.file) {
     const micPath = join(recordingDir, manifest.tracks.mic.file);
     const pcm = readWavPcm(micPath);
-    const chunks = chunkWithHeaders(pcm, BYTES_PER_CHUNK);
+    const chunks = chunkWithHeaders(pcm, BYTES_PER_CHUNK, OVERLAP_BYTES);
     tracks.push({ source: 'mic', chunks });
     const durationSec = pcm.length / (SAMPLE_RATE * BYTES_PER_SAMPLE);
     console.log(`  Mic audio:    ${chunks.length} chunks (${(durationSec / 60).toFixed(1)} min)`);
@@ -198,7 +217,7 @@ async function main(): Promise<void> {
   }
 
   const maxChunks = Math.max(...tracks.map((t) => t.chunks.length));
-  const estimatedDuration = (maxChunks * CHUNK_DURATION_SEC) / speed;
+  const estimatedDuration = (maxChunks * CHUNK_ADVANCE_SEC) / speed;
   console.log(`\n  Total chunks: ${maxChunks} per track`);
   console.log(`  Est. replay:  ${(estimatedDuration / 60).toFixed(1)} min at ${speed}x speed\n`);
 
@@ -319,7 +338,8 @@ async function main(): Promise<void> {
   // Stream audio chunks with interleaved timing
   console.log('─── Streaming Audio ────────────────────────────────────────────\n');
 
-  const delayBetweenChunks = (CHUNK_DURATION_SEC * 1000) / speed;
+  // Production emits every chunkDuration - overlap seconds, not every chunkDuration.
+  const delayBetweenChunks = (CHUNK_ADVANCE_SEC * 1000) / speed;
 
   for (let i = 0; i < maxChunks; i++) {
     if (!connected) {
@@ -327,7 +347,7 @@ async function main(): Promise<void> {
       break;
     }
 
-    const elapsed = i * CHUNK_DURATION_SEC;
+    const elapsed = i * CHUNK_ADVANCE_SEC;
 
     if (i % 6 === 0) {
       console.log(`\n  \x1b[90m── ${formatTime(elapsed)} ─ chunk ${i + 1}/${maxChunks} (sent: ${stats.chunksSent}, transcripts: ${stats.transcriptsReceived}) ──\x1b[0m\n`);
@@ -338,10 +358,18 @@ async function main(): Promise<void> {
       if (i < track.chunks.length) {
         const chunk = track.chunks[i]!;
         try {
+          const captureEndedAt = new Date().toISOString();
+          const captureStartedAt = new Date(
+            Date.now() - CHUNK_DURATION_SEC * 1000,
+          ).toISOString();
           ws.send(JSON.stringify({
             type: 'audio_chunk',
             data: chunk.toString('base64'),
             source: track.source,
+            audioDurationSec: CHUNK_DURATION_SEC,
+            captureStartedAt,
+            captureEndedAt,
+            sequence: i,
           }));
           stats.chunksSent++;
         } catch (err) {

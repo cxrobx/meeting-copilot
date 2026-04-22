@@ -122,6 +122,8 @@ async function main(): Promise<void> {
       source: seg.source,
       label: seg.label,
       timestamp: Date.now(),
+      audioDurationSec: seg.duration,
+      transcriptionLatencyMs: 0,
       duration: seg.duration,
       wordCount: seg.wordCount,
     };

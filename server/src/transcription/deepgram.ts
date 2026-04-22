@@ -1,4 +1,4 @@
-import type { TranscriptionProvider } from './types.js';
+import type { TranscribeOptions, TranscriptionProvider } from './types.js';
 
 const API_BASE = 'https://api.deepgram.com/v1';
 const LISTEN_PATH = '/listen';
@@ -58,7 +58,12 @@ export class DeepgramProvider implements TranscriptionProvider {
     return { mode: 'deepgram', model: 'nova-2' };
   }
 
-  async transcribe(wavBuffer: Buffer): Promise<{ text: string }> {
+  async transcribe(
+    wavBuffer: Buffer,
+    _options?: TranscribeOptions,
+  ): Promise<{ text: string }> {
+    // Deepgram exposes its own `keywords` param rather than whisper's
+    // initial_prompt; intentionally ignored for MVP.
     if (!this.apiKey) {
       throw new Error('DEEPGRAM_API_KEY is not set');
     }

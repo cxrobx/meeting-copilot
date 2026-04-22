@@ -9,8 +9,10 @@ actor WebSocketClient {
 
     private let serverURL: URL
     private let socketPath: String?
-    private let maxReconnectAttempts = 3
-    private let reconnectDelay: TimeInterval = 5.0
+    // Exponential backoff: 1, 2, 4, 8, 16, 30, 30, … seconds. Unlimited retries
+    // so the app self-heals through long server outages without the user having
+    // to restart it. Counter resets on every successful connect.
+    private let reconnectDelaysSeconds: [TimeInterval] = [1, 2, 4, 8, 16, 30]
     private let receiveTimeout: TimeInterval = 120.0 // 2 minutes
 
     // MARK: - State
@@ -156,18 +158,15 @@ actor WebSocketClient {
         isConnected = false
         onDisconnect?()
 
-        guard !isIntentionalDisconnect, reconnectAttempts < maxReconnectAttempts else {
-            if reconnectAttempts >= maxReconnectAttempts {
-                print("[WebSocket] Max reconnection attempts reached")
-            }
-            return
-        }
+        guard !isIntentionalDisconnect else { return }
 
+        let delayIndex = min(reconnectAttempts, reconnectDelaysSeconds.count - 1)
+        let delay = reconnectDelaysSeconds[delayIndex]
         reconnectAttempts += 1
-        print("[WebSocket] Reconnecting (attempt \(reconnectAttempts)/\(maxReconnectAttempts))...")
+        print("[WebSocket] Reconnecting in \(delay)s (attempt \(reconnectAttempts))…")
 
         Task {
-            try? await Task.sleep(nanoseconds: UInt64(reconnectDelay * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !isIntentionalDisconnect else { return }
             establishConnection()
         }

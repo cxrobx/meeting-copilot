@@ -43,6 +43,32 @@ final class NotificationManager: NSObject {
         center.add(request)
     }
 
+    /// Fires when the supervisor has exhausted its automatic restart budget.
+    /// Surfaces to the user via macOS Notification Center so they know to
+    /// check logs / quit-and-relaunch — otherwise the failure is silent.
+    func postServerCrashLoopNotification() {
+        guard hasPermission else {
+            // Fall back to appLog — stderr is NOT redirected to app.log in this
+            // app (see gotcha #15). Using stderr here would make a crash-loop
+            // failure effectively invisible if notifications aren't authorized.
+            appLog("[NotificationManager] Server crash loop — notifications not authorized, no user alert")
+            return
+        }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Meeting Copilot: server keeps crashing"
+        content.body = "Automatic restart gave up after multiple failures. Quit and relaunch the app, or check ~/.meeting-copilot/server.log."
+        content.sound = .default
+        content.categoryIdentifier = "SERVER_CRASH"
+
+        let request = UNNotificationRequest(
+            identifier: "meeting-copilot.server-crash-loop",
+            content: content,
+            trigger: nil
+        )
+        center.add(request)
+    }
+
     func setupCategories() {
         let approveAction = UNNotificationAction(
             identifier: "APPROVE",

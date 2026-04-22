@@ -83,7 +83,7 @@ Full list in `.claude/rules/architecture.md`.
 | File | Purpose | Loaded |
 |------|---------|--------|
 | `.claude/rules/architecture.md` | System patterns, invariants | Always |
-| `.claude/rules/gotchas.md` | Known issues (3 items) | Always |
+| `.claude/rules/gotchas.md` | Known issues + recovery playbook | Always |
 | `.claude/rules/swift-app.md` | SwiftUI app patterns | Path: `app/**` |
 | `.claude/rules/backend.md` | Node.js server patterns | Path: `server/**` |
 | `docs/README.md` | Documentation index | On demand |
@@ -93,6 +93,10 @@ Full list in `.claude/rules/architecture.md`.
 
 ## Recent Learnings
 
+- 2026-04-21: **ScreenCaptureKit silent-frames root cause identified** — Rogue Amoeba's `ARK.driver` loading inside `coreaudiod` causes `SCContentFilter(display:excludingApplications:[])` to return zero-filled buffers system-wide (also affected notes4chris). Switched to `SCContentFilter(display:including:capturedApps,…)` which taps per-app audio directly. Detect with `sudo sample coreaudiod 5 | grep -i ARK.driver`. Full details + recovery ladder in `.claude/rules/gotchas.md` §12 and the Recovery Playbook.
+- 2026-04-21: `claude` CLI lives at `~/.local/bin/claude`, which `ProcessSupervisor.processEnvironment()` did not include — any CLI-based worker/eval returned ENOENT silently. Fix: PATH injection now appends `~/.local/bin` + all `~/.nvm/versions/node/*/bin`, and `extractAgendaItemsFromNotes` prefers the direct Anthropic API when `ANTHROPIC_API_KEY` is set (sidesteps PATH entirely). See gotcha #13.
+- 2026-04-21: Native-module ABI mismatch (nvm Node 24 at build, homebrew Node 20 at runtime) silently broke every `session.start` via `better-sqlite3`. `build-app.sh` now pins PATH to the same Node resolution `ProcessSupervisor` uses and aborts the build if `require('better-sqlite3')` fails under the runtime Node. See gotcha #14.
+- 2026-04-21: Self-healing wired into the process / WS layers — `ProcessSupervisor` now polls `/health` every 15s, force-restarts hung servers after 3 consecutive failures, uses exponential backoff (1→2→4→8→16→30s) with the restart budget resetting on 60s of sustained health, and surfaces a macOS notification when the supervisor gives up. `WebSocketClient` uses the same backoff with unlimited retries (reset on connect) so long outages self-recover without a relaunch.
 - 2026-03-24: Claude CLI `--output-format json` wraps response in `{"type":"result","result":"..."}` envelope with OSC escape sequences — must strip `\x1b]...\x1b\` and extract `result` field; empty result on `error_max_turns`
 - 2026-03-24: Claude CLI has no `--max-tokens` flag — use `--max-budget-usd` for cost control
 - 2026-03-24: WAV chunks sent to whisper-server need proper 44-byte WAV headers, not raw PCM
