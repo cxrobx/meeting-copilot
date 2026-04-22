@@ -217,10 +217,14 @@ final class VADEmitter {
         switch state {
         case .idle:
             if isSpeech {
-                // Transition to speaking. Prepend the pre-roll so we
-                // capture the leading syllable.
+                // Transition to speaking. Seed the utterance with the
+                // pre-roll ring, which ALREADY contains the current
+                // windowCopy samples at its tail (process() appends to
+                // preRoll before evaluateWindow runs). Appending
+                // windowCopy separately here would double the onset
+                // frame and inflate the emitted chunk's duration by
+                // 30ms. Just pre-roll is enough.
                 utterance.append(contentsOf: preRoll)
-                utterance.append(contentsOf: windowCopy)
                 utteranceStartTime = Date()
                     .addingTimeInterval(-Double(utterance.count) / Double(Config.sampleRate))
                 state = .speaking

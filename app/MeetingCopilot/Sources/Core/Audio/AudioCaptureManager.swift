@@ -269,10 +269,19 @@ final class AudioCaptureManager: NSObject {
         }
         systemAudioDelegate = nil
 
-        // Stop microphone
+        // Stop microphone. Both removeTap AND engine.stop can raise an
+        // NSException when AVAudioEngine is wedged (mid-device-change,
+        // certain aggregate-device teardowns). The route-change restart
+        // path below already wraps these; the user-initiated stop path
+        // MUST guard them too or it'll abort the process on stop. See
+        // gotcha #18 and ObjCExceptionBridge usage elsewhere in this file.
         if let engine = audioEngine {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
+            try? ObjCExceptionBridge.catching {
+                engine.inputNode.removeTap(onBus: 0)
+            }
+            try? ObjCExceptionBridge.catching {
+                engine.stop()
+            }
             audioEngine = nil
         }
         audioConverter = nil
