@@ -5,17 +5,26 @@ import CoreMedia
 import CoreAudio
 import CoreGraphics
 import AppKit
+import ObjCExceptionBridge
 
 // MARK: - Audio Chunk Metadata
 
 /// Metadata attached to every emitted audio chunk so the server can measure
 /// true end-to-end latency (`captureEndedAt → transcript.broadcast`) and
 /// detect out-of-order delivery. Emitted alongside the WAV buffer.
+///
+/// `isContinuation` is true when the emitter is carrying audio shared with
+/// the previous chunk — always true for fixed-timer overlap (every chunk
+/// after the first), true for the VAD path only when a continuous
+/// speaker hit the 6s cap and we carried 500 ms forward. Server-side
+/// dedup runs only on continuation chunks so legitimate repeated
+/// phrases across non-adjacent utterances aren't mis-trimmed.
 struct AudioChunkMeta: Sendable {
     let audioDurationSec: Double
     let captureStartedAt: Date
     let captureEndedAt: Date
     let sequence: Int
+    let isContinuation: Bool
 }
 
 // MARK: - Audio Capture Manager
@@ -72,9 +81,56 @@ final class AudioCaptureManager: NSObject {
     private var micSequence: Int = 0
     private var meetingSequence: Int = 0
 
-    // Degraded mode buffering (up to 60s)
+    // Degraded mode buffering (up to 60s). Cap by summed audio duration
+    // rather than by chunk count so variable-length VAD chunks retain the
+    // right amount of history.
     private var degradedBuffer: [(Data, TranscriptSegment.AudioSource, AudioChunkMeta)] = []
     private let maxDegradedBufferDuration: TimeInterval = 60.0
+
+    // Phase 3 VAD emitters. Non-nil when AppSettings.useVADEmitter is true
+    // at startCapture time AND the Silero model loaded successfully; the
+    // fixed-timer path (startChunkTimer / emitChunks) is used otherwise.
+    private var micEmitter: VADEmitter?
+    private var meetingEmitter: VADEmitter?
+    private var vadActive: Bool = false
+
+    // Input device-change handling. HAL property listener fires on the main
+    // queue; AirPods (re)connect typically emits 3-5 events in <100ms, so we
+    // debounce so the actual mic restart only runs once per route change.
+    // Cancelled by stopCapture() so it can never fire after teardown.
+    private var pendingMicRestart: DispatchWorkItem?
+    private static let micRestartDebounce: TimeInterval = 0.35
+    private static let micRestartMaxRetries: Int = 3
+    private static let micRestartInitialBackoffMs: Int = 200
+
+    /// Resolve the bundled / user-installed Silero VAD model path. Same
+    /// resolution order as `ProcessSupervisor.vadModelPath`: bundle →
+    /// user. Returns nil if neither exists or both are too small to be
+    /// real (guards against the HF 404 body that previously made it
+    /// into the model dir).
+    private static func resolveVADModelPath() -> String? {
+        let candidates = [
+            Bundle.main.resourcePath.map { "\($0)/models/ggml-silero-v5.1.2.bin" },
+            NSString("~/.meeting-copilot/models/ggml-silero-v5.1.2.bin").expandingTildeInPath
+        ].compactMap { $0 }
+        for path in candidates {
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+               let size = attrs[.size] as? Int, size >= 500_000 {
+                return path
+            }
+        }
+        return nil
+    }
+
+    // Lazy AVAudioConverter cache held by the mic tap closure. Rebuilt only
+    // when buffer.format changes (e.g. device flips mid-stream). Lives in a
+    // class so the escaping closure can mutate it without capture-by-value
+    // pitfalls. Single-threaded access: the audio I/O thread.
+    fileprivate final class MicConverterBox {
+        var converter: AVAudioConverter?
+        var inputFormat: AVAudioFormat?
+    }
 
     // MARK: - Start Capture
 
@@ -86,6 +142,52 @@ final class AudioCaptureManager: NSObject {
         self.onDeviceChangeError = onDeviceError
         self.micSequence = 0
         self.meetingSequence = 0
+
+        // Phase 3: initialise VAD emitters if the flag is on and the Silero
+        // model loads. Otherwise the timer path below drives emission.
+        if AppSettings.useVADEmitter {
+            let modelPath = Self.resolveVADModelPath()
+            if let path = modelPath, let probe = VADProbe(modelPath: path) {
+                // One probe per source — whisper_vad_context is not documented
+                // as thread-safe and each state machine needs independent state.
+                let secondProbe = VADProbe(modelPath: path)
+                let threshold = AppSettings.vadThreshold
+                let minSilenceMs = AppSettings.vadMinSilenceMs
+                let maxUtterance = AppSettings.vadMaxUtteranceSec
+                self.micEmitter = VADEmitter(
+                    source: .mic,
+                    probe: probe,
+                    threshold: threshold,
+                    minSilenceMs: minSilenceMs,
+                    maxUtteranceSec: maxUtterance
+                ) { [weak self] wav, source, meta in
+                    self?.onAudioChunk?(wav, source, meta)
+                }
+                if let mp = secondProbe {
+                    self.meetingEmitter = VADEmitter(
+                        source: .meeting,
+                        probe: mp,
+                        threshold: threshold,
+                        minSilenceMs: minSilenceMs,
+                        maxUtteranceSec: maxUtterance
+                    ) { [weak self] wav, source, meta in
+                        self?.onAudioChunk?(wav, source, meta)
+                    }
+                    self.vadActive = true
+                    appLog("[AudioCapture] VAD emitters active (threshold=\(threshold), silence=\(minSilenceMs)ms, cap=\(maxUtterance)s)")
+                } else {
+                    // Couldn't load a second probe — fall back cleanly.
+                    self.micEmitter = nil
+                    self.vadActive = false
+                    appLog("[AudioCapture] VAD probe load failed on second source — falling back to timer path")
+                }
+            } else {
+                self.vadActive = false
+                appLog("[AudioCapture] VAD enabled but model load failed — falling back to timer path (model=\(modelPath ?? "nil"))")
+            }
+        } else {
+            self.vadActive = false
+        }
 
         do {
             // Start system audio capture via ScreenCaptureKit
@@ -100,8 +202,14 @@ final class AudioCaptureManager: NSObject {
                 onInputChange: { [weak self] in self?.handleInputDeviceChange() }
             )
 
-            // Start chunk timer
-            startChunkTimer()
+            // Start the fixed-timer emitter ONLY when VAD is inactive.
+            // The VAD path emits on speech boundaries from inside the tap
+            // callbacks instead of on a wall-clock schedule.
+            if !vadActive {
+                startChunkTimer()
+            } else {
+                appLog("[AudioCapture] Skipping fixed-timer emitter — VAD path active")
+            }
 
             // Update device names
             updateDeviceNames()
@@ -113,14 +221,46 @@ final class AudioCaptureManager: NSObject {
         }
     }
 
+    // MARK: - Flush Pending Audio
+
+    /// Collect any in-flight VAD-buffered partial utterances. Returns an
+    /// array so SessionManager can serially `await` each WebSocket send
+    /// BEFORE transitioning state to `.ending` (after which onChunk
+    /// would drop sends). The fire-and-forget Task path in onChunk is
+    /// fine for ingest-time chunks but creates a race on stop.
+    ///
+    /// No-op (empty array) when the fixed-timer path is active.
+    func flushPendingAudio() -> [(Data, TranscriptSegment.AudioSource, AudioChunkMeta)] {
+        var out: [(Data, TranscriptSegment.AudioSource, AudioChunkMeta)] = []
+        if let chunk = micEmitter?.flush() {
+            out.append((chunk.wav, chunk.source, chunk.meta))
+        }
+        if let chunk = meetingEmitter?.flush() {
+            out.append((chunk.wav, chunk.source, chunk.meta))
+        }
+        return out
+    }
+
     // MARK: - Stop Capture
 
     func stopCapture() async {
         isCapturing = false
 
+        // Cancel any in-flight debounced mic restart so it can't run after
+        // teardown and resurrect the engine.
+        pendingMicRestart?.cancel()
+        pendingMicRestart = nil
+
         // Stop chunk timer
         chunkTimer?.invalidate()
         chunkTimer = nil
+
+        // Tear down VAD emitters (after flushPendingAudio has drained them).
+        micEmitter?.reset()
+        meetingEmitter?.reset()
+        micEmitter = nil
+        meetingEmitter = nil
+        vadActive = false
 
         // Stop system audio
         if let stream = scStream {
@@ -156,13 +296,16 @@ final class AudioCaptureManager: NSObject {
     // MARK: - Degraded Mode
 
     /// Buffer a chunk during degraded mode for later replay.
+    /// Capped by summed audio duration (not chunk count) — VAD chunks are
+    /// variable-length, so a count-based cap would over- or under-retain
+    /// depending on speaker cadence.
     func bufferDegradedChunk(_ data: Data, source: TranscriptSegment.AudioSource, meta: AudioChunkMeta) {
         bufferLock.lock()
         degradedBuffer.append((data, source, meta))
-        // Drop oldest chunks when buffer exceeds max duration to preserve recent context
-        let maxChunks = Int(maxDegradedBufferDuration / (Self.chunkDurationSeconds - Self.chunkOverlapSeconds))
-        while degradedBuffer.count > maxChunks {
-            degradedBuffer.removeFirst()
+        var totalDuration = degradedBuffer.reduce(0.0) { $0 + $1.2.audioDurationSec }
+        while totalDuration > maxDegradedBufferDuration, !degradedBuffer.isEmpty {
+            let dropped = degradedBuffer.removeFirst()
+            totalDuration -= dropped.2.audioDurationSec
         }
         bufferLock.unlock()
     }
@@ -231,16 +374,24 @@ final class AudioCaptureManager: NSObject {
 
         var meetingPeakWindow: Float = 0.0
         var meetingPeakLastFlush = Date()
-        let delegate = SystemAudioDelegate { [weak self] pcmData, level in
+        let delegate = SystemAudioDelegate { [weak self] pcmData, floatSamples, level in
             guard let self = self else { return }
-            self.bufferLock.lock()
-            if self.meetingPCMBuffer.isEmpty {
-                // Wall clock of the oldest sample = now - duration of what we're about to append.
-                let appendDuration = Double(pcmData.count) / Self.bytesPerSecond
-                self.meetingBufferAudioStart = Date().addingTimeInterval(-appendDuration)
+
+            // VAD path: feed the raw Float32 samples directly to the emitter.
+            // Skip the legacy Int16 buffer entirely — the emitter owns its
+            // own pre-roll ring and will emit on speech boundaries.
+            if let emitter = self.meetingEmitter {
+                emitter.ingest(samples: floatSamples)
+            } else {
+                self.bufferLock.lock()
+                if self.meetingPCMBuffer.isEmpty {
+                    // Wall clock of the oldest sample = now - duration of what we're about to append.
+                    let appendDuration = Double(pcmData.count) / Self.bytesPerSecond
+                    self.meetingBufferAudioStart = Date().addingTimeInterval(-appendDuration)
+                }
+                self.meetingPCMBuffer.append(pcmData)
+                self.bufferLock.unlock()
             }
-            self.meetingPCMBuffer.append(pcmData)
-            self.bufferLock.unlock()
 
             meetingPeakWindow = max(meetingPeakWindow, level)
             let now = Date()
@@ -280,7 +431,6 @@ final class AudioCaptureManager: NSObject {
     private func startMicrophoneCapture() throws {
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
-        let hardwareFormat = inputNode.inputFormat(forBus: 0)
 
         let desiredFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -289,86 +439,146 @@ final class AudioCaptureManager: NSObject {
             interleaved: false
         )!
 
-        let needsConversion = hardwareFormat.sampleRate != Double(Self.sampleRate) ||
-                              hardwareFormat.channelCount != AVAudioChannelCount(Self.channelCount)
-
-        var converter: AVAudioConverter?
-        if needsConversion {
-            converter = AVAudioConverter(from: hardwareFormat, to: desiredFormat)
+        // Validate the input bus has a usable format before installing a tap.
+        // During input-device transitions (AirPods (re)connect, default-input
+        // switch, USB mic plug/unplug) CoreAudio can briefly report a
+        // zero-sample-rate / zero-channel format. Throwing here lets the
+        // debounced restart path retry once the bus settles.
+        let hardwareFormat = inputNode.inputFormat(forBus: 0)
+        guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
+            appLog("[AudioCapture] mic: input bus reported invalid format (sr=\(hardwareFormat.sampleRate), ch=\(hardwareFormat.channelCount)); will retry")
+            throw AudioCaptureError.microphoneUnavailable
         }
 
-        let captureFormat = (needsConversion && converter != nil) ? hardwareFormat : desiredFormat
+        // Lazy converter cache. The audio I/O thread is the sole accessor of
+        // `box` once the tap is installed, so no synchronization is needed.
+        let box = MicConverterBox()
 
         var micPeakWindow: Float = 0.0
         var micPeakLastFlush = Date()
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: captureFormat) { [weak self] buffer, _ in
-            guard let self = self else { return }
 
-            var processBuffer: AVAudioPCMBuffer
+        // Critical: pass `format: nil` so AVAudioEngine uses the input bus's
+        // ACTUAL current format rather than whatever inputFormat(forBus:0)
+        // returned a few instructions ago. The mismatch between those two —
+        // routine during device transitions — is what raised the
+        // AVAE_RaiseException -> std::terminate crash before this fix.
+        // We additionally wrap installTap in ObjCExceptionBridge.catching as
+        // a safety net; AVAudioEngine still raises NSException for some
+        // malformed states (no input device at all, etc.) which Swift cannot
+        // catch with do/try and would abort the process. See gotcha #18.
+        do {
+            try ObjCExceptionBridge.catching {
+                inputNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
+                    guard let self = self else { return }
 
-            if let converter = converter {
-                let frameCapacity = AVAudioFrameCount(
-                    Double(buffer.frameLength) * desiredFormat.sampleRate / captureFormat.sampleRate
-                )
-                guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: desiredFormat, frameCapacity: frameCapacity) else {
-                    return
-                }
+                    let bufferFormat = buffer.format
+                    var processBuffer: AVAudioPCMBuffer
 
-                var error: NSError?
-                var inputConsumed = false
-                converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
-                    if inputConsumed {
-                        outStatus.pointee = .noDataNow
-                        return nil
+                    let needsConversion = bufferFormat.sampleRate != desiredFormat.sampleRate ||
+                                          bufferFormat.channelCount != desiredFormat.channelCount ||
+                                          bufferFormat.commonFormat != desiredFormat.commonFormat
+
+                    if needsConversion {
+                        // Rebuild the converter only when the input format has actually
+                        // changed (after a device flip mid-stream).
+                        if box.inputFormat == nil ||
+                           box.inputFormat!.sampleRate != bufferFormat.sampleRate ||
+                           box.inputFormat!.channelCount != bufferFormat.channelCount ||
+                           box.inputFormat!.commonFormat != bufferFormat.commonFormat {
+                            box.converter = AVAudioConverter(from: bufferFormat, to: desiredFormat)
+                            box.inputFormat = bufferFormat
+                        }
+                        guard let converter = box.converter else { return }
+
+                        let frameCapacity = AVAudioFrameCount(
+                            Double(buffer.frameLength) * desiredFormat.sampleRate / bufferFormat.sampleRate
+                        )
+                        guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: desiredFormat, frameCapacity: frameCapacity) else {
+                            return
+                        }
+
+                        var error: NSError?
+                        var inputConsumed = false
+                        converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
+                            if inputConsumed {
+                                outStatus.pointee = .noDataNow
+                                return nil
+                            }
+                            inputConsumed = true
+                            outStatus.pointee = .haveData
+                            return buffer
+                        }
+
+                        if error != nil { return }
+                        processBuffer = convertedBuffer
+                    } else {
+                        processBuffer = buffer
                     }
-                    inputConsumed = true
-                    outStatus.pointee = .haveData
-                    return buffer
+
+                    // Extract Float32 samples (used both by VAD and the
+                    // fixed-timer path's Int16 quantization).
+                    guard let floatData = processBuffer.floatChannelData else { return }
+                    let frameCount = Int(processBuffer.frameLength)
+                    var floatSamples = [Float]()
+                    floatSamples.reserveCapacity(frameCount)
+                    var localPeak: Float = 0.0
+
+                    for i in 0..<frameCount {
+                        let sample = floatData[0][i]
+                        let clamped = max(-1.0, min(1.0, sample))
+                        localPeak = max(localPeak, abs(clamped))
+                        floatSamples.append(clamped)
+                    }
+
+                    // VAD path: feed Float32 directly; no Int16 buffer.
+                    if let emitter = self.micEmitter {
+                        emitter.ingest(samples: floatSamples)
+                    } else {
+                        // Fixed-timer path: quantize to Int16 and append.
+                        var int16Data = Data(capacity: frameCount * MemoryLayout<Int16>.size)
+                        for sample in floatSamples {
+                            let int16Value = Int16(sample * Float(Int16.max))
+                            withUnsafeBytes(of: int16Value.littleEndian) { bytes in
+                                int16Data.append(contentsOf: bytes)
+                            }
+                        }
+
+                        self.bufferLock.lock()
+                        if self.micPCMBuffer.isEmpty {
+                            let appendDuration = Double(int16Data.count) / Self.bytesPerSecond
+                            self.micBufferAudioStart = Date().addingTimeInterval(-appendDuration)
+                        }
+                        self.micPCMBuffer.append(int16Data)
+                        self.bufferLock.unlock()
+                    }
+
+                    micPeakWindow = max(micPeakWindow, localPeak)
+                    let now = Date()
+                    if now.timeIntervalSince(micPeakLastFlush) >= 1.0 {
+                        appLog("[AudioCapture] mic peak=\(String(format: "%.4f", micPeakWindow))")
+                        micPeakWindow = 0.0
+                        micPeakLastFlush = now
+                    }
                 }
-
-                if error != nil { return }
-                processBuffer = convertedBuffer
-            } else {
-                processBuffer = buffer
             }
-
-            // Convert Float32 to Int16 PCM
-            guard let floatData = processBuffer.floatChannelData else { return }
-            let frameCount = Int(processBuffer.frameLength)
-            var int16Data = Data(capacity: frameCount * MemoryLayout<Int16>.size)
-            var localPeak: Float = 0.0
-
-            for i in 0..<frameCount {
-                let sample = floatData[0][i]
-                let clamped = max(-1.0, min(1.0, sample))
-                localPeak = max(localPeak, abs(clamped))
-                let int16Value = Int16(clamped * Float(Int16.max))
-                withUnsafeBytes(of: int16Value.littleEndian) { bytes in
-                    int16Data.append(contentsOf: bytes)
-                }
-            }
-
-            self.bufferLock.lock()
-            if self.micPCMBuffer.isEmpty {
-                let appendDuration = Double(int16Data.count) / Self.bytesPerSecond
-                self.micBufferAudioStart = Date().addingTimeInterval(-appendDuration)
-            }
-            self.micPCMBuffer.append(int16Data)
-            self.bufferLock.unlock()
-
-            micPeakWindow = max(micPeakWindow, localPeak)
-            let now = Date()
-            if now.timeIntervalSince(micPeakLastFlush) >= 1.0 {
-                appLog("[AudioCapture] mic peak=\(String(format: "%.4f", micPeakWindow))")
-                micPeakWindow = 0.0
-                micPeakLastFlush = now
-            }
+        } catch {
+            appLog("[AudioCapture] mic installTap raised: \(error.localizedDescription)")
+            throw AudioCaptureError.microphoneUnavailable
         }
 
         engine.prepare()
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            // Best-effort tap removal so the next attempt starts clean.
+            try? ObjCExceptionBridge.catching { inputNode.removeTap(onBus: 0) }
+            appLog("[AudioCapture] mic engine.start failed: \(error)")
+            throw AudioCaptureError.microphoneUnavailable
+        }
+
         self.audioEngine = engine
-        self.audioConverter = converter
+        self.audioConverter = nil  // Per-format converter now lives in the tap closure.
+        appLog("[AudioCapture] mic started, hardwareFormat=\(hardwareFormat.sampleRate)Hz/\(hardwareFormat.channelCount)ch")
     }
 
     // MARK: - Chunk Timer
@@ -396,7 +606,7 @@ final class AudioCaptureManager: NSObject {
         // Emit meeting audio chunk
         if meetingPCMBuffer.count >= bytesPerChunk, let origin = meetingBufferAudioStart {
             let chunkData = meetingPCMBuffer.prefix(bytesPerChunk)
-            let wavData = createWAVData(pcmData: Data(chunkData))
+            let wavData = AudioWAV.encode(int16PCM: Data(chunkData))
             // Timestamps derived from the buffer's audio-time origin — NOT
             // the timer fire time. The emitted chunk covers samples
             // [origin, origin + chunkDurationSeconds]; the remaining bytes
@@ -411,11 +621,15 @@ final class AudioCaptureManager: NSObject {
                 meetingBufferAudioStart = origin.addingTimeInterval(advanceSeconds)
             }
             meetingSequence += 1
+            // Timer path: every chunk after the first carries a 1s overlap
+            // from the previous one (see chunkOverlapSeconds), so mark as
+            // continuation whenever we're not on the very first chunk.
             let meta = AudioChunkMeta(
                 audioDurationSec: Self.chunkDurationSeconds,
                 captureStartedAt: capturedStart,
                 captureEndedAt: capturedEnd,
-                sequence: meetingSequence
+                sequence: meetingSequence,
+                isContinuation: meetingSequence > 1
             )
             bufferLock.unlock()
             onAudioChunk?(wavData, .meeting, meta)
@@ -427,7 +641,7 @@ final class AudioCaptureManager: NSObject {
         // Emit mic audio chunk
         if micPCMBuffer.count >= bytesPerChunk, let origin = micBufferAudioStart {
             let chunkData = micPCMBuffer.prefix(bytesPerChunk)
-            let wavData = createWAVData(pcmData: Data(chunkData))
+            let wavData = AudioWAV.encode(int16PCM: Data(chunkData))
             let capturedStart = origin
             let capturedEnd = origin.addingTimeInterval(Self.chunkDurationSeconds)
             micPCMBuffer.removeFirst(min(advanceBytes, micPCMBuffer.count))
@@ -441,7 +655,8 @@ final class AudioCaptureManager: NSObject {
                 audioDurationSec: Self.chunkDurationSeconds,
                 captureStartedAt: capturedStart,
                 captureEndedAt: capturedEnd,
-                sequence: micSequence
+                sequence: micSequence,
+                isContinuation: micSequence > 1
             )
             bufferLock.unlock()
             onAudioChunk?(wavData, .mic, micMeta)
@@ -450,66 +665,73 @@ final class AudioCaptureManager: NSObject {
         }
     }
 
-    // MARK: - WAV Encoding
-
-    private func createWAVData(pcmData: Data) -> Data {
-        let sampleRate = Self.sampleRate
-        let channels = Self.channelCount
-        let bitsPerSample = Self.bitsPerSample
-        let byteRate = sampleRate * channels * (bitsPerSample / 8)
-        let blockAlign = channels * (bitsPerSample / 8)
-        let dataSize = UInt32(pcmData.count)
-        let fileSize = 36 + dataSize
-
-        var header = Data()
-
-        // RIFF header
-        header.append(contentsOf: "RIFF".utf8)
-        header.append(contentsOf: withUnsafeBytes(of: fileSize.littleEndian) { Array($0) })
-        header.append(contentsOf: "WAVE".utf8)
-
-        // fmt chunk
-        header.append(contentsOf: "fmt ".utf8)
-        header.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Array($0) })
-        header.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) })
-        header.append(contentsOf: withUnsafeBytes(of: UInt16(channels).littleEndian) { Array($0) })
-        header.append(contentsOf: withUnsafeBytes(of: UInt32(sampleRate).littleEndian) { Array($0) })
-        header.append(contentsOf: withUnsafeBytes(of: UInt32(byteRate).littleEndian) { Array($0) })
-        header.append(contentsOf: withUnsafeBytes(of: UInt16(blockAlign).littleEndian) { Array($0) })
-        header.append(contentsOf: withUnsafeBytes(of: UInt16(bitsPerSample).littleEndian) { Array($0) })
-
-        // data chunk
-        header.append(contentsOf: "data".utf8)
-        header.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Array($0) })
-
-        var fileData = header
-        fileData.append(pcmData)
-        return fileData
-    }
-
     // MARK: - Device Changes
 
     private func handleOutputDeviceChange() {
-        print("[AudioCapture] Output device changed")
+        let newName = getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultOutputDevice)
+        appLog("[AudioCapture] Output device changed -> \"\(newName)\"")
         updateDeviceNames()
-        // ScreenCaptureKit handles device changes automatically
+        // ScreenCaptureKit handles output device changes automatically.
     }
 
     private func handleInputDeviceChange() {
-        print("[AudioCapture] Input device changed")
+        let newName = getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultInputDevice)
+        appLog("[AudioCapture] Input device changed -> \"\(newName)\"")
         updateDeviceNames()
 
-        // Attempt to restart microphone capture
-        if let engine = audioEngine {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
+        // Skip restart if we're not actively capturing — the next startCapture
+        // will pick up the current device on its own.
+        guard isCapturing else { return }
+
+        // Coalesce burst events (AirPods reconnect fires 3-5 listener events
+        // in <100ms). The work item also gets cancelled by stopCapture() so
+        // it can never resurrect the engine after teardown.
+        pendingMicRestart?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.restartMicrophoneCapture(
+                retriesLeft: Self.micRestartMaxRetries,
+                backoffMs: Self.micRestartInitialBackoffMs
+            )
         }
+        pendingMicRestart = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.micRestartDebounce,
+            execute: work
+        )
+    }
+
+    /// Tear down the current mic engine and restart it. On failure, retry
+    /// with exponential backoff (200ms → 400ms → 800ms) up to
+    /// `micRestartMaxRetries` times. After all retries exhausted, surface
+    /// to the supervisor via `onDeviceChangeError` but keep the meeting
+    /// going — ScreenCaptureKit / meeting audio is independent.
+    private func restartMicrophoneCapture(retriesLeft: Int, backoffMs: Int) {
+        guard isCapturing else { return }
+
+        if let engine = audioEngine {
+            // removeTap can raise NSException if the engine is in a wedged
+            // state — catch defensively so a stale engine doesn't take down
+            // the process during recovery.
+            try? ObjCExceptionBridge.catching { engine.inputNode.removeTap(onBus: 0) }
+            engine.stop()
+            audioEngine = nil
+        }
+        audioConverter = nil
 
         do {
             try startMicrophoneCapture()
+            appLog("[AudioCapture] mic restarted successfully after device change")
         } catch {
-            print("[AudioCapture] Failed to re-acquire microphone: \(error)")
-            onDeviceChangeError?()
+            if retriesLeft > 0 {
+                let nextBackoff = min(backoffMs * 2, 1500)
+                appLog("[AudioCapture] mic restart failed (retriesLeft=\(retriesLeft), backoff=\(backoffMs)ms): \(error.localizedDescription)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(backoffMs)) { [weak self] in
+                    self?.restartMicrophoneCapture(retriesLeft: retriesLeft - 1, backoffMs: nextBackoff)
+                }
+            } else {
+                appLog("[AudioCapture] mic restart gave up after \(Self.micRestartMaxRetries) retries: \(error.localizedDescription)")
+                onDeviceChangeError?()
+            }
         }
     }
 
@@ -551,9 +773,13 @@ final class AudioCaptureManager: NSObject {
 // MARK: - System Audio Delegate
 
 private class SystemAudioDelegate: NSObject, SCStreamOutput {
-    private let onPCMData: (Data, Float) -> Void
+    // Delivers BOTH the quantized Int16 bytes (for the legacy timer path)
+    // and the raw Float32 samples (for the VAD path). The Int16 conversion
+    // is cheap (~5 µs per frame) so we compute it unconditionally; callers
+    // pick whichever they need based on VAD state.
+    private let onPCMData: (Data, [Float], Float) -> Void
 
-    init(onPCMData: @escaping (Data, Float) -> Void) {
+    init(onPCMData: @escaping (Data, [Float], Float) -> Void) {
         self.onPCMData = onPCMData
         super.init()
     }
@@ -570,9 +796,11 @@ private class SystemAudioDelegate: NSObject, SCStreamOutput {
             CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length, destination: baseAddress)
         }
 
-        // Convert Float32 to Int16 PCM
+        // Convert Float32 to Int16 PCM (and keep the Float32 for VAD).
         let floatCount = length / MemoryLayout<Float32>.size
         var int16Data = Data(capacity: floatCount * MemoryLayout<Int16>.size)
+        var floatSamples = [Float]()
+        floatSamples.reserveCapacity(floatCount)
         var peakLevel: Float = 0.0
 
         rawData.withUnsafeBytes { rawBufferPointer in
@@ -581,6 +809,7 @@ private class SystemAudioDelegate: NSObject, SCStreamOutput {
                 let sample = floatBuffer[i]
                 let clamped = max(-1.0, min(1.0, sample))
                 peakLevel = max(peakLevel, abs(clamped))
+                floatSamples.append(clamped)
                 let int16Value = Int16(clamped * Float32(Int16.max))
                 withUnsafeBytes(of: int16Value.littleEndian) { bytes in
                     int16Data.append(contentsOf: bytes)
@@ -588,7 +817,7 @@ private class SystemAudioDelegate: NSObject, SCStreamOutput {
             }
         }
 
-        onPCMData(int16Data, peakLevel)
+        onPCMData(int16Data, floatSamples, peakLevel)
     }
 }
 

@@ -27,6 +27,25 @@ describe('TranscriptDedup', () => {
     ).toBe('in sessions, or in revenue from organic.');
   });
 
+  it('does NOT dedup when isContinuation=false (VAD pause-triggered utterance)', () => {
+    const d = new TranscriptDedup();
+    // Two utterances that happen to share trailing/leading words, separated
+    // by a pause. VAD reports isContinuation=false on the second.
+    d.dedup('meeting', "Yeah that's down 22", at(0), false);
+    expect(d.dedup('meeting', "down 22 percent is a lot", at(3000), false)).toBe(
+      "down 22 percent is a lot",
+    );
+  });
+
+  it('dedups when isContinuation=true even if false was used for prior (mixed sequence)', () => {
+    const d = new TranscriptDedup();
+    d.dedup('meeting', "That's down 22%", at(0), false);
+    // Next chunk IS a max-utterance carry — dedup should apply.
+    expect(
+      d.dedup('meeting', 'Down 22% in sessions', at(3000), true),
+    ).toBe('in sessions');
+  });
+
   it('does not dedup distinct short utterances that share vocabulary', () => {
     const d = new TranscriptDedup();
     d.dedup('meeting', "yes that's right", at(0));

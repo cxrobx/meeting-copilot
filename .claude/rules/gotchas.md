@@ -23,6 +23,7 @@ Organized by category. 13 items + recovery playbook, condensed format. Original 
 | 15 | Bundle PATH and app.log vs stderr — diagnostics go missing | Environment |
 | 16 | Silero VAD model required for silence handling + latency; whisper-cpp version gate | Environment |
 | 17 | TranscriptSegment.duration is deprecated — use audioDurationSec / transcriptionLatencyMs | Backend |
+| 18 | AVAudioEngine input device-change crashes — installTap NSException → SIGABRT | Frontend |
 | — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
@@ -122,6 +123,26 @@ sudo sample coreaudiod 5 2>&1 | grep -i ARK.driver
 **Cause**: Historical conflation — `server/src/transcription/index.ts` wrote whisper latency into `duration`, but `shared.ts` and UI treated it as audio seconds.
 **Solution** (applied): Split into two explicit fields — `audioDurationSec` (real audio length in seconds) and `transcriptionLatencyMs` (provider processing time in milliseconds). `duration` kept as alias of `audioDurationSec` during v2 rollout; remove after Swift decoder + any external consumers migrate.
 **Pattern**: `server/src/transcription/types.ts`, `app/MeetingCopilot/Sources/Models/TranscriptSegment.swift`.
+
+### 18. AVAudioEngine Input Device-Change Crashes — installTap NSException → SIGABRT
+**Symptom**: App aborts mid-session (SIGABRT, std::terminate from `_dispatch_main_queue_drain`) right after a route change — most reliably when AirPods (re)connect or you switch the default input. Crash report stack:
+```
+AVAE_RaiseException
+AVAudioIONodeImpl::SetOutputFormat
+-[AVAudioNode installTapOnBus:bufferSize:format:]
+AudioCaptureManager.startMicrophoneCapture()
+AudioCaptureManager.handleInputDeviceChange()
+HALPropertyListener::Call
+```
+**Root cause**: HAL property listener fires on the main queue when `kAudioHardwarePropertyDefaultInputDevice` changes. The handler tore down the engine and immediately called `startMicrophoneCapture()`, which read `inputNode.inputFormat(forBus: 0)` and passed it back into `installTap(onBus:0,…,format:capturedFormat)`. During the transient window of a device flip the bus's format is mid-update, so the format we read doesn't match what `installTap` actually accepts — AVFoundation raises an Obj-C `NSException`. Swift cannot catch Obj-C exceptions with `do/try`, so it bubbles to `std::terminate` and the process aborts. ProcessSupervisor + the WS clients all die with it; whisper-server is left as an orphan on :8078.
+**Solution** (applied 2026-04-22): Five-part hardening in `AudioCaptureManager.swift`, all gated by gotcha #15's `appLog`.
+  1. Tiny Obj-C bridge target (`ObjCExceptionBridge/`) exposes `+catching:error:` so Swift can catch `NSException`. Imported as `try ObjCExceptionBridge.catching { … }` (renamed from `tryBlock` because Swift's importer would force backticks around `try`).
+  2. `installTap` is now called with `format: nil` so AVAudioEngine uses the bus's *actual* current format (the documented robust pattern). The `AVAudioConverter` is rebuilt lazily inside the tap closure when `buffer.format` changes — handles devices whose native format changes mid-stream.
+  3. `installTap` and the engine teardown are both wrapped in `ObjCExceptionBridge.catching` as a safety net for other malformed states (no input device, wedged engine).
+  4. HAL listener events are debounced — `handleInputDeviceChange` schedules a single `DispatchWorkItem` 350ms in the future and cancels any prior one, coalescing the 3-5 events AirPods reconnects fire in ≤100ms. The work item is also cancelled in `stopCapture()` so it can never resurrect the engine after teardown.
+  5. Failed restarts retry up to 3× with exponential backoff (200/400/800ms). If all retries fail, `onDeviceChangeError?()` surfaces a notification but the meeting keeps going (SCK / meeting audio is independent).
+**Verification**: After applying, manually unplug/replug the input device (or AirPods reconnect) mid-session and confirm `[AudioCapture] mic restarted successfully after device change` appears in `~/.meeting-copilot/app.log`.
+**Pattern**: `app/MeetingCopilot/Sources/Core/Audio/AudioCaptureManager.swift` (the entire mic path); `app/MeetingCopilot/ObjCExceptionBridge/` (bridge target); `app/MeetingCopilot/Package.swift` (target wiring).
 
 ### 11. WKWebView Needs Health Polling Before Loading Localhost
 **Symptom**: Blank white panel on app launch

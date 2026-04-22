@@ -84,24 +84,38 @@ export class TranscriptDedup {
    * Return the (possibly trimmed) text to use for this segment, or an
    * empty string if the whole segment is duplicate and should be dropped.
    *
-   * @param source  'mic' | 'meeting' — dedup is per-source (mic overlaps
-   *                don't affect meeting overlaps).
-   * @param text    Raw transcript from the provider.
-   * @param time    Segment timestamp (epoch-ms).
+   * @param source           'mic' | 'meeting' — dedup is per-source.
+   * @param text             Raw transcript from the provider.
+   * @param time             Segment timestamp (epoch-ms).
+   * @param isContinuation   True when the emitted chunk shares audio with
+   *                         its predecessor (timer-path overlap, or VAD
+   *                         max-utterance carry). When false, dedup is
+   *                         skipped — repeated phrases across distinct
+   *                         utterances ("thank you" said in two separate
+   *                         sentences with a pause between them) are NOT
+   *                         duplicates and must not be trimmed. Default
+   *                         is `true` for backward compatibility with the
+   *                         fixed-timer path which always had overlap.
    */
-  dedup(source: string, text: string, time: number): string {
+  dedup(source: string, text: string, time: number, isContinuation: boolean = true): string {
     const currTokens = tokenize(text);
     if (currTokens.length === 0) {
       return text; // nothing to compare, let upstream filter handle it
     }
 
-    const prev = this.lastBySource.get(source);
-    // Even if we drop the segment, record this observation so the next
-    // chunk compares against the "real" audio, not a trimmed view.
     const recordObservation = () => {
       this.lastBySource.set(source, { tokens: currTokens, time });
     };
 
+    // Non-continuation chunk (typical VAD case: new utterance after a
+    // pause). Reset the per-source state so subsequent continuation
+    // chunks don't accidentally dedup against this utterance's tail.
+    if (!isContinuation) {
+      recordObservation();
+      return text;
+    }
+
+    const prev = this.lastBySource.get(source);
     if (!prev || time - prev.time > FRESHNESS_MS) {
       recordObservation();
       return text;

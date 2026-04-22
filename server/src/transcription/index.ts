@@ -153,13 +153,27 @@ export class TranscriptionService extends EventEmitter {
   }
 
   /**
-   * Flush any buffered speech on session.stop. No-op today — placeholder for
-   * Phase 3's Swift-side VAD emitter which buffers a partial utterance until
-   * a pause is detected. When that ships, `audio.flush` messages arrive and
-   * the residual bytes are transcribed before session end.
+   * Wait for in-flight chunks to finish transcribing. Called on
+   * `audio.flush` and again on `session.stop`. Without this, session.stop
+   * can commit + reset SessionStore while a trailing utterance is still
+   * being transcribed, causing that segment to be dropped (or worse,
+   * written into the NEXT session's store).
+   *
+   * Bounded by a 2.5s timeout — if whisper is genuinely stuck we don't
+   * want to hang the session-stop handshake indefinitely. 2.5s is well
+   * above p95 decode latency for a 6s chunk with VAD (~500ms-1s).
    */
-  async flushPending(): Promise<void> {
-    // TODO(phase 3): drain in-flight VAD buffers before session close.
+  async flushPending(timeoutMs = 2_500): Promise<void> {
+    const started = Date.now();
+    while (this.queue.length > 0 || this.activeCount > 0) {
+      if (Date.now() - started > timeoutMs) {
+        console.warn(
+          `[Transcription] flushPending timed out after ${timeoutMs}ms (queue=${this.queue.length} active=${this.activeCount})`,
+        );
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
   }
 
   /**

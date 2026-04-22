@@ -73,6 +73,12 @@ type InboundMessage =
       captureStartedAt?: string;
       captureEndedAt?: string;
       sequence?: number;
+      /** True when this chunk shares audio with the previous one
+       *  (timer overlap or VAD max-utterance carry). Dedup runs only
+       *  on continuation chunks — non-continuation chunks with shared
+       *  vocabulary (e.g. "thank you" said in two separate utterances)
+       *  MUST NOT be trimmed. */
+      isContinuation?: boolean;
     }
   | { type: 'audio.flush' }
   | { type: 'session.start'; title?: string; projectNames?: string[]; agenda?: string; attendees?: string; contextPaths?: string[]; contextDirPaths?: string[] }
@@ -327,10 +333,17 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
           // previous chunk's last ~1s. Dedup in-place on `segment.text` so
           // SQLite / broadcast / shared JSONL are all clean (summaries and
           // exports read from SQLite).
+          // Dedup only when the emitter flagged this chunk as carrying
+          // audio from the previous one. VAD pause-triggered chunks are
+          // standalone utterances — repeated words across them are NOT
+          // duplicates. Default to `true` for older Swift clients that
+          // don't send the flag yet (fixed-timer path always overlapped).
+          const isContinuation = message.isContinuation ?? true;
           const dedupedText = transcriptDedup.dedup(
             segment.source,
             segment.text,
             segment.timestamp,
+            isContinuation,
           );
           if (!dedupedText) {
             debugLog(`[Dedup] Dropped duplicate segment from ${segment.source}: "${segment.text.slice(0, 60)}"`);

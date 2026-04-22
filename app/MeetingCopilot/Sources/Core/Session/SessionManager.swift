@@ -331,7 +331,8 @@ final class SessionManager {
                                     audioDurationSec: meta.audioDurationSec,
                                     captureStartedAt: meta.captureStartedAt,
                                     captureEndedAt: meta.captureEndedAt,
-                                    sequence: meta.sequence
+                                    sequence: meta.sequence,
+                                    isContinuation: meta.isContinuation
                                 ))
                             } catch {
                                 await MainActor.run {
@@ -420,29 +421,62 @@ final class SessionManager {
 
     func stopSession() {
         guard state == .live || state == .degraded else { return }
-        guard handleStateTransition(to: .ending) else { return }
 
         isRecording = false
         sessionTimerTask?.cancel()
         sessionTimerTask = nil
 
-        // Notify server
+        // CRITICAL ORDERING: state must stay .live until the VAD flush
+        // chunks finish sending. The onChunk Task only forwards when
+        // state == .live; transitioning to .ending first would drop the
+        // trailing utterance. Order is:
+        //   1. Collect flushed chunks (syncs on VAD emitter queues)
+        //   2. Serially await webSocketClient.send for each
+        //   3. Send audio.flush — tells server to await transcription.flushPending
+        //   4. Flip state to .ending
+        //   5. Send session.stop
+        //   6. Grace period → finalize
         Task {
-            try? await webSocketClient.send(.sessionStop)
-        }
-
-        // Grace period for in-flight workers
-        graceTimer = Timer.scheduledTimer(withTimeInterval: endingGracePeriod, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                self?.finalizeSession()
+            let flushedChunks = audioCaptureManager.flushPendingAudio()
+            for (wav, source, meta) in flushedChunks {
+                let base64 = wav.base64EncodedString()
+                let sourceStr = source == .mic ? "mic" : "meeting"
+                do {
+                    try await webSocketClient.send(.audioChunk(
+                        data: base64,
+                        source: sourceStr,
+                        audioDurationSec: meta.audioDurationSec,
+                        captureStartedAt: meta.captureStartedAt,
+                        captureEndedAt: meta.captureEndedAt,
+                        sequence: meta.sequence,
+                        isContinuation: meta.isContinuation
+                    ))
+                } catch {
+                    appLog("[Session] Flush-chunk send failed: \(error) — continuing to stop")
+                }
             }
-        }
 
-        // If no running actions, finalize immediately
-        if runningActions.isEmpty {
-            graceTimer?.invalidate()
-            graceTimer = nil
-            finalizeSession()
+            try? await webSocketClient.send(.audioFlush)
+
+            // Now it's safe to flip state; all trailing audio is in the server's queue.
+            await MainActor.run {
+                _ = self.handleStateTransition(to: .ending)
+            }
+
+            try? await webSocketClient.send(.sessionStop)
+
+            await MainActor.run {
+                self.graceTimer = Timer.scheduledTimer(withTimeInterval: self.endingGracePeriod, repeats: false) { [weak self] _ in
+                    Task { @MainActor in
+                        self?.finalizeSession()
+                    }
+                }
+                if self.runningActions.isEmpty {
+                    self.graceTimer?.invalidate()
+                    self.graceTimer = nil
+                    self.finalizeSession()
+                }
+            }
         }
     }
 

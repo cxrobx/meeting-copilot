@@ -7,15 +7,23 @@ enum ClientMessage: Encodable {
     case sessionStop
     // Audio chunk with capture metadata. Server measures true e2e latency as
     // (now on receive of transcript broadcast) - captureEndedAt. `sequence`
-    // is per-source so out-of-order delivery is detectable.
+    // is per-source so out-of-order delivery is detectable. `isContinuation`
+    // tells the server's dedup whether this chunk shares audio with the
+    // previous one (true for overlap carry, false for pause-triggered VAD).
     case audioChunk(
         data: String,
         source: String, // "mic"|"meeting"
         audioDurationSec: Double,
         captureStartedAt: Date,
         captureEndedAt: Date,
-        sequence: Int
+        sequence: Int,
+        isContinuation: Bool
     )
+    // Signals session-stop flush — tells the server to await any in-flight
+    // chunks (transcription.flushPending) before finalizing the session.
+    // Wire type is "audio.flush" (dot, matching the Phase -1e server stub)
+    // even though most outbound messages use underscore ("audio_chunk").
+    case audioFlush
     case actionApprove(actionId: String)
     case actionDismiss(actionId: String)
     case actionCancel(actionId: String)
@@ -23,7 +31,7 @@ enum ClientMessage: Encodable {
 
     private enum CodingKeys: String, CodingKey {
         case type, data, source, actionId, title, projectNames, agenda, attendees, contextPaths, actionType, prompt,
-             audioDurationSec, captureStartedAt, captureEndedAt, sequence
+             audioDurationSec, captureStartedAt, captureEndedAt, sequence, isContinuation
     }
 
     private static let iso8601: ISO8601DateFormatter = {
@@ -44,7 +52,7 @@ enum ClientMessage: Encodable {
             try container.encodeIfPresent(contextPaths, forKey: .contextPaths)
         case .sessionStop:
             try container.encode("session.stop", forKey: .type)
-        case .audioChunk(let data, let source, let audioDurationSec, let captureStartedAt, let captureEndedAt, let sequence):
+        case .audioChunk(let data, let source, let audioDurationSec, let captureStartedAt, let captureEndedAt, let sequence, let isContinuation):
             try container.encode("audio_chunk", forKey: .type)
             try container.encode(data, forKey: .data)
             try container.encode(source, forKey: .source)
@@ -52,6 +60,9 @@ enum ClientMessage: Encodable {
             try container.encode(Self.iso8601.string(from: captureStartedAt), forKey: .captureStartedAt)
             try container.encode(Self.iso8601.string(from: captureEndedAt), forKey: .captureEndedAt)
             try container.encode(sequence, forKey: .sequence)
+            try container.encode(isContinuation, forKey: .isContinuation)
+        case .audioFlush:
+            try container.encode("audio.flush", forKey: .type)
         case .actionApprove(let actionId):
             try container.encode("action.approve", forKey: .type)
             try container.encode(actionId, forKey: .actionId)

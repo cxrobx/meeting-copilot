@@ -78,6 +78,33 @@ mkdir -p "$APP_BUNDLE/Contents/Resources/server/dist"
 # Copy Swift binary
 cp "$SWIFT_BIN" "$APP_BUNDLE/Contents/MacOS/MeetingCopilot"
 
+# Rewrite libwhisper's install name from the Homebrew absolute path to
+# @rpath so the runtime loader picks up the BUNDLED dylib under
+# Contents/Resources/whisper/lib/ (via the rpath compiled into the
+# binary in Package.swift: @loader_path/../Resources/whisper/lib).
+# Without this, the binary holds a hard dep on
+# /opt/homebrew/opt/whisper-cpp/libexec/lib/libwhisper.1.dylib, which
+# doesn't exist on non-dev machines and causes dyld to refuse to load
+# the app. Verified empty-string is a safe no-op if the path isn't
+# linked (grep -q).
+MC_BIN="$APP_BUNDLE/Contents/MacOS/MeetingCopilot"
+if otool -L "$MC_BIN" | grep -q "whisper-cpp/libexec/lib/libwhisper"; then
+  HOMEBREW_WHISPER_PATH="$(otool -L "$MC_BIN" | awk '/libwhisper.*dylib/ {print $1; exit}')"
+  if [ -n "$HOMEBREW_WHISPER_PATH" ]; then
+    install_name_tool -change \
+      "$HOMEBREW_WHISPER_PATH" \
+      "@rpath/$(basename "$HOMEBREW_WHISPER_PATH")" \
+      "$MC_BIN"
+    echo "  Rewrote libwhisper install name: $HOMEBREW_WHISPER_PATH → @rpath"
+  fi
+fi
+# Verify post-fix: no absolute Homebrew whisper references remain.
+if otool -L "$MC_BIN" | grep -q "/opt/homebrew/.*whisper"; then
+  echo "  ERROR: binary still references absolute Homebrew whisper path:" >&2
+  otool -L "$MC_BIN" | grep -i whisper >&2
+  exit 1
+fi
+
 # Copy compiled server
 cp -R "$PROJECT_DIR/server/dist/" "$APP_BUNDLE/Contents/Resources/server/dist/"
 cp "$PROJECT_DIR/server/package.json" "$APP_BUNDLE/Contents/Resources/server/"

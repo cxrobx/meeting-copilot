@@ -9,6 +9,26 @@ MODELS_DIR="$DATA_DIR/models"
 echo "=== Meeting Copilot Setup ==="
 echo ""
 
+# whisper-cpp is a HARD dev dependency (Swift links against libwhisper.dylib
+# for VAD and the build-app.sh script bundles the dylibs into the .app).
+# Fail fast with an actionable message if it's missing — otherwise
+# `swift build` blows up on `#include <whisper.h>` with a confusing error.
+if ! command -v whisper-server >/dev/null 2>&1; then
+    echo "ERROR: whisper-cpp is not installed." >&2
+    echo "" >&2
+    echo "  Install it with:  brew install whisper-cpp" >&2
+    echo "" >&2
+    echo "  This ships libwhisper.dylib + whisper-server that the Swift app" >&2
+    echo "  links against (for VAD) and bundles into /Applications/Meeting Copilot.app." >&2
+    exit 1
+fi
+if [ ! -f /opt/homebrew/opt/whisper-cpp/libexec/include/whisper.h ] && \
+   [ ! -f /usr/local/opt/whisper-cpp/libexec/include/whisper.h ]; then
+    echo "ERROR: whisper-cpp is installed but headers are missing." >&2
+    echo "  Try:  brew reinstall whisper-cpp" >&2
+    exit 1
+fi
+
 # Create data directories
 echo "[1/4] Creating data directories..."
 mkdir -p "$DATA_DIR/sessions"
