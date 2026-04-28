@@ -12,9 +12,9 @@ enum KeyboardAction {
 
 // MARK: - Floating Panel Controller
 
-/// Manages the floating NSPanel that hosts the main Meeting Copilot UI.
-/// The panel floats above other windows, doesn't activate the app on click,
-/// and persists when the app is deactivated.
+/// Manages the NSPanel that hosts the main Meeting Copilot UI.
+/// The panel behaves like a normal window for z-order (no always-on-top)
+/// but persists when the app is deactivated.
 final class FloatingPanelController {
     private var panel: NSPanel?
     private let defaultSize = NSSize(width: 1280, height: 860)
@@ -37,13 +37,13 @@ final class FloatingPanelController {
 
         let panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: defaultSize),
-            styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .utilityWindow],
+            styleMask: [.titled, .closable, .resizable, .utilityWindow],
             backing: .buffered,
             defer: false
         )
 
-        panel.level = .floating
-        panel.isFloatingPanel = true
+        panel.level = .normal
+        panel.isFloatingPanel = false
         panel.hidesOnDeactivate = false
         panel.titlebarAppearsTransparent = true
         panel.title = "Meeting Copilot"
@@ -88,16 +88,6 @@ final class FloatingPanelController {
         if let monitor = localMonitor {
             NSEvent.removeMonitor(monitor)
             localMonitor = nil
-        }
-    }
-
-    // MARK: - Pin (Always on Top)
-
-    func setAlwaysOnTop(_ alwaysOnTop: Bool) {
-        if alwaysOnTop {
-            panel?.level = .screenSaver
-        } else {
-            panel?.level = .floating
         }
     }
 
