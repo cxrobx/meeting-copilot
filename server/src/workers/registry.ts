@@ -11,6 +11,7 @@ import type {
 const MAX_CONCURRENT_WORKERS = 3;
 const MAX_RETRY_COUNT = 2;
 const BASE_RETRY_DELAY_MS = 1_000; // 1s, doubled each retry
+const SUGGESTION_TTL_MS = 60_000; // Auto-expire unactioned suggestions after this long
 
 function isTransientError(error: unknown): boolean {
   if (error instanceof Error) {
@@ -35,6 +36,7 @@ export class WorkerRegistry extends EventEmitter {
   private runningCount = 0;
   private approvedQueue: string[] = []; // Action IDs waiting to run
   private suggestionHashes = new Set<string>();
+  private suggestionTimers = new Map<string, NodeJS.Timeout>();
 
   register(worker: Worker): void {
     this.workers.set(worker.name, worker);
@@ -116,13 +118,34 @@ export class WorkerRegistry extends EventEmitter {
 
     this.actions.set(action.id, action);
     this.emit('action.suggested', action);
+
+    const timer = setTimeout(() => {
+      this.suggestionTimers.delete(action.id);
+      const current = this.actions.get(action.id);
+      if (!current || current.state !== 'suggested') return;
+      current.state = 'expired';
+      current.completedAt = Date.now();
+      this.emit('action.status', current);
+      this.actions.delete(action.id);
+    }, SUGGESTION_TTL_MS);
+    this.suggestionTimers.set(action.id, timer);
+
     return action;
+  }
+
+  private clearSuggestionTimer(actionId: string): void {
+    const t = this.suggestionTimers.get(actionId);
+    if (t) {
+      clearTimeout(t);
+      this.suggestionTimers.delete(actionId);
+    }
   }
 
   approve(actionId: string): void {
     const action = this.actions.get(actionId);
     if (!action) return;
     if (action.state !== 'suggested' && action.state !== 'failed') return;
+    this.clearSuggestionTimer(actionId);
 
     // Reset execution state on retry from failed
     if (action.state === 'failed') {
@@ -149,6 +172,7 @@ export class WorkerRegistry extends EventEmitter {
   dismiss(actionId: string): void {
     const action = this.actions.get(actionId);
     if (!action || action.state !== 'suggested') return;
+    this.clearSuggestionTimer(actionId);
 
     action.state = 'cancelled';
     action.completedAt = Date.now();
@@ -159,6 +183,7 @@ export class WorkerRegistry extends EventEmitter {
   cancel(actionId: string): void {
     const action = this.actions.get(actionId);
     if (!action) return;
+    this.clearSuggestionTimer(actionId);
 
     if (action.state === 'running' || action.state === 'queued') {
       action.cancelController.abort();
@@ -175,6 +200,11 @@ export class WorkerRegistry extends EventEmitter {
   }
 
   async onMeetingEnd(): Promise<void> {
+    // Drain pending TTL timers — onMeetingEnd handles the 'suggested' → 'expired'
+    // transition itself, and we don't want a stale setTimeout firing post-session.
+    for (const t of this.suggestionTimers.values()) clearTimeout(t);
+    this.suggestionTimers.clear();
+
     // Expire all unapproved suggestions
     for (const action of this.actions.values()) {
       if (action.state === 'suggested') {

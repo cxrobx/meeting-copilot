@@ -2701,6 +2701,15 @@ const PRESENT_HTML = `<!DOCTYPE html>
           break;
 
         case 'action.status':
+          if (msg.state === 'expired') {
+            var expiredCard = actionCards.get(msg.actionId);
+            if (expiredCard) {
+              expiredCard.remove();
+              actionCards.delete(msg.actionId);
+              rebuildToc();
+            }
+            break;
+          }
           var existing = actionCards.get(msg.actionId);
           if (existing) {
             // Re-render with updated state
