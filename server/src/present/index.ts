@@ -5,6 +5,31 @@ import { homedir } from 'node:os';
 import Database from 'better-sqlite3';
 import type { WorkerRegistry } from '../workers/registry.js';
 import type { ActionLifecycle } from '../workers/types.js';
+import { isOpenAiApiAvailable, openaiFastResearchStream } from '../api/openai.js';
+import { isAnthropicApiAvailable, anthropicTriageJson } from '../api/anthropic.js';
+
+// ─── Highlight-to-ask prompts ───────────────────────────────────────────────
+const ASK_SYSTEM: Record<string, string> = {
+  factcheck:
+    'You fact-check a single claim highlighted from a live meeting transcript. ' +
+    'Start with the verdict in bold (**Correct**, **Likely incorrect**, **Disputed**, or **Unverifiable**), ' +
+    'then 2-4 sentences: what is right or wrong and the corrected fact. ' +
+    'Use web search for anything current or specific. Be conservative — this is read mid-meeting.',
+  explain:
+    'You explain a term, concept, or excerpt highlighted from a live meeting transcript. ' +
+    '2-5 sentences, plain language, for a smart reader who is mid-meeting. ' +
+    'If the excerpt is ambiguous, explain the most likely meaning in this context.',
+  custom:
+    'Answer the user\'s question about an excerpt highlighted from a live meeting transcript. ' +
+    'Be direct and concise — under 150 words unless the question genuinely demands more.',
+};
+
+function buildAskUserContent(params: { selection: string; context: string; question: string }): string {
+  const parts = [`Highlighted text:\n"${params.selection}"`];
+  if (params.context) parts.push(`Surrounding transcript:\n${params.context}`);
+  if (params.question) parts.push(`Question: ${params.question}`);
+  return parts.join('\n\n');
+}
 
 export function createPresentRouter(registry: WorkerRegistry): Router {
   const router = Router();
@@ -172,6 +197,81 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }
+  });
+
+  // ─── POST /present/ask — highlight-to-ask (fact check / explain / custom) ─
+  // Streams SSE-style lines over the POST response, same protocol the
+  // ask-widget uses: `event: token|error|done` + `data: {...}`.
+  router.post('/present/ask', async (req, res) => {
+    const body = (req.body ?? {}) as { mode?: string; selection?: string; context?: string; question?: string };
+    const mode = body.mode && ASK_SYSTEM[body.mode] ? body.mode : null;
+    const selection = (body.selection ?? '').toString().slice(0, 1_500).trim();
+    const context = (body.context ?? '').toString().slice(0, 4_000).trim();
+    const question = (body.question ?? '').toString().slice(0, 1_000).trim();
+
+    if (!mode || !selection) {
+      res.status(400).json({ error: 'mode (factcheck|explain|custom) and selection are required' });
+      return;
+    }
+    if (mode === 'custom' && !question) {
+      res.status(400).json({ error: 'question is required for custom mode' });
+      return;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    });
+    const send = (event: string, data: unknown) => {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // Abort the upstream LLM call when the browser disconnects mid-stream.
+    // NB: must watch the RESPONSE, not the request — on a POST whose body
+    // express.json() already consumed, `req` emits 'close' immediately after
+    // the message is read, which would abort the call before it starts.
+    const controller = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+
+    const systemPrompt = ASK_SYSTEM[mode]!;
+    const userContent = buildAskUserContent({ selection, context, question });
+
+    try {
+      if (isOpenAiApiAvailable()) {
+        const result = await openaiFastResearchStream({
+          systemPrompt,
+          userContent,
+          signal: controller.signal,
+          onDelta: (text) => send('token', { text }),
+          label: `present-ask-${mode}`,
+        });
+        if (result.sources.length > 0) {
+          const links = result.sources.slice(0, 4)
+            .map((s) => `[${s.title || s.url}](${s.url})`)
+            .join(' · ');
+          send('token', { text: `\n\n**Sources:** ${links}` });
+        }
+      } else if (isAnthropicApiAvailable()) {
+        const text = await anthropicTriageJson(userContent, systemPrompt, {
+          signal: controller.signal,
+          maxTokens: 800,
+          timeoutMs: 30_000,
+          label: `present-ask-${mode}`,
+        });
+        send('token', { text: `${text}\n\n_(model knowledge only — no web search without OPENAI_API_KEY)_` });
+      } else {
+        send('error', { message: 'No API key configured — set OPENAI_API_KEY or ANTHROPIC_API_KEY in ~/.meeting-copilot/.env' });
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        send('error', { message: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    send('done', {});
+    res.end();
   });
 
   // ─── GET /present/events — SSE stream (fallback for replay) ─────────
@@ -1071,6 +1171,12 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .card.suggested { border-color: var(--gb-yellow); background: rgba(215,153,33,0.05); }
   .card.running { border-color: var(--gb-blue); animation: border-pulse 1.5s ease-in-out infinite; }
   @keyframes border-pulse { 0%,100%{border-color:var(--gb-blue)} 50%{border-color:var(--gb-surface2)} }
+  .card.fade-out {
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity 0.35s ease-out, transform 0.35s ease-out;
+    pointer-events: none;
+  }
 
   .card-header {
     display: flex;
@@ -1160,6 +1266,284 @@ const PRESENT_HTML = `<!DOCTYPE html>
     margin-right: 6px;
   }
   @keyframes spin { to{transform:rotate(360deg)} }
+
+  /* ─── Intelligence status row ──────────────────────────────── */
+  .intel-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--gb-subtext0);
+    padding: 2px 4px 14px;
+  }
+  .intel-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--gb-overlay0);
+    flex-shrink: 0;
+  }
+  .intel-status.evaluating .intel-dot,
+  .intel-status.generating .intel-dot {
+    background: var(--gb-yellow);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+
+  /* ─── Toasts ───────────────────────────────────────────────── */
+  .toast-stack {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 1000;
+    width: 320px;
+  }
+  .toast {
+    position: relative;
+    overflow: hidden;
+    background: var(--gb-text);
+    color: var(--gb-base);
+    border-radius: 8px;
+    padding: 10px 12px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 11px;
+    box-shadow: 0 10px 24px -12px rgba(20,18,14,0.6);
+    animation: toast-in 0.25s ease-out;
+  }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  .toast-msg { flex: 1; line-height: 1.4; min-width: 0; }
+  .toast-undo {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: transparent;
+    border: 1px solid color-mix(in srgb, var(--gb-base) 40%, transparent);
+    color: var(--gb-base);
+    border-radius: 5px;
+    padding: 3px 10px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .toast-undo:hover { background: color-mix(in srgb, var(--gb-base) 12%, transparent); }
+  .toast-close {
+    background: none;
+    border: none;
+    color: color-mix(in srgb, var(--gb-base) 60%, transparent);
+    font-size: 13px;
+    cursor: pointer;
+    padding: 0 2px;
+    flex-shrink: 0;
+  }
+  .toast-bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--gb-yellow); }
+  @keyframes drain { from { width: 100%; } to { width: 0%; } }
+
+  /* ─── Monitor toggles (fact-check / coach) ─────────────────── */
+  .qa-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    gap: 8px;
+  }
+  .qa-title-row .quick-actions-title { margin-bottom: 0; }
+  .monitor-toggles { display: flex; gap: 4px; flex-shrink: 0; }
+  .monitor-toggle {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 2px 8px;
+    border-radius: 8px;
+    border: 1px solid var(--gb-surface2);
+    background: transparent;
+    color: var(--gb-overlay2);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .monitor-toggle:hover { background: var(--gb-surface1); }
+  .monitor-toggle.on {
+    background: var(--gb-green);
+    border-color: var(--gb-green);
+    color: white;
+  }
+
+  /* ─── Coach strip ("say next") ─────────────────────────────── */
+  .coach-strip {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: rgba(215,153,33,0.08);
+    border: 1px solid var(--gb-yellow);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+    animation: toast-in 0.25s ease-out;
+  }
+  .coach-kind {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 2px 7px;
+    border-radius: 4px;
+    background: var(--gb-yellow);
+    color: #fff;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .coach-body { flex: 1; min-width: 0; }
+  .coach-phrasing { font-size: 13px; font-weight: 600; color: var(--gb-text); line-height: 1.45; }
+  .coach-why { font-size: 11px; color: var(--gb-subtext0); margin-top: 2px; }
+  .coach-close {
+    background: none;
+    border: none;
+    color: var(--gb-overlay2);
+    cursor: pointer;
+    font-size: 14px;
+    flex-shrink: 0;
+    padding: 0 2px;
+  }
+  .coach-close:hover { color: var(--gb-text); }
+
+  /* ─── Fact-check flag cards ────────────────────────────────── */
+  .card.factflag { border-color: var(--gb-red); background: rgba(204,36,29,0.04); }
+  .card-type.factcheck { background: rgba(204,36,29,0.12); color: var(--gb-red); }
+  .toc-badge.factcheck { background: rgba(204,36,29,0.15); color: var(--gb-red); }
+  .fact-verdict {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 2px 7px;
+    border-radius: 4px;
+    color: #fff;
+  }
+  .fact-verdict.likely_incorrect { background: var(--gb-red); }
+  .fact-verdict.disputed { background: var(--gb-yellow); }
+  .fact-sources { font-size: 10px; margin-top: 6px; }
+  .fact-sources a { color: var(--gb-blue); }
+
+  /* ─── Highlight-to-ask (selection menu + floating panel) ───── */
+  .askmenu {
+    position: fixed;
+    z-index: 1200;
+    display: none;
+    background: var(--gb-base);
+    border: 1px solid var(--gb-surface2);
+    border-radius: 8px;
+    box-shadow: 0 10px 28px -10px rgba(20,18,14,0.4);
+    padding: 4px;
+    min-width: 190px;
+  }
+  .askmenu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 6px 10px;
+    border-radius: 5px;
+    cursor: pointer;
+    color: var(--gb-text);
+  }
+  .askmenu-item:hover { background: var(--gb-surface1); }
+  .askmenu-ico { color: var(--gb-overlay2); width: 12px; text-align: center; flex-shrink: 0; }
+  .askmenu-input-row { display: none; padding: 4px; gap: 4px; align-items: flex-end; }
+  .askmenu-input-row.open { display: flex; }
+  .askmenu-input-row textarea {
+    flex: 1;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 6px 8px;
+    border: 1px solid var(--gb-surface2);
+    border-radius: 5px;
+    background: var(--gb-surface1);
+    color: var(--gb-text);
+    outline: none;
+    min-width: 0;
+    min-height: 54px;
+    resize: vertical;
+    line-height: 1.5;
+  }
+  .askmenu-input-row textarea:focus { border-color: var(--accent); }
+
+  .askpanel {
+    position: fixed;
+    z-index: 1100;
+    display: none;
+    width: 400px;
+    height: auto;
+    min-width: 300px;
+    min-height: 160px;
+    max-width: 96vw;
+    max-height: 92vh;
+    background: var(--gb-base);
+    border: 1px solid var(--gb-surface2);
+    border-radius: 10px;
+    box-shadow: 0 18px 44px -16px rgba(20,18,14,0.5);
+    flex-direction: column;
+    resize: both;
+    overflow: hidden;
+  }
+  .askpanel.open { display: flex; }
+  .askpanel-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 12px 6px;
+    cursor: grab;
+    user-select: none;
+  }
+  .askpanel-head:active { cursor: grabbing; }
+  .askpanel-eyebrow {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--gb-overlay2);
+    margin-bottom: 2px;
+  }
+  .askpanel-quote { font-size: 11px; font-style: italic; color: var(--gb-subtext0); line-height: 1.4; }
+  .askpanel-x {
+    background: none;
+    border: none;
+    color: var(--gb-overlay2);
+    font-size: 14px;
+    cursor: pointer;
+    flex-shrink: 0;
+    padding: 0 2px;
+  }
+  .askpanel-x:hover { color: var(--gb-text); }
+  .askpanel-body { padding: 4px 14px 10px; overflow-y: auto; flex: 1; min-height: 0; max-height: 42vh; font-size: 12px; }
+  /* Once the user resizes/drags (pinned), the panel owns its height — let the
+     body fill it instead of capping at the initial 42vh. */
+  .askpanel.pinned .askpanel-body { max-height: none; }
+  .askpanel-foot {
+    display: flex;
+    justify-content: flex-end;
+    padding: 6px 12px 10px;
+    border-top: 1px solid var(--gb-surface1);
+  }
+
+  /* ─── Newest-first transcript ──────────────────────────────── */
+  .seg.newest { background: rgba(215,153,33,0.09); }
+  .transcript-order {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 1px 7px;
+    border-radius: 8px;
+    margin-left: 6px;
+    background: rgba(20,18,14,0.08);
+    color: var(--gb-green);
+  }
 
   /* ─── TOC Sidebar ──────────────────────────────────────────── */
   .toc {
@@ -1373,7 +1757,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   <div class="transcript-col" id="transcriptCol">
     <div class="transcript-header">
       <div class="transcript-title-row">
-        <span class="transcript-title">Transcript</span>
+        <span class="transcript-title">Transcript<span class="transcript-order" id="transcriptOrder" style="display:none">Newest first</span></span>
         <span class="segment-count" id="segCount">0</span>
       </div>
       <div class="filter-row">
@@ -1390,6 +1774,11 @@ const PRESENT_HTML = `<!DOCTYPE html>
   <div class="main" id="mainCol">
     <div id="idleOverlay"></div>
     <div id="quickActionsSlot"></div>
+    <div class="intel-status" id="intelStatus" style="display:none">
+      <span class="intel-dot"></span>
+      <span id="intelStatusText">Listening</span>
+    </div>
+    <div id="coachSlot"></div>
     <div id="results"></div>
   </div>
 
@@ -1407,6 +1796,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
     <div id="tocEntries"></div>
   </nav>
 </div>
+
+<div class="toast-stack" id="toastStack"></div>
 
 <script>
 (function() {
@@ -1431,6 +1822,18 @@ const PRESENT_HTML = `<!DOCTYPE html>
   var agendaItemsEl = document.getElementById('agendaItems');
   var agendaWarningsEl = document.getElementById('agendaWarnings');
   var agendaProgressEl = document.getElementById('agendaProgress');
+  var intelStatusEl = document.getElementById('intelStatus');
+  var intelStatusTextEl = document.getElementById('intelStatusText');
+  var toastStackEl = document.getElementById('toastStack');
+  var transcriptOrderEl = document.getElementById('transcriptOrder');
+  var coachSlot = document.getElementById('coachSlot');
+
+  // Opt-in monitor state — authoritative copy lives on the server and is
+  // synced via feature.state broadcasts.
+  var featureState = { factcheck: false, coach: false };
+  var factFlagCards = new Map();
+  var coachExpireTimer = null;
+  var pendingGoals = '';
 
   // ─── State ──────────────────────────────────────────────────
   var params = new URLSearchParams(window.location.search);
@@ -1945,6 +2348,19 @@ const PRESENT_HTML = `<!DOCTYPE html>
     document.getElementById('statPace').textContent = pace + '/m';
   }
 
+  // ─── Intelligence Status ───────────────────────────────────
+  var INTEL_PHASE_TEXT = {
+    idle: 'Listening',
+    evaluating: 'Evaluating recent conversation\\u2026',
+    generating: 'Drafting a suggestion\\u2026',
+  };
+
+  function setIntelPhase(phase) {
+    if (!INTEL_PHASE_TEXT[phase]) phase = 'idle';
+    intelStatusEl.className = 'intel-status ' + phase;
+    intelStatusTextEl.textContent = INTEL_PHASE_TEXT[phase];
+  }
+
   // ─── UI State Transitions ─────────────────────────────────
   function updateUI() {
     // State pill
@@ -2009,6 +2425,16 @@ const PRESENT_HTML = `<!DOCTYPE html>
     } else {
       quickActionsSlot.innerHTML = '';
     }
+
+    // Intelligence status row + transcript order chip — live sessions only
+    var showIntel = (sessionState === 'live' || sessionState === 'degraded') && !isReplay;
+    intelStatusEl.style.display = showIntel ? '' : 'none';
+    if (!showIntel) {
+      setIntelPhase('idle');
+      // A "say next" tip is meaningless once the meeting is over.
+      if (window.dismissCoach) window.dismissCoach();
+    }
+    if (transcriptOrderEl) transcriptOrderEl.style.display = (showCols && !isReplay) ? '' : 'none';
   }
   window.updateUI = updateUI;
 
@@ -2056,6 +2482,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
         '<label>Agenda <span style="font-weight:400;text-transform:none;letter-spacing:0">(tracked live)</span></label>' +
         '<div id="agendaEditor"></div>' +
         '<label>Attendees</label><input id="startAttendees" placeholder="Chris, Alex, Sam">' +
+        '<label>Your Goals <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional · private, coach only)</span></label>' +
+        '<textarea id="startGoals" rows="2" placeholder="What do you want out of this meeting? Positions, asks, red lines…"></textarea>' +
         projectsHtml +
         contextHtml +
       '</div>' +
@@ -2073,7 +2501,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   function showQuickActions() {
     quickActionsSlot.innerHTML = '<div class="quick-actions">' +
-      '<div class="quick-actions-title">Quick Actions</div>' +
+      '<div class="qa-title-row">' +
+        '<div class="quick-actions-title">Quick Actions</div>' +
+        '<div class="monitor-toggles">' +
+          '<button class="monitor-toggle' + (featureState.factcheck ? ' on' : '') + '" onclick="toggleFeature(\\'factcheck\\')" title="Live fact-checking of claims \u2014 extra API cost while on">Fact-check: ' + (featureState.factcheck ? 'On' : 'Off') + '</button>' +
+          '<button class="monitor-toggle' + (featureState.coach ? ' on' : '') + '" onclick="toggleFeature(\\'coach\\')" title="Suggests high-priority things to say \u2014 extra API cost while on">Coach: ' + (featureState.coach ? 'On' : 'Off') + '</button>' +
+        '</div>' +
+      '</div>' +
       '<input class="quick-actions-input" id="quickPrompt" placeholder="Topic or prompt (optional)...">' +
       '<div class="quick-actions-row">' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'fast-research\\')" title="Haiku, streaming">\u26A1 Fast</button>' +
@@ -2084,6 +2518,22 @@ const PRESENT_HTML = `<!DOCTYPE html>
     '</div>';
   }
 
+  // Re-render the quick actions card (e.g., after a feature.state broadcast)
+  // without losing whatever the user typed in the prompt box.
+  function refreshQuickActions() {
+    if (!((sessionState === 'live' || sessionState === 'degraded') && !isReplay)) return;
+    var input = document.getElementById('quickPrompt');
+    var saved = input ? input.value : '';
+    showQuickActions();
+    var fresh = document.getElementById('quickPrompt');
+    if (fresh && saved) fresh.value = saved;
+  }
+
+  window.toggleFeature = function(name) {
+    if (name !== 'factcheck' && name !== 'coach') return;
+    wsSend({ type: 'feature.toggle', feature: name, enabled: !featureState[name] });
+  };
+
   // ─── Session Controls ─────────────────────────────────────
   window.newMeeting = function() {
     // Reset client-side state from archived → idle so the setup form re-renders.
@@ -2092,6 +2542,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
     sessionTitle = '';
     sessionStartTime = null;
     actionCards.clear();
+    factFlagCards.clear();
+    window.dismissCoach();
     resultsEl.innerHTML = '';
     tocEntries.innerHTML = '';
     transcriptFeed.innerHTML = '';
@@ -2166,6 +2618,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
     var title = (document.getElementById('startTitle') || {}).value || '';
     var agenda = collectAgendaString();
     var attendees = (document.getElementById('startAttendees') || {}).value || '';
+    // Goals ride a separate meeting.goals message once the session is live, so
+    // the same path works whether start goes through the native bridge or WS.
+    pendingGoals = ((document.getElementById('startGoals') || {}).value || '').trim();
 
     // Collect selected projects
     var selectedProjects = [];
@@ -2202,16 +2657,359 @@ const PRESENT_HTML = `<!DOCTYPE html>
     wsSend(msg);
   };
 
+  // ─── Toasts ───────────────────────────────────────────────
+  function showToast(message, opts) {
+    opts = opts || {};
+    var duration = opts.duration || 4000;
+    var t = document.createElement('div');
+    t.className = 'toast';
+
+    var msgEl = document.createElement('span');
+    msgEl.className = 'toast-msg';
+    msgEl.textContent = message;
+    t.appendChild(msgEl);
+
+    var removed = false;
+    function removeToast() {
+      if (removed) return;
+      removed = true;
+      t.remove();
+    }
+
+    if (opts.onUndo) {
+      var undoBtn = document.createElement('button');
+      undoBtn.className = 'toast-undo';
+      undoBtn.textContent = 'Undo';
+      undoBtn.onclick = function() { opts.onUndo(); removeToast(); };
+      t.appendChild(undoBtn);
+    }
+
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'toast-close';
+    closeBtn.textContent = '\\u00d7';
+    closeBtn.onclick = removeToast;
+    t.appendChild(closeBtn);
+
+    var bar = document.createElement('span');
+    bar.className = 'toast-bar';
+    bar.style.animation = 'drain ' + duration + 'ms linear forwards';
+    t.appendChild(bar);
+
+    toastStackEl.appendChild(t);
+    setTimeout(removeToast, duration);
+    return removeToast;
+  }
+
+  var ACTION_LABELS = { 'fast-research': 'Fast research', research: 'Research', summary: 'Summary', analysis: 'Analysis' };
+
   window.triggerAction = function(type) {
     var prompt = (document.getElementById('quickPrompt') || {}).value || '';
     wsSend({ type: 'action.trigger', actionType: type, prompt: prompt || undefined });
     var el = document.getElementById('quickPrompt');
     if (el) el.value = '';
+    showToast((ACTION_LABELS[type] || type) + ' queued');
   };
 
   window.approveAction = function(id) { wsSend({ type: 'action.approve', actionId: id }); };
-  window.dismissAction = function(id) { wsSend({ type: 'action.dismiss', actionId: id }); };
+
+  // Dismissal is irreversible once the server hears about it, so hide the
+  // card locally first and only send action.dismiss after the undo window.
+  var DISMISS_UNDO_MS = 5000;
+  var pendingDismissals = new Map(); // actionId -> { timer }
+
+  window.dismissAction = function(id) {
+    var card = actionCards.get(id);
+    if (!card || pendingDismissals.has(id)) {
+      if (!card) wsSend({ type: 'action.dismiss', actionId: id });
+      return;
+    }
+    var titleEl = card.querySelector('.card-title');
+    var label = titleEl ? titleEl.textContent : 'suggestion';
+
+    card.classList.add('fade-out');
+    setTimeout(function() {
+      if (pendingDismissals.has(id)) card.style.display = 'none';
+    }, 350);
+
+    var timer = setTimeout(function() {
+      pendingDismissals.delete(id);
+      wsSend({ type: 'action.dismiss', actionId: id });
+      card.remove();
+      actionCards.delete(id);
+      rebuildToc();
+    }, DISMISS_UNDO_MS);
+    pendingDismissals.set(id, { timer: timer });
+
+    showToast('Dismissed \\u201C' + label + '\\u201D', {
+      duration: DISMISS_UNDO_MS,
+      onUndo: function() {
+        var pending = pendingDismissals.get(id);
+        if (!pending) return; // already finalized or expired server-side
+        clearTimeout(pending.timer);
+        pendingDismissals.delete(id);
+        card.style.display = '';
+        card.classList.remove('fade-out');
+      },
+    });
+  };
+
   window.cancelAction = function(id) { wsSend({ type: 'action.cancel', actionId: id }); };
+
+  // ─── Highlight-to-Ask (transcript selection) ──────────────
+  // Highlight transcript text → right-click → Fact check / Explain / Custom
+  // prompt. Opens a floating panel anchored to the selection that streams
+  // the answer from POST /present/ask. Same interaction as ask-widget.
+  var askSel = null;
+  var askAbort = null;
+  var askMenuEl, askMenuInputRow, askMenuInput;
+  var askPanelEl, askPanelEyebrow, askPanelQuote, askPanelBody;
+  var ASK_LABELS = { factcheck: 'Fact check', explain: 'Explain', custom: 'Your question' };
+
+  function buildAskUi() {
+    askMenuEl = document.createElement('div');
+    askMenuEl.className = 'askmenu';
+    [
+      { mode: 'factcheck', ico: '\\u2713', label: 'Fact check' },
+      { mode: 'explain', ico: '?', label: 'Explain' },
+    ].forEach(function(it) {
+      var d = document.createElement('div');
+      d.className = 'askmenu-item';
+      d.innerHTML = '<span class="askmenu-ico">' + it.ico + '</span>' + it.label;
+      d.addEventListener('click', function() { startAsk(it.mode, ''); });
+      askMenuEl.appendChild(d);
+    });
+    var custom = document.createElement('div');
+    custom.className = 'askmenu-item';
+    custom.innerHTML = '<span class="askmenu-ico">\\u2026</span>Custom prompt\\u2026';
+    custom.addEventListener('click', function() {
+      askMenuInputRow.classList.add('open');
+      askMenuInput.focus();
+    });
+    askMenuEl.appendChild(custom);
+
+    askMenuInputRow = document.createElement('div');
+    askMenuInputRow.className = 'askmenu-input-row';
+    askMenuInput = document.createElement('textarea');
+    askMenuInput.rows = 2;
+    askMenuInput.placeholder = 'Ask about the highlighted text\\u2026';
+    askMenuInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitCustomAsk(); }
+      if (e.key === 'Escape') hideAskMenu();
+      e.stopPropagation();
+    });
+    var go = document.createElement('button');
+    go.className = 'btn btn-green';
+    go.textContent = 'Go';
+    go.addEventListener('click', submitCustomAsk);
+    askMenuInputRow.appendChild(askMenuInput);
+    askMenuInputRow.appendChild(go);
+    askMenuEl.appendChild(askMenuInputRow);
+    document.body.appendChild(askMenuEl);
+
+    askPanelEl = document.createElement('div');
+    askPanelEl.className = 'askpanel';
+    askPanelEl.innerHTML = '<div class="askpanel-head">' +
+        '<div style="flex:1;min-width:0">' +
+          '<div class="askpanel-eyebrow"></div>' +
+          '<div class="askpanel-quote"></div>' +
+        '</div>' +
+        '<button class="askpanel-x" title="Close">\\u00d7</button>' +
+      '</div>' +
+      '<div class="card-body askpanel-body"></div>' +
+      '<div class="askpanel-foot"><button class="btn btn-ghost askpanel-copy">Copy</button></div>';
+    askPanelEyebrow = askPanelEl.querySelector('.askpanel-eyebrow');
+    askPanelQuote = askPanelEl.querySelector('.askpanel-quote');
+    askPanelBody = askPanelEl.querySelector('.askpanel-body');
+    askPanelEl.querySelector('.askpanel-x').addEventListener('click', closeAskPanel);
+    askPanelEl.querySelector('.askpanel-copy').addEventListener('click', function() {
+      var t = askPanelBody.innerText || '';
+      if (navigator.clipboard && t) {
+        navigator.clipboard.writeText(t).then(function() { showToast('Copied to clipboard'); }).catch(function() {});
+      }
+    });
+    makeAskDragResize(askPanelEl, askPanelEl.querySelector('.askpanel-head'));
+    document.body.appendChild(askPanelEl);
+  }
+
+  // Drag the panel by its header; resize from the corner (CSS resize:both).
+  // Either gesture "pins" it so auto-positioning stops fighting the user —
+  // same behavior as ask-widget's makeDragResize.
+  var askPinned = false;
+  function makeAskDragResize(panel, handle) {
+    handle.addEventListener('mousedown', function(e) {
+      if (e.target.closest('.askpanel-x')) return; // close button isn't a drag grip
+      e.preventDefault();
+      askPinned = true;
+      panel.classList.add('pinned');
+      var startX = e.clientX, startY = e.clientY;
+      var rect = panel.getBoundingClientRect();
+      // Freeze the current auto height so dragging doesn't reflow it.
+      panel.style.height = rect.height + 'px';
+      function mv(ev) {
+        panel.style.left = Math.max(0, rect.left + ev.clientX - startX) + 'px';
+        panel.style.top = Math.max(0, rect.top + ev.clientY - startY) + 'px';
+      }
+      function up() {
+        document.removeEventListener('mousemove', mv);
+        document.removeEventListener('mouseup', up);
+      }
+      document.addEventListener('mousemove', mv);
+      document.addEventListener('mouseup', up);
+    });
+    // A grab on the bottom-right resize corner also pins.
+    panel.addEventListener('mousedown', function(e) {
+      var r = panel.getBoundingClientRect();
+      if (e.clientX > r.right - 22 && e.clientY > r.bottom - 22) {
+        askPinned = true;
+        panel.classList.add('pinned');
+      }
+    });
+  }
+
+  function captureTranscriptSelection() {
+    var s = window.getSelection();
+    if (!s || s.isCollapsed || s.rangeCount === 0) return null;
+    var text = s.toString().replace(/\\s+/g, ' ').trim();
+    if (!text) return null;
+    var range = s.getRangeAt(0);
+    var node = range.commonAncestorContainer;
+    if (node && node.nodeType === 3) node = node.parentElement;
+    if (!node || !transcriptFeed.contains(node)) return null;
+    // Context: the selected segment row plus its DOM neighbors. Feed is
+    // newest-first in live mode, but ordering barely matters for an LLM
+    // context blob.
+    var seg = node.closest ? node.closest('.seg') : null;
+    var ctxParts = [];
+    if (seg) {
+      [seg.previousElementSibling, seg, seg.nextElementSibling].forEach(function(el) {
+        if (el && el.classList && el.classList.contains('seg')) {
+          var t = el.querySelector('.seg-text');
+          if (t) ctxParts.push(t.textContent);
+        }
+      });
+    }
+    return {
+      text: text.slice(0, 1500),
+      context: ctxParts.join('\\n').slice(0, 4000),
+      rect: range.getBoundingClientRect(),
+    };
+  }
+
+  function showAskMenu(x, y) {
+    askMenuInputRow.classList.remove('open');
+    askMenuInput.value = '';
+    askMenuEl.style.display = 'block';
+    var mw = askMenuEl.offsetWidth || 190;
+    var mh = askMenuEl.offsetHeight || 120;
+    askMenuEl.style.left = Math.max(6, Math.min(x, window.innerWidth - mw - 8)) + 'px';
+    askMenuEl.style.top = Math.max(6, Math.min(y, window.innerHeight - mh - 8)) + 'px';
+  }
+  function hideAskMenu() { if (askMenuEl) askMenuEl.style.display = 'none'; }
+
+  function submitCustomAsk() {
+    var q = askMenuInput.value.trim();
+    if (!q) return;
+    startAsk('custom', q);
+  }
+
+  function positionAskPanel() {
+    if (askPinned) return; // user placed it — leave it alone
+    if (!askSel || !askSel.rect) return;
+    var m = 12, vw = window.innerWidth, vh = window.innerHeight;
+    var w = askPanelEl.offsetWidth || 400;
+    var h = askPanelEl.offsetHeight || 220;
+    var left = askSel.rect.left + askSel.rect.width / 2 - w / 2;
+    left = Math.max(m, Math.min(left, vw - w - m));
+    var top = askSel.rect.bottom + 8;
+    if (top + h > vh - m) top = Math.max(m, askSel.rect.top - 8 - h);
+    askPanelEl.style.left = left + 'px';
+    askPanelEl.style.top = Math.max(m, Math.min(top, vh - h - m)) + 'px';
+  }
+
+  function closeAskPanel() {
+    askPanelEl.classList.remove('open');
+    if (askAbort) { askAbort.abort(); askAbort = null; }
+  }
+
+  function startAsk(mode, question) {
+    hideAskMenu();
+    if (!askSel) return;
+    if (askAbort) askAbort.abort();
+    askAbort = new AbortController();
+    var myAbort = askAbort;
+
+    askPanelEyebrow.textContent = mode === 'custom' ? question : ASK_LABELS[mode];
+    askPanelQuote.textContent = '\\u201C' + askSel.text.slice(0, 160) + (askSel.text.length > 160 ? '\\u2026' : '') + '\\u201D';
+    askPanelBody.innerHTML = '<p style="color:var(--gb-overlay2)"><span class="spinner"></span>' +
+      (mode === 'factcheck' ? 'Checking\\u2026' : 'Thinking\\u2026') + '</p>';
+    askPanelEl.classList.add('open');
+    positionAskPanel();
+
+    var acc = '';
+    fetch('/present/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: mode, selection: askSel.text, context: askSel.context, question: question || '' }),
+      signal: myAbort.signal,
+    }).then(function(resp) {
+      if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = '';
+      function pump() {
+        return reader.read().then(function(r) {
+          if (r.done) return;
+          buffer += decoder.decode(r.value, { stream: true });
+          var lines = buffer.split('\\n');
+          buffer = lines.pop() || '';
+          var evt = '';
+          for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (line.indexOf('event: ') === 0) {
+              evt = line.slice(7).trim();
+            } else if (line.indexOf('data: ') === 0 && evt) {
+              var data;
+              try { data = JSON.parse(line.slice(6)); } catch (e) { evt = ''; continue; }
+              if (evt === 'token') {
+                acc += data.text;
+                askPanelBody.innerHTML = renderMarkdown(acc);
+                askPanelBody.scrollTop = askPanelBody.scrollHeight;
+              } else if (evt === 'error') {
+                askPanelBody.innerHTML = '<p style="color:var(--gb-red)">' + escapeHtml(data.message || 'Something went wrong.') + '</p>';
+                acc = '';
+              }
+              evt = '';
+            }
+          }
+          return pump();
+        });
+      }
+      return pump();
+    }).then(function() {
+      highlightCode();
+      positionAskPanel();
+    }).catch(function(err) {
+      if (err && err.name === 'AbortError') return;
+      askPanelBody.innerHTML = '<p style="color:var(--gb-red)">Could not reach the server: ' + escapeHtml(String((err && err.message) || err)) + '</p>';
+    });
+  }
+
+  buildAskUi();
+  transcriptFeed.addEventListener('contextmenu', function(e) {
+    var captured = captureTranscriptSelection();
+    if (!captured) { hideAskMenu(); return; }
+    askSel = captured;
+    e.preventDefault();
+    showAskMenu(e.clientX, e.clientY);
+  });
+  document.addEventListener('mousedown', function(e) {
+    if (askMenuEl && askMenuEl.style.display === 'block' && !askMenuEl.contains(e.target)) hideAskMenu();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key !== 'Escape') return;
+    if (askMenuEl && askMenuEl.style.display === 'block') hideAskMenu();
+    else if (askPanelEl && askPanelEl.classList.contains('open')) closeAskPanel();
+  });
 
   // ─── Transcript ───────────────────────────────────────────
   function addSegment(seg) {
@@ -2253,8 +3051,18 @@ const PRESENT_HTML = `<!DOCTYPE html>
       el.style.display = 'none';
     }
 
-    transcriptFeed.appendChild(el);
-    if (autoScroll) transcriptFeed.scrollTop = transcriptFeed.scrollHeight;
+    if (isReplay) {
+      // Replay reads top-down like a document — keep chronological order.
+      transcriptFeed.appendChild(el);
+      if (autoScroll) transcriptFeed.scrollTop = transcriptFeed.scrollHeight;
+    } else {
+      // Live: newest-first so the latest line is always visible without scrolling.
+      var prevNewest = transcriptFeed.querySelector('.seg.newest');
+      if (prevNewest) prevNewest.classList.remove('newest');
+      el.classList.add('newest');
+      transcriptFeed.insertBefore(el, transcriptFeed.firstChild);
+      if (autoScroll) transcriptFeed.scrollTop = 0;
+    }
   }
 
   window.setFilter = function(filter, btn) {
@@ -2276,7 +3084,6 @@ const PRESENT_HTML = `<!DOCTYPE html>
   // ─── Action Card Rendering ────────────────────────────────
   function renderAction(action) {
     var existing = actionCards.get(action.id);
-    if (existing) existing.remove();
 
     var card = document.createElement('div');
     card.className = 'card' + (action.state === 'running' && !isReplay ? ' running' : action.state === 'suggested' ? ' suggested' : '');
@@ -2333,11 +3140,82 @@ const PRESENT_HTML = `<!DOCTYPE html>
     }
 
     card.innerHTML = header + body;
-    resultsEl.appendChild(card);
+    if (existing) {
+      // State update — re-render in place so cards don't jump mid-read.
+      existing.replaceWith(card);
+    } else if (isReplay) {
+      // Replay reads top-down like a document — keep chronological order.
+      resultsEl.appendChild(card);
+    } else {
+      // Live: newest card first, always visible under the sticky Quick Actions.
+      resultsEl.insertBefore(card, resultsEl.firstChild);
+    }
     actionCards.set(action.id, card);
     highlightCode();
     rebuildToc();
   }
+
+  // ─── Fact-check Flags ─────────────────────────────────────
+  function renderFactFlag(flag) {
+    if (factFlagCards.has(flag.id)) return; // replayed on reconnect
+    var card = document.createElement('div');
+    card.className = 'card factflag';
+    card.id = 'factflag-' + flag.id;
+
+    var verdictLabel = flag.verdict === 'disputed' ? 'Disputed' : 'Likely incorrect';
+    var saidBy = flag.speaker === 'you' ? 'you' : 'meeting';
+    var basis = flag.webSearched ? '' : ' \\u00b7 model knowledge only';
+    var srcHtml = '';
+    if (flag.sources && flag.sources.length > 0) {
+      srcHtml = '<div class="fact-sources">' + flag.sources.slice(0, 3).map(function(s) {
+        return '<a href="' + escapeHtml(s.url) + '" target="_blank" rel="noopener">' + escapeHtml(s.title || s.url) + '</a>';
+      }).join(' &middot; ') + '</div>';
+    }
+
+    card.innerHTML = '<div class="card-header">' +
+      '<span class="card-type factcheck">factcheck</span>' +
+      '<span class="card-title">' + escapeHtml(flag.claim) + '</span>' +
+      '<span class="card-time">' + formatTime(new Date(flag.checkedAt).toISOString()) + '</span>' +
+    '</div>' +
+    '<div class="card-body">' +
+      '<p><span class="fact-verdict ' + escapeHtml(flag.verdict) + '">' + verdictLabel + '</span> ' +
+        '<span style="color:var(--gb-overlay2);font-size:11px">said by ' + saidBy + basis + '</span></p>' +
+      (flag.correction ? '<p><strong>Correction:</strong> ' + escapeHtml(flag.correction) + '</p>' : '') +
+      (flag.explanation ? '<p>' + escapeHtml(flag.explanation) + '</p>' : '') +
+      '<div class="card-trigger">"' + escapeHtml(flag.quote) + '"</div>' +
+      srcHtml +
+    '</div>';
+
+    resultsEl.insertBefore(card, resultsEl.firstChild);
+    factFlagCards.set(flag.id, card);
+    rebuildToc();
+  }
+
+  // ─── Coach Strip ("say next") ─────────────────────────────
+  function renderCoachSuggestion(s) {
+    if (coachExpireTimer) { clearTimeout(coachExpireTimer); coachExpireTimer = null; }
+    coachSlot.innerHTML = '<div class="coach-strip">' +
+      '<span class="coach-kind">' + escapeHtml(s.kind) + '</span>' +
+      '<div class="coach-body">' +
+        '<div class="coach-phrasing">' + escapeHtml(s.phrasing) + '</div>' +
+        '<div class="coach-why">' + escapeHtml(s.headline) + (s.why ? ' \\u2014 ' + escapeHtml(s.why) : '') + '</div>' +
+      '</div>' +
+      '<button class="coach-close" onclick="dismissCoach()" title="Dismiss">\\u00d7</button>' +
+    '</div>';
+    coachExpireTimer = setTimeout(function() { window.dismissCoach(); }, 90000);
+  }
+
+  window.dismissCoach = function() {
+    if (coachExpireTimer) { clearTimeout(coachExpireTimer); coachExpireTimer = null; }
+    coachSlot.innerHTML = '';
+  };
+
+  // Debug hooks: render monitor output without a live meeting (local-only
+  // dashboard, so exposing these is harmless and useful for UI testing).
+  window.__copilotDebug = {
+    renderFactFlag: renderFactFlag,
+    renderCoachSuggestion: renderCoachSuggestion,
+  };
 
   // ─── TOC ──────────────────────────────────────────────────
   function rebuildToc() {
@@ -2629,7 +3507,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
               segments = [];
               totalWords = 0; micWords = 0; meetingWords = 0;
               t.segments.forEach(function(seg) { addSegment(seg); });
-              setTimeout(function() { transcriptFeed.scrollTop = transcriptFeed.scrollHeight; }, 100);
+              // Segments prepend in live mode, so newest is already at the top.
+              setTimeout(function() { transcriptFeed.scrollTop = 0; }, 100);
             }
           }).catch(function() {});
         }
@@ -2659,6 +3538,10 @@ const PRESENT_HTML = `<!DOCTYPE html>
           if (msg.state === 'live' && !sessionStartTime) {
             sessionStartTime = Date.now();
             startTimer();
+            if (pendingGoals) {
+              wsSend({ type: 'meeting.goals', goals: pendingGoals });
+              pendingGoals = '';
+            }
           } else if (msg.state === 'archived') {
             // Session just ended — keep transcript visible so the user can
             // review what was said. Only stop the running clock. Agenda
@@ -2677,6 +3560,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
             clearAgenda();
             resultsEl.innerHTML = '';
             actionCards.clear();
+            factFlagCards.clear();
+            window.dismissCoach();
           }
           updateUI();
           break;
@@ -2700,13 +3585,41 @@ const PRESENT_HTML = `<!DOCTYPE html>
           });
           break;
 
+        case 'intelligence.status':
+          setIntelPhase(msg.phase);
+          break;
+
+        case 'feature.state':
+          if (msg.features) {
+            featureState = msg.features;
+            refreshQuickActions();
+          }
+          break;
+
+        case 'factcheck.flag':
+          if (msg.flag) renderFactFlag(msg.flag);
+          break;
+
+        case 'coach.suggestion':
+          if (msg.suggestion) renderCoachSuggestion(msg.suggestion);
+          break;
+
         case 'action.status':
           if (msg.state === 'expired') {
+            // Server expired it — a pending local dismissal is now moot.
+            var pendingExpired = pendingDismissals.get(msg.actionId);
+            if (pendingExpired) {
+              clearTimeout(pendingExpired.timer);
+              pendingDismissals.delete(msg.actionId);
+            }
             var expiredCard = actionCards.get(msg.actionId);
             if (expiredCard) {
-              expiredCard.remove();
-              actionCards.delete(msg.actionId);
-              rebuildToc();
+              expiredCard.classList.add('fade-out');
+              setTimeout(function () {
+                expiredCard.remove();
+                actionCards.delete(msg.actionId);
+                rebuildToc();
+              }, 350); // match the CSS transition
             }
             break;
           }
@@ -2740,9 +3653,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
                 placeholder.style.display = 'none';
               }
               streamText.textContent += msg.delta;
-              if (autoScroll) {
-                resultsEl.scrollTop = resultsEl.scrollHeight;
-              }
+              // No auto-scroll: with newest-first ordering the streaming card
+              // is already at the top, and forcing scroll fights reading.
             }
           }
           break;

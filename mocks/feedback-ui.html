@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Mock — Feedback UI: old vs new</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+  /* ─── Tokens copied verbatim from server/src/present/index.ts ─── */
+  :root {
+    color-scheme: light;
+    --gb-base:     rgb(251,248,243);
+    --gb-mantle:   rgb(248,243,235);
+    --gb-crust:    rgb(241,234,223);
+    --gb-surface0: rgb(245,239,228);
+    --gb-surface1: rgb(241,234,223);
+    --gb-surface2: rgb(213,205,189);
+    --gb-overlay0: rgb(213,205,189);
+    --gb-overlay1: rgb(155,148,135);
+    --gb-overlay2: rgb(115,108,95);
+    --gb-text:     rgb(30,25,15);
+    --gb-subtext0: rgb(70,60,45);
+    --gb-subtext1: rgb(100,90,75);
+    --gb-red:      rgb(212,118,106);
+    --gb-peach:    rgb(212,150,110);
+    --gb-yellow:   rgb(212,168,90);
+    --gb-green:    rgb(20,18,14);
+    --gb-sky:      rgb(30,25,15);
+    --gb-blue:     rgb(20,18,14);
+    --gb-lavender: rgb(180,160,140);
+    --gb-mauve:    rgb(200,150,130);
+    --accent:       var(--gb-blue);
+    --accent-hover: rgb(60,55,45);
+    --accent-soft:  color-mix(in srgb, var(--gb-blue) 10%, transparent);
+    --focus-ring:   color-mix(in srgb, var(--gb-blue) 28%, transparent);
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--gb-crust);
+    color: var(--gb-text);
+    line-height: 1.6;
+    font-size: 13px;
+    padding-bottom: 40px;
+  }
+
+  /* ─── Mock chrome (switcher bar) — not part of the product UI ── */
+  .mock-bar {
+    position: sticky; top: 0; z-index: 500;
+    background: var(--gb-text); color: var(--gb-base);
+    padding: 10px 20px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  }
+  .mock-bar h1 { font-size: 13px; font-weight: 700; }
+  .mock-tabs { display: flex; gap: 6px; }
+  .mock-tab {
+    font-family: inherit; font-size: 11px; font-weight: 600;
+    padding: 5px 14px; border-radius: 6px; cursor: pointer;
+    border: 1px solid rgba(251,248,243,0.35);
+    background: transparent; color: var(--gb-base);
+  }
+  .mock-tab.active { background: var(--gb-base); color: var(--gb-text); }
+  .mock-desc { font-size: 11px; opacity: 0.75; flex: 1; min-width: 280px; }
+  .mock-note { text-align: center; font-size: 11px; color: var(--gb-overlay2); margin-top: 18px; }
+
+  .variant { padding: 16px 20px 0; }
+  .variant[hidden] { display: none; }
+  .dash-frame {
+    position: relative; overflow: hidden;
+    border: 1px solid var(--gb-surface2); border-radius: 10px;
+    background: var(--gb-base);
+    box-shadow: 0 18px 40px -30px rgba(20,18,14,0.5);
+  }
+
+  /* ─── Dashboard styles (copied from /present, trimmed) ───────── */
+  .header {
+    padding: 10px 20px; border-bottom: 1px solid var(--gb-surface2);
+    display: flex; align-items: center; gap: 12px;
+    background: var(--gb-base); height: 50px;
+  }
+  .header-left { display: flex; align-items: center; gap: 10px; }
+  .header-left h1 { font-size: 15px; font-weight: 700; color: var(--gb-text); }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gb-overlay0); flex-shrink: 0; }
+  .status-dot.connected { background: var(--gb-green); animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .header-center { flex: 1; text-align: center; font-size: 14px; font-weight: 600; color: var(--gb-subtext1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .header-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  .state-pill { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; padding: 3px 10px; border-radius: 10px; color: white; }
+  .state-pill.live { background: var(--gb-blue); }
+  .audio-indicator { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; color: var(--gb-red); margin-right: 10px; }
+  .audio-indicator .audio-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gb-red); animation: rec-pulse 1.4s ease-in-out infinite; }
+  @keyframes rec-pulse { 0%,100% { opacity: 0.4; transform: scale(0.9); } 50% { opacity: 1; transform: scale(1.1); } }
+  .session-timer { font-size: 16px; font-weight: 600; color: var(--gb-subtext0); font-variant-numeric: tabular-nums; min-width: 60px; text-align: right; }
+  .btn { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600; padding: 6px 14px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; transition: background-color 120ms, filter 120ms, border-color 120ms; }
+  .btn:hover { filter: brightness(1.08); }
+  .btn-green { background: var(--gb-green); color: white; }
+  .btn-red { background: var(--gb-red); color: white; }
+  .btn-ghost { background: transparent; border: 1px solid var(--gb-surface2); color: var(--gb-subtext0); }
+  .btn-ghost:hover { background: var(--gb-surface1); }
+
+  .stats-bar { display: flex; padding: 8px 24px; gap: 12px; border-bottom: 1px solid var(--gb-surface2); background: var(--gb-base); }
+  .stat-tile { flex: 1; background: var(--gb-surface0); border: 1px solid var(--gb-surface2); border-radius: 6px; padding: 8px 14px; text-align: center; }
+  .stat-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--gb-overlay2); }
+  .stat-value { font-size: 18px; font-weight: 700; color: var(--gb-text); line-height: 1.2; }
+
+  .layout { display: grid; grid-template-columns: 260px minmax(0,1fr) 280px; height: 620px; overflow: hidden; }
+
+  .transcript-col { background: var(--gb-mantle); border-right: 1px solid var(--gb-surface2); display: flex; flex-direction: column; overflow: hidden; min-width: 0; position: relative; }
+  .transcript-header { padding: 12px 14px 8px; border-bottom: 1px solid var(--gb-surface2); flex-shrink: 0; }
+  .transcript-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .transcript-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--gb-overlay2); }
+  .segment-count { font-size: 10px; font-weight: 600; color: var(--gb-overlay1); background: var(--gb-surface1); padding: 1px 7px; border-radius: 8px; }
+  .filter-row { display: flex; gap: 4px; margin-bottom: 6px; }
+  .filter-btn { font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; padding: 3px 10px; border-radius: 4px; border: 1px solid var(--gb-surface2); background: transparent; color: var(--gb-subtext0); cursor: pointer; }
+  .filter-btn.active { background: var(--gb-surface2); color: var(--gb-text); }
+  .transcript-search { width: 100%; font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 5px 10px; border: 1px solid var(--gb-surface2); border-radius: 4px; background: var(--gb-surface1); color: var(--gb-text); outline: none; }
+  .transcript-search::placeholder { color: var(--gb-overlay1); }
+  .transcript-feed { flex: 1; overflow-y: auto; padding: 8px 10px; scrollbar-width: thin; scrollbar-color: var(--gb-overlay0) transparent; }
+  .transcript-feed::-webkit-scrollbar { width: 4px; }
+  .transcript-feed::-webkit-scrollbar-thumb { background: var(--gb-overlay0); border-radius: 2px; }
+  .seg { padding: 5px 8px; border-left: 3px solid transparent; margin-bottom: 4px; border-radius: 0 4px 4px 0; }
+  .seg:hover { background: var(--gb-surface0); }
+  .seg.mic { border-left-color: var(--gb-blue); }
+  .seg.meeting { border-left-color: var(--gb-yellow); }
+  .seg.newest { background: rgba(215,153,33,0.09); }
+  .seg-top { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+  .seg-source { font-size: 9px; font-weight: 700; text-transform: uppercase; padding: 1px 5px; border-radius: 3px; }
+  .seg-source.mic { background: rgba(69,133,136,0.12); color: var(--gb-blue); }
+  .seg-source.meeting { background: rgba(215,153,33,0.12); color: var(--gb-yellow); }
+  .seg-time { font-size: 10px; color: var(--gb-overlay2); margin-left: auto; }
+  .seg-text { font-size: 12px; color: var(--gb-subtext1); line-height: 1.5; }
+  .signal-tag { font-size: 8px; font-weight: 700; text-transform: uppercase; padding: 1px 4px; border-radius: 2px; letter-spacing: 0.04em; }
+  .signal-tag.action { background: rgba(20,18,14,0.08); color: var(--gb-green); }
+  .signal-tag.decision { background: rgba(69,133,136,0.12); color: var(--gb-blue); }
+  .signal-tag.question { background: rgba(146,111,175,0.12); color: var(--gb-lavender); }
+  .signal-tag.risk { background: rgba(204,36,29,0.12); color: var(--gb-red); }
+
+  .main { padding: 24px 32px; min-width: 0; overflow-y: auto; overflow-x: hidden; }
+  .quick-actions { background: var(--gb-surface0); border: 1px solid var(--gb-surface2); border-radius: 8px; padding: 14px 16px; margin-bottom: 16px; position: sticky; top: 0; z-index: 20; box-shadow: 0 6px 14px -12px rgba(20,18,14,0.45); }
+  .quick-actions-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gb-overlay2); margin-bottom: 8px; }
+  .quick-actions-input { font-family: 'JetBrains Mono', monospace; font-size: 11px; width: 100%; padding: 6px 10px; border: 1px solid var(--gb-surface2); border-radius: 4px; background: var(--gb-surface1); color: var(--gb-text); outline: none; margin-bottom: 8px; }
+  .quick-actions-input::placeholder { color: var(--gb-overlay1); }
+  .quick-actions-row { display: flex; gap: 6px; }
+
+  .card { background: var(--gb-surface0); border: 1px solid var(--gb-surface2); border-radius: 8px; padding: 20px; margin-bottom: 16px; transition: border-color 0.2s; }
+  .card.suggested { border-color: var(--gb-yellow); background: rgba(215,153,33,0.05); }
+  .card.running { border-color: var(--gb-blue); animation: border-pulse 1.5s ease-in-out infinite; }
+  @keyframes border-pulse { 0%,100%{border-color:var(--gb-blue)} 50%{border-color:var(--gb-surface2)} }
+  .card.fade-out { opacity: 0; transform: translateY(-4px); transition: opacity 0.35s ease-out, transform 0.35s ease-out; pointer-events: none; }
+  .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .card-type { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; padding: 2px 7px; border-radius: 4px; }
+  .card-type.research { background: rgba(20,18,14,0.08); color: var(--gb-green); }
+  .card-type.summary { background: rgba(215,153,33,0.12); color: var(--gb-yellow); }
+  .card-type.analysis { background: rgba(214,93,14,0.12); color: var(--gb-peach); }
+  .card-title { font-size: 14px; font-weight: 600; color: var(--gb-text); flex: 1; min-width: 0; }
+  .card-time { font-size: 10px; color: var(--gb-overlay2); flex-shrink: 0; }
+  .card-body { font-size: 13px; color: var(--gb-subtext1); }
+  .card-body h3 { color: var(--gb-sky); font-size: 14px; font-weight: 600; margin-top: 12px; margin-bottom: 4px; }
+  .card-body p { margin-bottom: 8px; }
+  .card-body ul { padding-left: 18px; margin-bottom: 8px; }
+  .card-body li { margin-bottom: 3px; }
+  .card-body strong { color: var(--gb-text); }
+  .card-trigger { font-size: 11px; font-style: italic; color: var(--gb-overlay2); margin: 8px 0; padding-left: 10px; border-left: 2px solid var(--gb-surface2); }
+  .card-actions { display: flex; gap: 8px; margin-top: 12px; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--gb-surface2); border-top-color: var(--gb-blue); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 6px; }
+  @keyframes spin { to{transform:rotate(360deg)} }
+
+  .toc { min-width: 0; border-left: 1px solid var(--gb-surface2); overflow-y: auto; overflow-x: hidden; padding: 14px 16px 14px 12px; background: var(--gb-mantle); display: flex; flex-direction: column; }
+  .toc-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gb-overlay2); margin-bottom: 10px; padding: 0 4px; white-space: nowrap; }
+  .toc-card-title { padding: 4px; border-radius: 4px; font-size: 11px; font-weight: 600; color: var(--gb-subtext1); cursor: pointer; line-height: 1.4; }
+  .toc-card-title:hover { background: var(--gb-surface1); }
+  .toc-badge { font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 4px; border-radius: 3px; display: inline; vertical-align: middle; margin-right: 3px; }
+  .toc-badge.research { background: rgba(20,18,14,0.10); color: var(--gb-green); }
+  .toc-badge.summary { background: rgba(215,153,33,0.15); color: var(--gb-yellow); }
+  .toc-badge.analysis { background: rgba(214,93,14,0.15); color: var(--gb-peach); }
+  .agenda-panel { padding: 8px 4px 12px; border-bottom: 1px solid var(--gb-surface2); margin-bottom: 12px; }
+  .agenda-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; padding: 0 4px; }
+  .agenda-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gb-overlay2); }
+  .agenda-progress { font-size: 10px; color: var(--gb-subtext0); font-weight: 600; }
+  .agenda-item { display: flex; align-items: flex-start; gap: 6px; padding: 4px 4px; font-size: 11px; line-height: 1.4; border-radius: 3px; }
+  .agenda-item + .agenda-item { margin-top: 2px; }
+  .agenda-dot { flex: 0 0 auto; width: 12px; height: 12px; border-radius: 50%; margin-top: 2px; border: 1.5px solid var(--gb-overlay1); background: transparent; position: relative; }
+  .agenda-item.state-covered .agenda-dot { border-color: var(--gb-green); background: var(--gb-green); }
+  .agenda-item.state-covered .agenda-dot::after { content: ''; position: absolute; left: 2px; top: -1px; width: 4px; height: 7px; border: solid #fff; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+  .agenda-item.state-partial .agenda-dot { border-color: var(--gb-yellow); background: linear-gradient(90deg, var(--gb-yellow) 50%, transparent 50%); }
+  .agenda-text { flex: 1 1 auto; color: var(--gb-subtext1); word-break: break-word; }
+  .agenda-item.state-covered .agenda-text { color: var(--gb-overlay2); text-decoration: line-through; text-decoration-color: var(--gb-overlay0); }
+
+  /* ════════════════════════════════════════════════════════════
+     NEW COMPONENTS (the proposed changes) — variants B & C only
+     ════════════════════════════════════════════════════════════ */
+
+  /* 1. Toast stack (variant B) — bottom-right of the dashboard */
+  .toast-stack { position: absolute; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 300; width: 320px; }
+  .toast {
+    position: relative; overflow: hidden;
+    background: rgb(30,25,15); color: rgb(251,248,243);
+    border-radius: 8px; padding: 10px 12px 12px;
+    display: flex; align-items: center; gap: 10px;
+    font-size: 11px; box-shadow: 0 10px 24px -12px rgba(20,18,14,0.6);
+    animation: toast-in 0.25s ease-out;
+  }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  .toast-icon { flex-shrink: 0; font-size: 12px; }
+  .toast-msg { flex: 1; line-height: 1.4; }
+  .toast-msg em { font-style: normal; color: var(--gb-yellow); }
+  .toast-undo { font-family: inherit; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; background: transparent; border: 1px solid rgba(251,248,243,0.4); color: rgb(251,248,243); border-radius: 5px; padding: 3px 10px; cursor: pointer; flex-shrink: 0; }
+  .toast-undo:hover { background: rgba(251,248,243,0.12); }
+  .toast-close { background: none; border: none; color: rgba(251,248,243,0.6); font-size: 13px; cursor: pointer; padding: 0 2px; flex-shrink: 0; }
+  .toast-bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--gb-yellow); animation: drain 6s linear infinite; }
+  .toast.transient .toast-bar { animation: drain 6s linear forwards; }
+  @keyframes drain { from { width: 100%; } to { width: 0%; } }
+
+  /* 2. Intelligence status row (variant B) — sits under Quick Actions */
+  .intel-status { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--gb-subtext0); padding: 2px 4px 14px; }
+  .intel-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gb-yellow); animation: pulse 1.2s ease-in-out infinite; flex-shrink: 0; }
+  .intel-status .ellipsis::after { content: '…'; animation: dots 1.5s steps(4) infinite; }
+  @keyframes dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '…'; } }
+
+  /* 2-alt. Evaluating ghost card (variant C) — shimmer skeleton in feed */
+  .ghost-card { border: 1px dashed var(--gb-surface2); border-radius: 8px; padding: 16px 20px; margin-bottom: 16px; background: var(--gb-surface0); }
+  .ghost-label { display: flex; align-items: center; gap: 8px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gb-overlay2); margin-bottom: 10px; }
+  .shimmer { height: 10px; border-radius: 4px; margin-bottom: 8px; background: linear-gradient(90deg, var(--gb-surface1) 25%, var(--gb-surface2) 50%, var(--gb-surface1) 75%); background-size: 200% 100%; animation: shimmer 1.4s linear infinite; }
+  @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+  /* 3. Scroll pinning — jump pill + paused chip + unread divider */
+  .jump-pill {
+    position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+    background: rgb(30,25,15); color: rgb(251,248,243);
+    font-family: inherit; font-size: 10px; font-weight: 600;
+    padding: 5px 12px; border: none; border-radius: 999px; cursor: pointer;
+    box-shadow: 0 4px 12px rgba(20,18,14,0.35);
+    display: flex; gap: 6px; align-items: center; max-width: 230px; white-space: nowrap;
+    z-index: 50; animation: toast-in 0.25s ease-out;
+  }
+  .jump-pill .pill-snippet { overflow: hidden; text-overflow: ellipsis; opacity: 0.7; font-style: italic; }
+  .jump-pill:hover { background: rgb(60,55,45); }
+  .scroll-chip { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 7px; border-radius: 8px; margin-left: 6px; }
+  .scroll-chip.paused { background: rgba(215,153,33,0.18); color: var(--gb-yellow); }
+  .scroll-chip.live { background: rgba(20,18,14,0.08); color: var(--gb-green); }
+  .unread-divider { display: flex; align-items: center; gap: 8px; margin: 10px 0 8px; color: var(--gb-yellow); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
+  .unread-divider::before, .unread-divider::after { content: ''; flex: 1; border-top: 1px dashed var(--gb-yellow); opacity: 0.5; }
+
+  /* 1-alt. In-place undo row (variant C) — replaces a dismissed card */
+  .undo-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px dashed var(--gb-surface2); border-radius: 8px; padding: 10px 16px; margin-bottom: 16px; font-size: 11px; color: var(--gb-subtext0); background: var(--gb-mantle); }
+  .undo-row .undo-restore { font-family: inherit; font-size: 10px; font-weight: 700; padding: 3px 10px; border-radius: 5px; border: 1px solid var(--gb-surface2); background: transparent; color: var(--gb-text); cursor: pointer; }
+  .undo-row .undo-restore:hover { background: var(--gb-surface1); }
+  .copy-btn.copied { background: var(--gb-green); color: white; border-color: var(--gb-green); }
+</style>
+</head>
+<body>
+
+<div class="mock-bar">
+  <h1>Meeting Copilot — feedback UI mock</h1>
+  <div class="mock-tabs">
+    <button class="mock-tab active" data-tab="A" onclick="showVariant('A')">A — Current</button>
+    <button class="mock-tab" data-tab="B" onclick="showVariant('B')">B — Proposed</button>
+    <button class="mock-tab" data-tab="C" onclick="showVariant('C')">C — Experimental</button>
+  </div>
+  <div class="mock-desc" id="mockDesc"></div>
+</div>
+
+<section class="variant" data-variant="A"></section>
+<section class="variant" data-variant="B" hidden></section>
+<section class="variant" data-variant="C" hidden></section>
+
+<p class="mock-note">Mock exploration page — data is static.</p>
+
+<script>
+/* ─── Static mock data ──────────────────────────────────────── */
+const SEGMENTS = [
+  { source: 'meeting', time: '14:02', text: 'The pgvector benchmarks looked fine at one million rows, but past that the recall started dropping.' },
+  { source: 'mic',     time: '14:18', text: "Right, and we still haven't tested HNSW index rebuild times under production load.", signals: ['risk'] },
+  { source: 'meeting', time: '14:35', text: "Let's get a side-by-side of pgvector, Qdrant and Pinecone pricing before Thursday.", signals: ['action'] },
+  { source: 'mic',     time: '14:51', text: "Agreed — I'll own the pricing comparison and bring numbers to the next sync.", signals: ['decision'] },
+  { source: 'meeting', time: '15:09', text: 'What about the embedding model — are we locked into 1536 dimensions?', signals: ['question'] },
+  { source: 'mic',     time: '15:24', text: 'If we keep 1536 we can swap providers without a full re-index.' },
+  { source: 'meeting', time: '15:31', text: 'Migration cost is the real question. Re-embedding fifty million chunks is not free.' },
+];
+const NEW_SEGMENTS = [
+  { source: 'meeting', time: '15:41', text: 'Qdrant shipped a hybrid search mode last month — sparse plus dense in a single query.' },
+  { source: 'meeting', time: '15:52', text: 'That could replace the separate BM25 pass we run in the retrieval service.' },
+  { source: 'mic',     time: '16:05', text: 'We should benchmark pgvector first since it is already in our stack.' },
+];
+
+function segHtml(s, extra) {
+  const signals = (s.signals || []).map(k => '<span class="signal-tag ' + k + '">' + k + '</span>').join('');
+  return '<div class="seg ' + s.source + (extra ? ' ' + extra : '') + '">' +
+    '<div class="seg-top"><span class="seg-source ' + s.source + '">' + (s.source === 'mic' ? 'You' : 'Meeting') + '</span>' +
+    signals + '<span class="seg-time">00:' + s.time + '</span></div>' +
+    '<div class="seg-text">' + s.text + '</div></div>';
+}
+
+const SUGGESTED_CARD =
+  '<div class="card suggested" data-card="suggested">' +
+    '<div class="card-header"><span class="card-type research">Research</span>' +
+    '<span class="card-title">Pricing comparison: pgvector vs Qdrant vs Pinecone</span>' +
+    '<span class="card-time">16:06</span></div>' +
+    '<div class="card-body">Compile managed vs self-hosted pricing at 5M and 50M vectors, including egress and re-embedding cost.</div>' +
+    '<div class="card-trigger">"Let\'s get a side-by-side of pgvector, Qdrant and Pinecone pricing before Thursday."</div>' +
+    '<div class="card-actions"><button class="btn btn-green btn-approve">Approve</button>' +
+    '<button class="btn btn-ghost btn-dismiss">Dismiss</button></div>' +
+  '</div>';
+
+const RUNNING_CARD =
+  '<div class="card running">' +
+    '<div class="card-header"><span class="card-type analysis">Analysis</span>' +
+    '<span class="card-title">HNSW rebuild risk assessment</span>' +
+    '<span class="card-time">16:04</span></div>' +
+    '<div class="card-body"><span class="spinner"></span>Running… 23s elapsed</div>' +
+  '</div>';
+
+const COMPLETED_CARD =
+  '<div class="card" data-card="completed">' +
+    '<div class="card-header"><span class="card-type summary">Summary</span>' +
+    '<span class="card-title">Meeting summary so far</span>' +
+    '<span class="card-time">15:30</span>' +
+    '<button class="btn btn-ghost copy-btn">Copy</button></div>' +
+    '<div class="card-body">' +
+      '<h3>Decisions</h3><ul><li><strong>Chris owns</strong> the vector DB pricing comparison, due Thursday.</li>' +
+      '<li>Keep <strong>1536-dim embeddings</strong> to stay provider-portable.</li></ul>' +
+      '<h3>Open questions</h3><ul><li>HNSW index rebuild time under production load.</li>' +
+      '<li>Re-embedding cost at the 50M-chunk scale.</li></ul>' +
+    '</div>' +
+  '</div>';
+
+const QUICK_ACTIONS =
+  '<div class="quick-actions">' +
+    '<div class="quick-actions-title">Quick Actions</div>' +
+    '<input class="quick-actions-input" placeholder="Optional prompt — what should the worker focus on?">' +
+    '<div class="quick-actions-row">' +
+      '<button class="btn btn-ghost">&#9889; Fast</button><button class="btn btn-ghost">Research</button>' +
+      '<button class="btn btn-ghost">Summary</button><button class="btn btn-ghost">Analysis</button>' +
+    '</div>' +
+  '</div>';
+
+const SIDEBAR =
+  '<div class="toc">' +
+    '<div class="agenda-panel">' +
+      '<div class="agenda-header"><span class="agenda-title">Agenda</span><span class="agenda-progress">1/3 covered</span></div>' +
+      '<div class="agenda-item state-covered"><span class="agenda-dot"></span><span class="agenda-text">Review pgvector benchmark results</span></div>' +
+      '<div class="agenda-item state-partial"><span class="agenda-dot"></span><span class="agenda-text">Vector DB pricing comparison</span></div>' +
+      '<div class="agenda-item state-pending"><span class="agenda-dot"></span><span class="agenda-text">Decide embedding dimensions</span></div>' +
+    '</div>' +
+    '<div class="toc-title">On this page</div>' +
+    '<div class="toc-card-title"><span class="toc-badge summary">SUM</span>Meeting summary so far</div>' +
+    '<div class="toc-card-title"><span class="toc-badge analysis">ANA</span>HNSW rebuild risk assessment</div>' +
+    '<div class="toc-card-title"><span class="toc-badge research">RES</span>Pricing comparison (suggested)</div>' +
+  '</div>';
+
+function headerHtml() {
+  return '<div class="header">' +
+    '<div class="header-left"><div class="status-dot connected"></div><h1>Meeting Copilot</h1></div>' +
+    '<div class="header-center">Infra Sync — Vector DB evaluation</div>' +
+    '<div class="header-right">' +
+      '<span class="audio-indicator"><span class="audio-dot"></span><span>REC</span></span>' +
+      '<span class="state-pill live">Live</span><span class="session-timer">16:12</span>' +
+      '<button class="btn btn-red">Stop</button>' +
+    '</div></div>' +
+    '<div class="stats-bar">' +
+      '<div class="stat-tile"><div class="stat-label">Words</div><div class="stat-value">2,341</div></div>' +
+      '<div class="stat-tile"><div class="stat-label">Pace</div><div class="stat-value">142/m</div></div>' +
+      '<div class="stat-tile"><div class="stat-label">You</div><div class="stat-value">612</div></div>' +
+      '<div class="stat-tile"><div class="stat-label">Meeting</div><div class="stat-value">1,729</div></div>' +
+    '</div>';
+}
+
+function transcriptColHtml(variant) {
+  let chip = '', feedInner;
+  if (variant === 'A') {
+    /* Today: chronological, pinned to the bottom — you scroll to keep up. */
+    feedInner = SEGMENTS.map(s => segHtml(s)).join('') + NEW_SEGMENTS.map(s => segHtml(s)).join('');
+  } else {
+    /* Proposed: newest-first — the latest line is always at the top, no scrolling. */
+    const ordered = [...SEGMENTS, ...NEW_SEGMENTS].reverse();
+    feedInner = ordered.map((s, i) => segHtml(s, i === 0 ? 'newest' : '')).join('');
+    chip = '<span class="scroll-chip live">&#9660; Newest first</span>';
+  }
+
+  return '<div class="transcript-col">' +
+    '<div class="transcript-header">' +
+      '<div class="transcript-title-row"><span class="transcript-title">Transcript' + chip + '</span><span class="segment-count">' + (SEGMENTS.length + NEW_SEGMENTS.length) + '</span></div>' +
+      '<div class="filter-row"><button class="filter-btn active">All</button><button class="filter-btn">You</button><button class="filter-btn">Meeting</button></div>' +
+      '<input class="transcript-search" placeholder="Search transcript...">' +
+    '</div>' +
+    '<div class="transcript-feed">' + feedInner + '</div>' +
+  '</div>';
+}
+
+function mainColHtml(variant) {
+  let intel = '', ghost = '', preUndo = '';
+  if (variant === 'B') {
+    intel = '<div class="intel-status"><span class="intel-dot"></span><span>Evaluating last 15s of conversation<span class="ellipsis"></span></span></div>';
+  }
+  if (variant === 'C') {
+    ghost = '<div class="ghost-card"><div class="ghost-label"><span class="intel-dot"></span>Evaluating last 15s of conversation</div>' +
+      '<div class="shimmer" style="width:70%"></div><div class="shimmer" style="width:50%"></div><div class="shimmer" style="width:60%; margin-bottom:0"></div></div>';
+    preUndo = '<div class="undo-row" data-preseed><span>Dismissed <strong>"Draft follow-up email"</strong></span><button class="undo-restore">Restore</button></div>';
+  }
+  /* A: cards append in arrival order — newest ends up at the bottom (today's behavior).
+     B/C: newest card first, always visible right under the sticky Quick Actions. */
+  const cards = variant === 'A'
+    ? COMPLETED_CARD + RUNNING_CARD + SUGGESTED_CARD
+    : SUGGESTED_CARD + RUNNING_CARD + COMPLETED_CARD;
+  return '<div class="main">' + QUICK_ACTIONS + intel + ghost + preUndo + cards + '</div>';
+}
+
+function toastStackHtml(variant) {
+  if (variant !== 'B') return '';
+  /* Pre-seeded toast (infinite drain so screenshots always catch it). */
+  return '<div class="toast-stack">' +
+    '<div class="toast"><span class="toast-icon">&#10003;</span>' +
+    '<span class="toast-msg">Dismissed <em>"Draft follow-up email"</em></span>' +
+    '<button class="toast-undo">Undo</button><button class="toast-close">&times;</button>' +
+    '<span class="toast-bar"></span></div>' +
+  '</div>';
+}
+
+function renderVariant(section) {
+  const v = section.dataset.variant;
+  section.innerHTML = '<div class="dash-frame">' + headerHtml() +
+    '<div class="layout">' + transcriptColHtml(v) + mainColHtml(v) + SIDEBAR + '</div>' +
+    toastStackHtml(v) + '</div>';
+  wireInteractions(section, v);
+}
+
+/* ─── Interactions ──────────────────────────────────────────── */
+function showToast(section, msgHtml, undoFn) {
+  const stack = section.querySelector('.toast-stack');
+  if (!stack) return;
+  const t = document.createElement('div');
+  t.className = 'toast transient';
+  t.innerHTML = '<span class="toast-icon">&#10003;</span><span class="toast-msg">' + msgHtml + '</span>' +
+    (undoFn ? '<button class="toast-undo">Undo</button>' : '') +
+    '<button class="toast-close">&times;</button><span class="toast-bar"></span>';
+  stack.appendChild(t);
+  const kill = () => t.remove();
+  t.querySelector('.toast-close').onclick = kill;
+  if (undoFn) t.querySelector('.toast-undo').onclick = () => { undoFn(); kill(); };
+  setTimeout(kill, 6000);
+}
+
+function wireInteractions(section, v) {
+  const feed = section.querySelector('.transcript-feed');
+  const pill = section.querySelector('.jump-pill');
+  const chip = section.querySelector('.scroll-chip');
+  if (pill) pill.onclick = () => {
+    feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' });
+    pill.remove();
+    if (chip) { chip.classList.replace('paused', 'live'); chip.innerHTML = '&#9679; Live'; }
+  };
+
+  const suggested = section.querySelector('[data-card="suggested"]');
+  const dismissBtn = section.querySelector('.btn-dismiss');
+  if (dismissBtn && v === 'B') dismissBtn.onclick = () => {
+    suggested.classList.add('fade-out');
+    setTimeout(() => { suggested.style.display = 'none'; }, 350);
+    showToast(section, 'Dismissed <em>"Pricing comparison"</em>', () => {
+      suggested.style.display = ''; suggested.classList.remove('fade-out');
+    });
+  };
+  if (dismissBtn && v === 'C') dismissBtn.onclick = () => {
+    const row = document.createElement('div');
+    row.className = 'undo-row';
+    row.innerHTML = '<span>Dismissed <strong>"Pricing comparison"</strong></span><button class="undo-restore">Restore</button>';
+    suggested.before(row);
+    suggested.style.display = 'none';
+    row.querySelector('.undo-restore').onclick = () => { row.remove(); suggested.style.display = ''; };
+  };
+
+  const copyBtn = section.querySelector('.copy-btn');
+  if (copyBtn && v === 'B') copyBtn.onclick = () => showToast(section, 'Copied to clipboard');
+  if (copyBtn && v === 'C') copyBtn.onclick = () => {
+    copyBtn.textContent = '✓ Copied'; copyBtn.classList.add('copied');
+    setTimeout(() => { copyBtn.textContent = 'Copy'; copyBtn.classList.remove('copied'); }, 2000);
+  };
+
+  const preseed = section.querySelector('[data-preseed] .undo-restore');
+  if (preseed) preseed.onclick = () => preseed.closest('.undo-row').remove();
+}
+
+/* ─── Variant switcher ──────────────────────────────────────── */
+const DESCRIPTIONS = {
+  A: 'Today: newest transcript line and newest card land at the BOTTOM — you scroll constantly to keep up, and copy/dismiss give zero feedback.',
+  B: 'Proposed: newest-first everywhere — latest transcript line and latest card always at the top, zero scrolling. Toast stack with undo, "Evaluating…" status row.',
+  C: 'Experimental: same newest-first ordering; dismissed cards collapse to an in-place Restore row and evaluating shows as a shimmer ghost card.',
+};
+
+function initScroll(section) {
+  if (section.dataset.scrolled) return;
+  const feed = section.querySelector('.transcript-feed');
+  const v = section.dataset.variant;
+  if (v === 'A') feed.scrollTop = feed.scrollHeight; /* today: pinned to the bottom */
+  else feed.scrollTop = 0;                           /* proposed: newest is already at the top */
+  section.dataset.scrolled = '1';
+}
+
+function showVariant(v) {
+  document.querySelectorAll('.mock-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === v));
+  document.querySelectorAll('.variant').forEach(s => {
+    s.hidden = s.dataset.variant !== v;
+    if (!s.hidden) initScroll(s);
+  });
+  document.getElementById('mockDesc').textContent = DESCRIPTIONS[v];
+}
+
+document.querySelectorAll('.variant').forEach(renderVariant);
+showVariant('A');
+</script>
+</body>
+</html>

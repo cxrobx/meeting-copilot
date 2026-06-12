@@ -19,6 +19,8 @@ import { TranscriptionService } from './transcription/index.js';
 import { TranscriptDedup } from './transcription/dedup.js';
 import { IntelligenceEngine } from './intelligence/index.js';
 import { AgendaTracker, type AgendaStatus } from './intelligence/agenda.js';
+import { FactCheckMonitor, type FactFlag } from './intelligence/factcheck.js';
+import { CoachMonitor, type CoachSuggestion } from './intelligence/coach.js';
 import { WorkerRegistry } from './workers/registry.js';
 import { ResearchWorker } from './workers/research.js';
 import { FastResearchWorker } from './workers/fast-research.js';
@@ -86,7 +88,9 @@ type InboundMessage =
   | { type: 'action.approve'; actionId: string }
   | { type: 'action.dismiss'; actionId: string }
   | { type: 'action.cancel'; actionId: string }
-  | { type: 'action.trigger'; actionType: string; prompt?: string };
+  | { type: 'action.trigger'; actionType: string; prompt?: string }
+  | { type: 'feature.toggle'; feature: 'factcheck' | 'coach'; enabled: boolean }
+  | { type: 'meeting.goals'; goals: string };
 
 // Messages TO Swift app
 type OutboundMessage =
@@ -143,6 +147,22 @@ type OutboundMessage =
   | {
       type: 'agenda.status';
       status: AgendaStatus;
+    }
+  | {
+      type: 'intelligence.status';
+      phase: 'evaluating' | 'generating' | 'idle';
+    }
+  | {
+      type: 'feature.state';
+      features: { factcheck: boolean; coach: boolean };
+    }
+  | {
+      type: 'factcheck.flag';
+      flag: FactFlag;
+    }
+  | {
+      type: 'coach.suggestion';
+      suggestion: CoachSuggestion;
     };
 
 // ─── App State ─────────────────────────────────────────────────────────────
@@ -171,6 +191,7 @@ const debug = new DebugHandler(transcription, intelligence, registry);
 // Snapshot of last broadcast agenda status — served to late-joining clients
 let lastAgendaStatus: AgendaStatus | null = null;
 
+let lastAgendaMissingCount = 0;
 agendaTracker.on('status', (status: AgendaStatus) => {
   lastAgendaStatus = status;
   eventLogger?.log('agenda.status', {
@@ -179,6 +200,11 @@ agendaTracker.on('status', (status: AgendaStatus) => {
     missing: status.missing,
   });
   broadcast({ type: 'agenda.status', status });
+  // A fresh "might be missing" warning is a coachable moment.
+  if (status.missing.length > lastAgendaMissingCount && coach.isRunning()) {
+    coach.requestEval('agenda-warning');
+  }
+  lastAgendaMissingCount = status.missing.length;
 });
 
 agendaTracker.on('error', (msg: string) => {
@@ -191,6 +217,109 @@ agendaTracker.on('eval', (info: Record<string, unknown>) => {
   debugLog(`[Agenda] ${JSON.stringify(info)}`);
   eventLogger?.log('agenda.eval', info);
 });
+
+// ─── Opt-in Monitors: Fact-check + Coach ───────────────────────────────────
+// Both are fully inert (no timers, no API calls) until toggled on, so the
+// extra per-meeting cost is strictly opt-in.
+
+const factCheck = new FactCheckMonitor();
+const coach = new CoachMonitor();
+const featureFlags = { factcheck: false, coach: false };
+// Flags raised this session — replayed to late-joining clients (page reload).
+let sessionFactFlags: FactFlag[] = [];
+let lastCoachSuggestion: CoachSuggestion | null = null;
+// The user's private goals for this meeting — coach-only context. Content is
+// deliberately NOT logged to the session JSONL (only its length).
+let meetingGoals = '';
+
+factCheck.on('flag', (flag: FactFlag) => {
+  sessionFactFlags.push(flag);
+  eventLogger?.log('factcheck.flag', {
+    claim: flag.claim,
+    speaker: flag.speaker,
+    verdict: flag.verdict,
+    confidence: flag.confidence,
+    webSearched: flag.webSearched,
+  });
+  broadcast({ type: 'factcheck.flag', flag });
+});
+factCheck.on('eval', (info: Record<string, unknown>) => {
+  debugLog(`[FactCheck] ${JSON.stringify(info)}`);
+  eventLogger?.log('factcheck.eval', info);
+});
+factCheck.on('error', (msg: string) => debugLog(`[FactCheck] error: ${msg}`));
+
+coach.on('suggestion', (suggestion: CoachSuggestion) => {
+  lastCoachSuggestion = suggestion;
+  eventLogger?.log('coach.suggestion', {
+    kind: suggestion.kind,
+    priority: suggestion.priority,
+    headline: suggestion.headline,
+  });
+  broadcast({ type: 'coach.suggestion', suggestion });
+});
+coach.on('eval', (info: Record<string, unknown>) => {
+  debugLog(`[Coach] ${JSON.stringify(info)}`);
+  eventLogger?.log('coach.eval', info);
+});
+coach.on('error', (msg: string) => debugLog(`[Coach] error: ${msg}`));
+
+function monitorTranscriptProvider(): string {
+  if (!sessionStore) return '';
+  return sessionStore
+    .getTranscript()
+    .map((r) => `${r.label} ${r.text}`)
+    .join('\n');
+}
+
+function monitorWordCountProvider(): number {
+  if (!sessionStore) return 0;
+  return sessionStore.getTranscript().reduce((sum, r) => sum + (r.wordCount || 0), 0);
+}
+
+function monitorSpeakerStats(): { micWords: number; meetingWords: number } | null {
+  if (!sessionStore) return null;
+  let micWords = 0;
+  let meetingWords = 0;
+  for (const r of sessionStore.getTranscript()) {
+    if (r.source === 'mic') micWords += r.wordCount || 0;
+    else meetingWords += r.wordCount || 0;
+  }
+  return { micWords, meetingWords };
+}
+
+/** Start/stop a monitor to match its flag. Safe to call redundantly. */
+function applyFeatureFlags(): void {
+  const session = sessionStore?.getSession();
+  if (featureFlags.factcheck && sessionActive && !factCheck.isRunning()) {
+    factCheck.start({
+      transcriptProvider: monitorTranscriptProvider,
+      wordCountProvider: monitorWordCountProvider,
+      sessionTitle: session?.title,
+    });
+    debugLog('[FactCheck] started');
+  } else if ((!featureFlags.factcheck || !sessionActive) && factCheck.isRunning()) {
+    factCheck.stop();
+    debugLog('[FactCheck] stopped');
+  }
+
+  if (featureFlags.coach && sessionActive && !coach.isRunning()) {
+    const meetingContext = intelligence.getMeetingContext();
+    coach.start({
+      transcriptProvider: monitorTranscriptProvider,
+      wordCountProvider: monitorWordCountProvider,
+      agendaStatusProvider: () => lastAgendaStatus,
+      goalsProvider: () => meetingGoals,
+      speakerStatsProvider: monitorSpeakerStats,
+      sessionTitle: session?.title,
+      attendees: meetingContext.attendees,
+    });
+    debugLog('[Coach] started');
+  } else if ((!featureFlags.coach || !sessionActive) && coach.isRunning()) {
+    coach.stop();
+    debugLog('[Coach] stopped');
+  }
+}
 
 // Register workers
 registry.register(new ResearchWorker());
@@ -260,6 +389,18 @@ function handleWsConnection(ws: WebSocket, label: string): void {
   // see the current coverage without waiting for the next 30s evaluation.
   if (sessionActive && lastAgendaStatus && lastAgendaStatus.items.length > 0) {
     ws.send(JSON.stringify({ type: 'agenda.status', status: lastAgendaStatus }));
+  }
+
+  // Replay monitor state + this session's fact flags / latest coach tip so a
+  // page reload doesn't lose them.
+  ws.send(JSON.stringify({ type: 'feature.state', features: { ...featureFlags } }));
+  if (sessionActive) {
+    for (const flag of sessionFactFlags) {
+      ws.send(JSON.stringify({ type: 'factcheck.flag', flag }));
+    }
+    if (lastCoachSuggestion) {
+      ws.send(JSON.stringify({ type: 'coach.suggestion', suggestion: lastCoachSuggestion }));
+    }
   }
 
   ws.on('message', async (raw) => {
@@ -357,6 +498,11 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
 
           sessionStore.addTranscript(segment);
           intelligence.addTranscript(segment);
+          // Event-driven monitor triggers: claim-shaped segments fire an early
+          // fact-check, moment-shaped ones an early coach eval. No-ops when
+          // the monitors are toggled off.
+          if (factCheck.isRunning()) factCheck.noteSegment(segment.text);
+          if (coach.isRunning()) coach.noteSegment(segment.text, segment.source);
           debug.recordTranscriptWords(segment.wordCount);
           debug.recordTranscriptSegment(segment);
 
@@ -512,6 +658,16 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       intelligence.start();
       sessionActive = true;
 
+      // Monitors are opt-in per meeting — always start OFF so cost is never
+      // incurred silently. The dashboard toggles them via feature.toggle.
+      featureFlags.factcheck = false;
+      featureFlags.coach = false;
+      sessionFactFlags = [];
+      lastCoachSuggestion = null;
+      meetingGoals = '';
+      lastAgendaMissingCount = 0;
+      broadcast({ type: 'feature.state', features: { ...featureFlags } });
+
       debugLog(`[Session] Started: ${sessionStore.id}`);
 
       broadcast({
@@ -628,6 +784,12 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       }
       agendaTracker.stop();
 
+      // Stop opt-in monitors
+      featureFlags.factcheck = false;
+      featureFlags.coach = false;
+      applyFeatureFlags();
+      broadcast({ type: 'feature.state', features: { ...featureFlags } });
+
       // Stop intelligence
       intelligence.stop();
 
@@ -717,6 +879,23 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
     case 'action.dismiss': {
       registry.dismiss(message.actionId);
       eventLogger?.log('action.dismissed', { actionId: message.actionId });
+      break;
+    }
+
+    case 'feature.toggle': {
+      if (message.feature !== 'factcheck' && message.feature !== 'coach') break;
+      featureFlags[message.feature] = !!message.enabled;
+      applyFeatureFlags();
+      eventLogger?.log('feature.toggle', { feature: message.feature, enabled: featureFlags[message.feature] });
+      broadcast({ type: 'feature.state', features: { ...featureFlags } });
+      break;
+    }
+
+    case 'meeting.goals': {
+      meetingGoals = (message.goals ?? '').toString().slice(0, 1_000).trim();
+      // Privacy: goals can contain negotiation positions — log length only.
+      eventLogger?.log('meeting.goals', { length: meetingGoals.length });
+      debugLog(`[Coach] meeting goals set (${meetingGoals.length} chars)`);
       break;
     }
 
@@ -957,6 +1136,12 @@ registry.on('action.completed', (action: ActionLifecycle) => {
 
 intelligence.on('intelligence.eval', (data) => {
   eventLogger?.log('intelligence.eval', data);
+});
+
+// Live "evaluating / drafting" indicator for the dashboard. Not logged —
+// purely ephemeral UI state.
+intelligence.on('intelligence.activity', (data: { phase: 'evaluating' | 'generating' | 'idle' }) => {
+  broadcast({ type: 'intelligence.status', phase: data.phase });
 });
 
 intelligence.on('intelligence.error', (data) => {

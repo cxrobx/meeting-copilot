@@ -290,6 +290,7 @@ export class IntelligenceEngine extends EventEmitter {
 
     this.evalsRun++;
     const startTime = Date.now();
+    this.emit('intelligence.activity', { phase: 'evaluating' });
 
     try {
       // Tier 1: Haiku triage
@@ -314,6 +315,7 @@ export class IntelligenceEngine extends EventEmitter {
 
       // Tier 2: Sonnet suggestion
       this.sonnetCallCount++;
+      this.emit('intelligence.activity', { phase: 'generating' });
       const suggestion = await this.runSonnetSuggestion(window, triageResult);
       const latency = Date.now() - startTime;
       this.totalSuggestionLatencyMs += latency;
@@ -328,6 +330,10 @@ export class IntelligenceEngine extends EventEmitter {
       this.emit('intelligence.error', {
         error: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      // Concurrent evals (MAX_EVAL_IN_FLIGHT=2) can interleave phases; last
+      // writer wins, which is acceptable for a status indicator.
+      this.emit('intelligence.activity', { phase: 'idle' });
     }
   }
 
