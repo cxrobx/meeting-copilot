@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import SwiftUI
 import UniformTypeIdentifiers
 
 // File-based debug logging (stdout invisible when launched from Finder)
@@ -670,7 +671,9 @@ final class SessionManager {
         case .actionStatus(let actionId, let newState, let result):
             if let index = actions.firstIndex(where: { $0.id == actionId }) {
                 if newState == .expired {
-                    actions.remove(at: index)
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        _ = actions.remove(at: index)
+                    }
                     return
                 }
                 actions[index].state = newState

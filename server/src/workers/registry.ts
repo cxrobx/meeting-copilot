@@ -11,7 +11,11 @@ import type {
 const MAX_CONCURRENT_WORKERS = 3;
 const MAX_RETRY_COUNT = 2;
 const BASE_RETRY_DELAY_MS = 1_000; // 1s, doubled each retry
-const SUGGESTION_TTL_MS = 60_000; // Auto-expire unactioned suggestions after this long
+// Auto-expire unactioned suggestions after this long (override via SUGGESTION_TTL_MS env var)
+const SUGGESTION_TTL_MS = (() => {
+  const raw = Number(process.env.SUGGESTION_TTL_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 60_000;
+})();
 
 function isTransientError(error: unknown): boolean {
   if (error instanceof Error) {

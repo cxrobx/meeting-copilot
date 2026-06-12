@@ -723,6 +723,7 @@ struct ActionPanelView: View {
                             },
                             isPinned: pinnedActionID == action.id
                         )
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }
             }

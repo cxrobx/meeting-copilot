@@ -22,6 +22,7 @@ Create `server/.env`:
 ANTHROPIC_API_KEY=sk-ant-...   # Required — intelligence + workers
 DEEPGRAM_API_KEY=...           # Optional — cloud transcription fallback
 COPILOT_PORT=17890             # Optional — default 17890
+SUGGESTION_TTL_MS=60000        # Optional — default 60000; ms before an unactioned suggestion auto-expires
 ```
 
 ## Building

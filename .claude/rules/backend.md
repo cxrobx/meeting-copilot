@@ -73,3 +73,4 @@ cd server && npm start        # Run compiled dist/index.js
 | `DEEPGRAM_API_KEY` | No | - | Cloud transcription |
 | `COPILOT_PORT` | No | 17890 | TCP port |
 | `SHARE_TRANSCRIPT` | No | true | Set to `false` to disable shared transcript writing |
+| `SUGGESTION_TTL_MS` | No | 60000 | Milliseconds before an unactioned suggestion auto-expires |
