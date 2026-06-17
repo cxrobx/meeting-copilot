@@ -140,6 +140,15 @@ if [ -f "$PROJECT_DIR/server/.env" ]; then
   echo "  Copied .env"
 fi
 
+# Bundle the Parakeet sidecar script — the DEFAULT transcription backend.
+# ProcessSupervisor runs it via `uv run` at launch; uv resolves the script's
+# PEP-723 deps + the Parakeet model from the user's caches on first start.
+# (whisper-server is still bundled below as the automatic fallback.)
+if [ -f "$PROJECT_DIR/scripts/parakeet-server.py" ]; then
+  cp "$PROJECT_DIR/scripts/parakeet-server.py" "$APP_BUNDLE/Contents/Resources/parakeet-server.py"
+  echo "  Bundled parakeet-server.py (default transcription backend)"
+fi
+
 # Bundle whisper-server + its dylib dependencies.
 # The homebrew binary is linked with rpath `@loader_path/../lib`, so we preserve
 # the layout by copying both bin/ and lib/ from the Cellar's libexec/.

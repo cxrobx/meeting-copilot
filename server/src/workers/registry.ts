@@ -293,7 +293,9 @@ export class WorkerRegistry extends EventEmitter {
 
   private getTimeoutForType(type: string): number {
     const worker = this.workers.get(type);
-    return worker?.capabilities.maxDurationMs ?? 120_000;
+    // Generous safety cap (~15 min) for any worker that doesn't set its own —
+    // jobs run until done or cancel; a truly-hung CLI still fails → Retry.
+    return worker?.capabilities.maxDurationMs ?? 900_000;
   }
 
   private async executeAction(action: ActionLifecycle): Promise<void> {
@@ -319,6 +321,19 @@ export class WorkerRegistry extends EventEmitter {
     if (streamingTypes.has(action.type) && typeof action.params._onDelta !== 'function') {
       action.params._onDelta = (delta: string) => {
         this.emit('action.stream', { actionId: action.id, delta });
+      };
+    }
+
+    // Early-emit hook: a worker can publish a partial result before execute()
+    // resolves. The mockup worker uses it to show its fast ASCII wireframe
+    // while the HTML phase is still rendering. The partial rides an
+    // action.status event with state kept as 'running' (not mutating the live
+    // action's state/result), so the dashboard renders partial artifacts in
+    // place without marking the card complete.
+    if (typeof action.params._emitEarly !== 'function') {
+      action.params._emitEarly = (partial: WorkerResult) => {
+        if (action.state !== 'running') return; // ignore late emits after cancel/finish
+        this.emit('action.status', { ...action, state: 'running', result: partial });
       };
     }
 

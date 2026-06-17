@@ -13,7 +13,8 @@ export class SummaryWorker implements Worker {
       write: ['~/Documents/CX/Meetings/**'],
     },
     subprocess: false,
-    maxDurationMs: 60_000,
+    // Generous safety cap (~15 min): jobs run until done or the user cancels.
+    maxDurationMs: 900_000,
     maxMemoryMB: 50,
   };
 

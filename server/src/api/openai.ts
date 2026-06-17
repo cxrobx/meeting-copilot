@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { paidApiDisabled } from './killswitch.js';
 
 const TRIAGE_MODEL = 'gpt-5.4-mini';
 const FAST_RESEARCH_MODEL = 'gpt-5.4-mini';
@@ -20,6 +21,7 @@ function getClient(): OpenAI {
 }
 
 export function isOpenAiApiAvailable(): boolean {
+  if (paidApiDisabled()) return false; // cost-safe test mode — force CLI
   return !!(process.env.OPENAI_API_KEY ?? '').trim();
 }
 

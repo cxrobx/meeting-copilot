@@ -29,6 +29,13 @@ final class ProcessSupervisor {
     private var whisperProcess: Process?
     private var serverRestartCount = 0
     private var whisperRestartCount = 0
+
+    // Parakeet sidecar (NVIDIA Parakeet-TDT via parakeet-mlx) — the DEFAULT
+    // transcription backend when `uv` + the sidecar script are present.
+    var parakeetRunning: Bool = false
+    private var parakeetProcess: Process?
+    private var parakeetRestartCount = 0
+
     private var monitorTasks: [Task<Void, Never>] = []
     private var healthProbeTask: Task<Void, Never>?
     private var lastHealthyAt: Date?
@@ -74,6 +81,43 @@ final class ProcessSupervisor {
             return homebrewPath
         }
         return NSString("~/Projects/meeting-copilot/bin/whisper-server").expandingTildeInPath
+    }
+
+    // MARK: - Parakeet Backend
+
+    /// Fixed local port for the Parakeet sidecar — shared with the Node server's
+    /// PARAKEET_PORT default and ./scripts/start.sh.
+    private let parakeetPort = "8077"
+
+    /// Resolve the `uv` binary (Astral installer drops it in ~/.local/bin).
+    private var uvPath: String? {
+        let candidates = [
+            NSString("~/.local/bin/uv").expandingTildeInPath,
+            "/opt/homebrew/bin/uv",
+            "/usr/local/bin/uv",
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    /// Resolve the Parakeet sidecar script (bundle → dev).
+    private var parakeetScriptPath: String? {
+        if isPackaged, let res = Bundle.main.resourcePath {
+            let p = "\(res)/parakeet-server.py"
+            if FileManager.default.fileExists(atPath: p) { return p }
+        }
+        let dev = NSString("~/Projects/meeting-copilot/scripts/parakeet-server.py").expandingTildeInPath
+        return FileManager.default.fileExists(atPath: dev) ? dev : nil
+    }
+
+    /// Decide the transcription backend ONCE. Honors an explicit
+    /// TRANSCRIPTION_PROVIDER override; otherwise defaults to Parakeet when
+    /// `uv` + the sidecar are available, else whisper. Read by both the backend
+    /// launcher and the Node server's env so they always agree.
+    private var transcriptionProvider: String {
+        let override = ProcessInfo.processInfo.environment["TRANSCRIPTION_PROVIDER"]?.lowercased()
+        if let o = override, !o.isEmpty { return o }
+        if uvPath != nil, parakeetScriptPath != nil { return "parakeet" }
+        return "whisper"
     }
 
     /// Resolve the Silero VAD model path (user → bundle → nil).
@@ -368,6 +412,13 @@ final class ProcessSupervisor {
         // Inherit environment with homebrew paths and set NODE_ENV
         var env = processEnvironment()
         env["NODE_ENV"] = isPackaged ? "production" : "development"
+        // Pin the Node server to the transcription backend the supervisor runs,
+        // so createProvider() in transcription/index.ts always matches what is
+        // actually listening (Parakeet sidecar vs whisper-server).
+        env["TRANSCRIPTION_PROVIDER"] = transcriptionProvider
+        if transcriptionProvider == "parakeet" {
+            env["PARAKEET_PORT"] = parakeetPort
+        }
         process.environment = env
 
         // Pipe output for logging
@@ -426,6 +477,13 @@ final class ProcessSupervisor {
     // MARK: - Start Whisper
 
     func startWhisper() {
+        // The default backend is Parakeet (see transcriptionProvider). Dispatch
+        // to the sidecar when selected; otherwise run whisper-server as before.
+        if transcriptionProvider == "parakeet" {
+            startParakeet()
+            return
+        }
+
         guard !whisperRunning else { return }
 
         // If whisper-server is already running on 8078 (e.g. from notes4chris), reuse it
@@ -533,6 +591,77 @@ final class ProcessSupervisor {
         }
     }
 
+    // MARK: - Start Parakeet (default backend)
+
+    func startParakeet() {
+        guard !parakeetRunning else { return }
+        // Reuse an already-running sidecar (e.g. from ./scripts/start.sh or a
+        // prior launch) — mirrors the whisper-on-8078 reuse.
+        if isPortInUse(parakeetPort) {
+            appLog("[ProcessSupervisor] Parakeet sidecar already running on \(parakeetPort) — reusing existing instance")
+            parakeetRunning = true
+            return
+        }
+        parakeetRestartCount = 0
+        launchParakeet()
+    }
+
+    private func launchParakeet() {
+        guard let uv = uvPath, let script = parakeetScriptPath else {
+            appLog("[ProcessSupervisor] Parakeet sidecar unavailable (uv or script missing). Transcription will be degraded — install uv (curl -LsSf https://astral.sh/uv/install.sh | sh) or set TRANSCRIPTION_PROVIDER=whisper.")
+            return
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: uv)
+        // `uv run` resolves the script's inline (PEP 723) deps + the Parakeet
+        // model on first launch (setup.sh pre-pulls them), then serves
+        // /inference on parakeetPort — the same contract whisper-server exposes.
+        process.arguments = ["run", script, "--port", parakeetPort]
+        process.environment = processEnvironment()
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
+                print("[Parakeet] \(output.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+        }
+
+        do {
+            try process.run()
+            self.parakeetProcess = process
+            self.parakeetRunning = true
+            appLog("[ProcessSupervisor] Parakeet sidecar started (PID: \(process.processIdentifier)) via \(uv)")
+
+            let task = Task.detached { [weak self] in
+                process.waitUntilExit()
+                await MainActor.run {
+                    guard let self = self else { return }
+                    self.parakeetRunning = false
+                    print("[ProcessSupervisor] Parakeet exited (code: \(process.terminationStatus))")
+
+                    if process.terminationStatus != 0 && self.parakeetRestartCount < self.maxRestartAttempts {
+                        self.parakeetRestartCount += 1
+                        let idx = min(self.parakeetRestartCount - 1, self.restartBackoffSeconds.count - 1)
+                        let delay = self.restartBackoffSeconds[idx]
+                        print("[ProcessSupervisor] Restarting Parakeet in \(delay)s (attempt \(self.parakeetRestartCount)/\(self.maxRestartAttempts))…")
+                        Task {
+                            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                            self.launchParakeet()
+                        }
+                    }
+                }
+            }
+            monitorTasks.append(task)
+        } catch {
+            appLog("[ProcessSupervisor] Failed to start Parakeet sidecar: \(error)")
+            parakeetRunning = false
+        }
+    }
+
     // MARK: - Stop All
 
     func stopAll() async {
@@ -548,11 +677,14 @@ final class ProcessSupervisor {
         // Graceful shutdown: SIGTERM, wait, then SIGKILL if needed
         await stopProcess(serverProcess, name: "Server")
         await stopProcess(whisperProcess, name: "Whisper")
+        await stopProcess(parakeetProcess, name: "Parakeet")
 
         serverProcess = nil
         whisperProcess = nil
+        parakeetProcess = nil
         serverRunning = false
         whisperRunning = false
+        parakeetRunning = false
     }
 
     private func stopProcess(_ process: Process?, name: String) async {

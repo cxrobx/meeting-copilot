@@ -1,7 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import { claudeTriage, claudeSuggest } from '../claude-cli.js';
-import { isOpenAiApiAvailable, openaiTriageJson } from '../api/openai.js';
 import type { TranscriptSegment } from '../transcription/types.js';
 import type { ActionSuggestion } from '../workers/types.js';
 import type { ProjectContext } from '../project/index.js';
@@ -16,10 +15,8 @@ import {
 import {
   SONNET_SUGGEST_SYSTEM,
   buildSonnetSuggestPrompt,
-  buildSonnetSuggestPromptSplit,
   type SonnetSuggestionResult,
 } from './prompts/sonnet-suggest.v1.js';
-import { isAnthropicApiAvailable, anthropicSuggestStream } from '../api/anthropic.js';
 
 const WINDOW_DURATION_MS = 5 * 60 * 1000; // 5 minutes
 const BASE_EVAL_INTERVAL_MS = 15_000;
@@ -347,40 +344,9 @@ export class IntelligenceEngine extends EventEmitter {
       this.contextManifest || undefined,
     );
 
-    // Prefer GPT-5.4 Mini via OpenAI Responses API when OPENAI_API_KEY is
-    // set. This is the realtime-critical path — removing the CLI spawn and
-    // using a model tuned for fast short JSON output cuts triage latency
-    // from 2–5s (with 30s+ tail-risk stalls) to 400–800ms.
-    if (isOpenAiApiAvailable()) {
-      try {
-        const text = await openaiTriageJson(
-          prompt,
-          HAIKU_TRIAGE_SYSTEM,
-          {
-            name: 'triage_result',
-            schema: {
-              type: 'object',
-              additionalProperties: false,
-              required: ['actionable', 'reason', 'triggerQuote'],
-              properties: {
-                actionable: { type: 'boolean' },
-                reason: { type: 'string' },
-                triggerQuote: { type: 'string' },
-              },
-            },
-          },
-          { timeoutMs: 8_000 },
-        );
-        return JSON.parse(text) as HaikuTriageResult;
-      } catch (err) {
-        // Fall through to CLI path on any API failure so the loop stays
-        // alive if the key is bad or the service blips.
-        const msg = err instanceof Error ? err.message : String(err);
-        this.emit('intelligence.error', { error: `[openai-triage] ${msg}` });
-      }
-    }
-
-    // CLI fallback — Gemini → Haiku → Codex chain.
+    // CLI-only (subscription, no paid API): Gemini → Haiku → Codex chain.
+    // The ⚡ Fast button and highlight-to-ask are the only sanctioned API
+    // consumers; everything else runs on the headless CLIs.
     const text = await claudeTriage(prompt, HAIKU_TRIAGE_SYSTEM);
     try {
       const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -402,56 +368,19 @@ export class IntelligenceEngine extends EventEmitter {
       ? buildContextBlock(this.contextDocs, triageResult.triggerQuote)
       : undefined;
 
-    let text: string;
-
-    if (isAnthropicApiAvailable()) {
-      try {
-        const { staticPrefix, dynamicTail } = buildSonnetSuggestPromptSplit(
-          window,
-          {
-            reason: triageResult.reason,
-            triggerQuote: triageResult.triggerQuote,
-          },
-          projectBriefs.length > 0 ? projectBriefs : undefined,
-          contextBlock,
-        );
-        const result = await anthropicSuggestStream({
-          systemPrompt: SONNET_SUGGEST_SYSTEM,
-          staticContext: staticPrefix,
-          dynamicTail,
-        });
-        text = result.text;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.emit('intelligence.error', { error: `[anthropic-suggest] ${msg}` });
-        // Fall back to CLI so a single API blip doesn't kill the loop.
-        text = await claudeSuggest(
-          buildSonnetSuggestPrompt(
-            window,
-            {
-              reason: triageResult.reason,
-              triggerQuote: triageResult.triggerQuote,
-            },
-            projectBriefs.length > 0 ? projectBriefs : undefined,
-            contextBlock,
-          ),
-          SONNET_SUGGEST_SYSTEM,
-        );
-      }
-    } else {
-      text = await claudeSuggest(
-        buildSonnetSuggestPrompt(
-          window,
-          {
-            reason: triageResult.reason,
-            triggerQuote: triageResult.triggerQuote,
-          },
-          projectBriefs.length > 0 ? projectBriefs : undefined,
-          contextBlock,
-        ),
-        SONNET_SUGGEST_SYSTEM,
-      );
-    }
+    // CLI-only (subscription, no paid API): streaming Sonnet via claudeSuggest.
+    const text = await claudeSuggest(
+      buildSonnetSuggestPrompt(
+        window,
+        {
+          reason: triageResult.reason,
+          triggerQuote: triageResult.triggerQuote,
+        },
+        projectBriefs.length > 0 ? projectBriefs : undefined,
+        contextBlock,
+      ),
+      SONNET_SUGGEST_SYSTEM,
+    );
 
     try {
       const jsonMatch = text.match(/\{[\s\S]*\}/);

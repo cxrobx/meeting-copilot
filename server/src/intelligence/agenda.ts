@@ -1,6 +1,5 @@
 import { EventEmitter } from 'node:events';
 import { claudeChat } from '../claude-cli.js';
-import { isAnthropicApiAvailable, anthropicHaikuCachedJson, anthropicTriageJson } from '../api/anthropic.js';
 
 // Tighter cadence so pending → partial transitions land close to when the
 // user hears the topic come up, not 15-30s later. Prompt is explicitly
@@ -259,38 +258,12 @@ export class AgendaTracker extends EventEmitter {
     const startedAt = Date.now();
     this.emit('eval', { started: true, words: this.wordCountProvider() });
     try {
-      // Prefer the Anthropic API with prompt caching. The agenda list +
-      // session title are stable across a session, so after the first call
-      // the cache hits and only the transcript window pays input cost.
-      // CLI path stays as the fallback so no key = still works, and we also
-      // fall through to the CLI when the API call itself fails (bad key,
-      // rate limit, transient network) instead of blanking the agenda panel.
-      let raw: string;
-      if (isAnthropicApiAvailable()) {
-        const { staticPrefix, dynamicTail } = buildAgendaEvalPromptSplit(
-          this.items,
-          transcript,
-          this.sessionTitle,
-        );
-        try {
-          raw = await anthropicHaikuCachedJson({
-            systemPrompt: AGENDA_EVAL_SYSTEM,
-            staticContext: staticPrefix,
-            dynamicTail,
-            signal,
-            label: 'agenda-eval',
-          });
-        } catch (apiErr) {
-          const msg = apiErr instanceof Error ? apiErr.message : String(apiErr);
-          if (signal.aborted || msg === 'Aborted') throw apiErr;
-          this.emit('eval', { apiFallback: true, reason: msg });
-          const prompt = buildAgendaEvalPrompt(this.items, transcript, this.sessionTitle);
-          raw = await this.triage(prompt, AGENDA_EVAL_SYSTEM, signal);
-        }
-      } else {
-        const prompt = buildAgendaEvalPrompt(this.items, transcript, this.sessionTitle);
-        raw = await this.triage(prompt, AGENDA_EVAL_SYSTEM, signal);
-      }
+      // CLI-only (subscription, no paid API): Haiku via the injected triage().
+      // Loses the Anthropic prompt cache, but incurs no $ cost — acceptable
+      // for the subscription-only posture. The ⚡ Fast button and
+      // highlight-to-ask are the only sanctioned API consumers.
+      const prompt = buildAgendaEvalPrompt(this.items, transcript, this.sessionTitle);
+      const raw = await this.triage(prompt, AGENDA_EVAL_SYSTEM, signal);
 
       // Stale-guard: drop the result if the session changed while we awaited.
       if (gen !== this.generation) {
@@ -853,30 +826,20 @@ export async function extractAgendaItemsFromNotes(
   const signal = deps.signal;
   const firstPrompt = buildAgendaExtractPrompt(trimmed);
 
-  // Prefer the Anthropic API when ANTHROPIC_API_KEY is set — sidesteps the
-  // PATH lookup for the `claude` CLI (which lives in ~/.local/bin and isn't
-  // always resolvable from the bundled server's subprocess environment).
-  // Falls back to the CLI when no key is present or when the caller injected
-  // a custom `chat` (tests).
+  // CLI-only (subscription, no paid API): Sonnet via claudeChat. The gotcha
+  // #13 PATH fix (~/.local/bin + nvm bins injected by ProcessSupervisor)
+  // makes the `claude` CLI reachable from the bundled server. Tests inject a
+  // custom `chat`. The ⚡ Fast button and highlight-to-ask are the only
+  // sanctioned API consumers.
   const chat = deps.chat ?? (claudeChat as ChatFn);
-  const useApi = deps.chat == null && isAnthropicApiAvailable();
 
   let response: string;
   try {
-    if (useApi) {
-      response = await anthropicTriageJson(firstPrompt, AGENDA_EXTRACT_SYSTEM, {
-        signal,
-        maxTokens: 1024,
-        timeoutMs: 30_000,
-        label: 'agenda-extract',
-      });
-    } else {
-      response = await chat(firstPrompt, {
-        systemPrompt: AGENDA_EXTRACT_SYSTEM,
-        model: 'claude-sonnet-4-6',
-        signal,
-      });
-    }
+    response = await chat(firstPrompt, {
+      systemPrompt: AGENDA_EXTRACT_SYSTEM,
+      model: 'claude-sonnet-4-6',
+      signal,
+    });
   } catch (err) {
     if (err instanceof Error && err.message === 'Aborted') throw err;
     throw new Error(
@@ -892,18 +855,11 @@ export async function extractAgendaItemsFromNotes(
 Your previous reply was not valid JSON matching the required shape. Return JSON only, with no prose and no code fences:
 { "items": ["..."] }`;
     try {
-      const retry = useApi
-        ? await anthropicTriageJson(retryPrompt, AGENDA_EXTRACT_SYSTEM, {
-            signal,
-            maxTokens: 1024,
-            timeoutMs: 30_000,
-            label: 'agenda-extract-retry',
-          })
-        : await chat(retryPrompt, {
-            systemPrompt: AGENDA_EXTRACT_SYSTEM,
-            model: 'claude-sonnet-4-6',
-            signal,
-          });
+      const retry = await chat(retryPrompt, {
+        systemPrompt: AGENDA_EXTRACT_SYSTEM,
+        model: 'claude-sonnet-4-6',
+        signal,
+      });
       parsed = parseExtractResponse(retry);
     } catch (err) {
       if (err instanceof Error && err.message === 'Aborted') throw err;

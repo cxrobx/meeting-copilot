@@ -1,10 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { isOpenAiApiAvailable, openaiTriageJson } from '../api/openai.js';
-import { isAnthropicApiAvailable, anthropicTriageJson } from '../api/anthropic.js';
+import { claudeTriage } from '../claude-cli.js';
 import {
   COACH_SYSTEM,
-  COACH_SCHEMA,
   buildCoachPrompt,
   type CoachSuggestionResult,
   type CoachKind,
@@ -105,11 +103,6 @@ export class CoachMonitor extends EventEmitter {
     this.sessionTitle = options.sessionTitle ?? '';
     this.attendees = options.attendees ?? '';
     this.lastEvalWordCount = this.wordCountProvider();
-
-    if (!isOpenAiApiAvailable() && !isAnthropicApiAvailable()) {
-      this.emit('error', 'coach needs OPENAI_API_KEY or ANTHROPIC_API_KEY');
-      return;
-    }
 
     this.running = true;
     this.timer = setInterval(() => {
@@ -225,13 +218,12 @@ export class CoachMonitor extends EventEmitter {
     });
 
     this.evalsRun++;
-    const raw = isOpenAiApiAvailable()
-      ? await openaiTriageJson(prompt, COACH_SYSTEM, COACH_SCHEMA, { signal, label: 'coach' })
-      : await anthropicTriageJson(
-          `${prompt}\n\nRespond with JSON: {"hasSuggestion", "kind" ("mention"|"ask"|"address"), "priority" (1-5), "headline", "phrasing", "why", "triggerQuote"}`,
-          COACH_SYSTEM,
-          { signal, label: 'coach' },
-        );
+    // CLI-only (subscription, no paid API): Gemini → Haiku → Codex chain.
+    const raw = await claudeTriage(
+      `${prompt}\n\nRespond with JSON only, no prose or code fences: {"hasSuggestion" (bool), "kind" ("mention"|"ask"|"address"), "priority" (1-5 integer), "headline", "phrasing", "why", "triggerQuote"}`,
+      COACH_SYSTEM,
+      signal,
+    );
     if (gen !== this.generation) return;
 
     let result: CoachSuggestionResult;

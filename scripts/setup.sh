@@ -119,6 +119,27 @@ if [ ! -f "$VAD_MODEL" ]; then
     echo "  Downloaded: $VAD_MODEL"
 fi
 
+# ── Parakeet (default transcription backend) ─────────────────────────────────
+# Parakeet-TDT (via parakeet-mlx) is the default backend — best local accuracy
+# on meeting speech, fully on-device. It runs via `uv` (PEP-723 inline deps),
+# so the only prerequisite is uv + a one-time model pull. whisper stays as the
+# automatic fallback if uv is missing.
+echo ""
+echo "[6/6] Setting up Parakeet (default transcription backend)..."
+if command -v uv >/dev/null 2>&1; then
+    echo "  uv found: $(command -v uv)"
+    echo "  Pre-pulling the Parakeet model (parakeet-tdt-0.6b-v3, ~2.3GB) so the first meeting is instant..."
+    if uvx --from parakeet-mlx python -c "from parakeet_mlx import from_pretrained; from_pretrained('mlx-community/parakeet-tdt-0.6b-v3'); print('ok')" >/dev/null 2>&1; then
+        echo "  Parakeet model ready."
+    else
+        echo "  WARNING: Parakeet model pre-pull failed — it will download on first launch instead."
+    fi
+else
+    echo "  WARNING: 'uv' is not installed — Parakeet (the default backend) requires it."
+    echo "           Install it:  curl -LsSf https://astral.sh/uv/install.sh | sh"
+    echo "           Until then, transcription automatically falls back to whisper (ggml-base.en)."
+fi
+
 echo ""
 echo "=== Setup Complete ==="
 echo ""
@@ -128,6 +149,7 @@ echo "  2. Start the server:     ./scripts/start.sh"
 echo "  3. Build the app:        cd app/MeetingCopilot && swift build"
 echo ""
 echo "Prerequisites:"
-echo "  - whisper-server (whisper.cpp) must be installed separately"
+echo "  - uv (for Parakeet, the default transcription backend): https://astral.sh/uv"
+echo "  - whisper-server (whisper.cpp) for the fallback backend"
 echo "  - Grant Screen Recording permission to your terminal (System Settings > Privacy)"
 echo "  - Grant Microphone permission when prompted"

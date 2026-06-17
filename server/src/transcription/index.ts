@@ -4,6 +4,7 @@ import type { TranscriptSegment, TranscriptionProvider } from './types.js';
 import { WhisperProvider } from './whisper.js';
 import { DeepgramProvider } from './deepgram.js';
 import { CHUNK_DURATION_SECONDS } from '../audio/chunkConfig.js';
+import { paidApiDisabled } from '../api/killswitch.js';
 
 interface QueueItem {
   wavBuffer: Buffer;
@@ -74,9 +75,36 @@ export function isLikelyHallucination(text: string): boolean {
  *
  * Set `TRANSCRIPTION_PROVIDER=deepgram` to use Deepgram (requires DEEPGRAM_API_KEY).
  * Defaults to whisper-server.
+ *
+ * Cost-safe override: when `COPILOT_DISABLE_PAID_API` is set, force local
+ * whisper even if Deepgram was requested. Deepgram is a metered API (it bills
+ * per chunk AND once at startup via prewarm()), and the kill switch promises
+ * zero paid spend — so it must cover transcription, not just the LLM gates.
  */
 function createProvider(): TranscriptionProvider {
-  const selection = process.env.TRANSCRIPTION_PROVIDER?.toLowerCase();
+  // Parakeet is the DEFAULT backend (best local accuracy on meeting speech).
+  // The launcher (start.sh / ProcessSupervisor) starts the matching backend
+  // and pins TRANSCRIPTION_PROVIDER to whatever it actually launched, so if it
+  // had to fall back to whisper (no `uv` / sidecar failed) this resolves to
+  // whisper and stays correct.
+  const selection = (process.env.TRANSCRIPTION_PROVIDER ?? 'parakeet').toLowerCase();
+  // Parakeet (NVIDIA Parakeet-TDT via parakeet-mlx) runs through a local
+  // sidecar that speaks the SAME /inference contract as whisper-server, so we
+  // reuse WhisperProvider pointed at the sidecar's port. Fully local + free,
+  // so the paid-API kill switch does not affect it.
+  if (selection === 'parakeet') {
+    const url =
+      process.env.PARAKEET_URL ??
+      `http://127.0.0.1:${process.env.PARAKEET_PORT ?? '8077'}`;
+    console.log(`[Transcription] Using Parakeet sidecar at ${url}`);
+    return new WhisperProvider(url);
+  }
+  if (selection === 'deepgram' && paidApiDisabled()) {
+    console.warn(
+      '[Transcription] COPILOT_DISABLE_PAID_API set — ignoring TRANSCRIPTION_PROVIDER=deepgram and using local whisper (no Deepgram billing).',
+    );
+    return new WhisperProvider();
+  }
   if (selection === 'deepgram') {
     return new DeepgramProvider();
   }

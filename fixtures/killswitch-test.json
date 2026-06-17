@@ -1,0 +1,20 @@
+{
+  "sessionId": "killswitch-test",
+  "recordedAt": "2026-06-16T00:00:00Z",
+  "segments": [
+    { "text": "Okay so let's kick this off.", "source": "meeting", "label": "[Meeting]", "timestamp": 1000, "duration": 4, "wordCount": 6 },
+    { "text": "Sounds good.", "source": "mic", "label": "[You]", "timestamp": 2500, "duration": 3, "wordCount": 2 },
+    { "text": "We were thinking about the email tracking feature for the next release.", "source": "meeting", "label": "[Meeting]", "timestamp": 4000, "duration": 4, "wordCount": 12 },
+    { "text": "Maybe it's like an", "source": "meeting", "label": "[Meeting]", "timestamp": 5500, "duration": 3, "wordCount": 4 },
+    { "text": "email tracking situation where we log opens and clicks per recipient.", "source": "meeting", "label": "[Meeting]", "timestamp": 7000, "duration": 4, "wordCount": 11 },
+    { "text": "Right, so the real question is which email provider we use.", "source": "mic", "label": "[You]", "timestamp": 9000, "duration": 4, "wordCount": 11 },
+    { "text": "What deliverability are we actually getting with our current setup?", "source": "meeting", "label": "[Meeting]", "timestamp": 11000, "duration": 4, "wordCount": 10 },
+    { "text": "Postmark claims ninety nine percent deliverability but I'm not totally sure that's right.", "source": "meeting", "label": "[Meeting]", "timestamp": 13000, "duration": 5, "wordCount": 13 },
+    { "text": "Can you pull the actual numbers on Postmark versus SendGrid for transactional email?", "source": "mic", "label": "[You]", "timestamp": 15500, "duration": 5, "wordCount": 13 },
+    { "text": "And so.", "source": "meeting", "label": "[Meeting]", "timestamp": 17000, "duration": 2, "wordCount": 2 },
+    { "text": "we should decide on the provider by Friday so engineering can start.", "source": "meeting", "label": "[Meeting]", "timestamp": 18500, "duration": 4, "wordCount": 11 },
+    { "text": "Let's go with Postmark for the MVP and revisit later.", "source": "mic", "label": "[You]", "timestamp": 20500, "duration": 4, "wordCount": 10 },
+    { "text": "Great, let's lock that in.", "source": "meeting", "label": "[Meeting]", "timestamp": 22000, "duration": 3, "wordCount": 5 },
+    { "text": "I'll write up the integration plan and share it tomorrow.", "source": "mic", "label": "[You]", "timestamp": 23500, "duration": 4, "wordCount": 10 }
+  ]
+}

@@ -16,7 +16,9 @@ import { WebSocketServer, WebSocket } from 'ws';
 import dotenv from 'dotenv';
 
 import { TranscriptionService } from './transcription/index.js';
+import type { TranscriptSegment } from './transcription/types.js';
 import { TranscriptDedup } from './transcription/dedup.js';
+import { TranscriptStitcher } from './transcription/stitch.js';
 import { IntelligenceEngine } from './intelligence/index.js';
 import { AgendaTracker, type AgendaStatus } from './intelligence/agenda.js';
 import { FactCheckMonitor, type FactFlag } from './intelligence/factcheck.js';
@@ -28,6 +30,7 @@ import { SummaryWorker } from './workers/summary.js';
 import { MockupWorker } from './workers/mockup.js';
 import { CodeGenWorker } from './workers/codegen.js';
 import { AnalysisWorker } from './workers/analysis.js';
+import { ReviewWorker } from './workers/review.js';
 import { SessionStore } from './session/store.js';
 import { EventLogger } from './session/events.js';
 import { DebugHandler } from './debug/index.js';
@@ -42,6 +45,7 @@ import type { ContextItemConfig } from './context/index.js';
 import type { ActionSuggestion, ActionLifecycle } from './workers/types.js';
 import { isAnthropicApiAvailable } from './api/anthropic.js';
 import { isOpenAiApiAvailable } from './api/openai.js';
+import { paidApiDisabled } from './api/killswitch.js';
 
 // Load environment — prefer ~/.meeting-copilot/.env so a packaged .app
 // user has a stable, user-writable location for API keys that survives
@@ -109,6 +113,7 @@ type OutboundMessage =
         sequence?: number;
         duration: number; // @deprecated — alias of audioDurationSec
         wordCount: number;
+        replace?: boolean; // true → update the open segment in place (stitcher)
       };
     }
   | {
@@ -183,6 +188,7 @@ let whisperAvailable: boolean | null = null;
 
 const transcription = new TranscriptionService();
 const transcriptDedup = new TranscriptDedup();
+const transcriptStitcher = new TranscriptStitcher();
 const intelligence = new IntelligenceEngine();
 const agendaTracker = new AgendaTracker();
 const registry = new WorkerRegistry();
@@ -328,6 +334,7 @@ registry.register(new SummaryWorker());
 registry.register(new MockupWorker());
 registry.register(new CodeGenWorker());
 registry.register(new AnalysisWorker());
+registry.register(new ReviewWorker());
 
 // ─── Express App ───────────────────────────────────────────────────────────
 
@@ -496,46 +503,12 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
             segment.wordCount = dedupedText.split(/\s+/).filter(Boolean).length;
           }
 
-          sessionStore.addTranscript(segment);
-          intelligence.addTranscript(segment);
-          // Event-driven monitor triggers: claim-shaped segments fire an early
-          // fact-check, moment-shaped ones an early coach eval. No-ops when
-          // the monitors are toggled off.
-          if (factCheck.isRunning()) factCheck.noteSegment(segment.text);
-          if (coach.isRunning()) coach.noteSegment(segment.text, segment.source);
-          debug.recordTranscriptWords(segment.wordCount);
-          debug.recordTranscriptSegment(segment);
-
-          eventLogger?.log('transcript.chunk', {
-            segmentId: segment.id,
-            source: segment.source,
-            wordCount: segment.wordCount,
-            audioDurationSec: segment.audioDurationSec,
-            transcriptionLatencyMs: segment.transcriptionLatencyMs,
-            sequence: segment.sequence,
-          });
-
-          // Broadcast to Swift (dates as ISO-8601 for Swift Codable).
-          // `duration` kept during v2 rollout for backward compat.
-          broadcast({
-            type: 'transcript.update',
-            segment: {
-              id: segment.id,
-              text: segment.text,
-              source: segment.source,
-              label: segment.label,
-              timestamp: new Date(segment.timestamp).toISOString(),
-              audioDurationSec: segment.audioDurationSec,
-              transcriptionLatencyMs: segment.transcriptionLatencyMs,
-              captureStartedAt: segment.captureStartedAt,
-              captureEndedAt: segment.captureEndedAt,
-              sequence: segment.sequence,
-              duration: segment.audioDurationSec,
-              wordCount: segment.wordCount,
-            },
-          });
-
-          appendTranscript(segment);
+          // Phase: sentence-stitching. Feed the deduped fragment to the
+          // stitcher, which grows a per-source open segment and emits live
+          // updates (broadcast only) until the sentence closes — at which
+          // point the cohesive segment is persisted, fed to intelligence, and
+          // appended to the shared JSONL. See transcriptStitcher.on('segment').
+          transcriptStitcher.push(segment);
         }
       } catch (error) {
         console.error(
@@ -576,6 +549,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       debug.resetSessionMetrics();
       transcription.resetSessionMetrics();
       transcriptDedup.reset();
+      transcriptStitcher.reset();
 
       // Seed whisper's initial_prompt with attendees + topics so proper
       // nouns (names, project names, keywords) transcribe accurately from
@@ -766,6 +740,9 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       } catch {
         /* non-critical */
       }
+      // Close any open stitched sentences so the final transcript (read below
+      // for the summary + review) holds complete, cohesive segments.
+      transcriptStitcher.flushAll();
       transcription.clearSessionPrompt();
 
       // Stop rolling summary
@@ -832,7 +809,68 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         console.error('[Session] Failed to trigger auto-summary:', error instanceof Error ? error.message : String(error));
       }
 
-      // Let workers finish (includes auto-summary if triggered)
+      // Auto-generate a post-meeting self-review (how the USER performed) +
+      // cross-meeting trends. Runs in the same onMeetingEnd grace window as the
+      // summary; if a long transcript exceeds the window it fails → Retry card.
+      try {
+        const transcriptRecords = sessionStore.getTranscript();
+        if (transcriptRecords.length > 0) {
+          const fullTranscript = transcriptRecords
+            .map((r) => `${r.label} ${r.text}`)
+            .join('\n');
+          const session = sessionStore.getSession();
+          let micWords = 0;
+          let meetingWords = 0;
+          for (const r of transcriptRecords) {
+            if (r.source === 'mic') micWords += r.wordCount || 0;
+            else meetingWords += r.wordCount || 0;
+          }
+          const agendaSummary =
+            lastAgendaStatus && lastAgendaStatus.items.length > 0
+              ? lastAgendaStatus.items.map((i) => `[${i.state}] ${i.text}`).join('\n') +
+                (lastAgendaStatus.missing.length > 0
+                  ? `\nPossibly missing: ${lastAgendaStatus.missing.join('; ')}`
+                  : '')
+              : '';
+          const reviewAction = registry.suggest({
+            type: 'review',
+            title: `Self-Review: ${session?.title || 'Untitled'}`,
+            description: 'Post-meeting self-review — how you did, with cross-meeting trends',
+            triggerQuote: fullTranscript.slice(-200),
+            estimatedDurationSec: 30,
+            params: {
+              transcript: fullTranscript,
+              title: session?.title,
+              sessionId: sessionStore.id,
+              micWords,
+              meetingWords,
+              agendaSummary,
+              goals: meetingGoals,
+              factFlags: sessionFactFlags
+                .filter((f) => f.speaker === 'you')
+                .map((f) => ({ claim: f.claim, verdict: f.verdict, correction: f.correction })),
+            },
+          });
+          if (reviewAction) {
+            sessionStore.addAction({
+              id: reviewAction.id,
+              type: reviewAction.type,
+              title: reviewAction.title,
+              description: reviewAction.description,
+              triggerQuote: reviewAction.triggerQuote,
+              state: reviewAction.state,
+              params: reviewAction.params,
+              createdAt: reviewAction.createdAt,
+            });
+            registry.approve(reviewAction.id);
+            debugLog('[Session] Auto-review triggered');
+          }
+        }
+      } catch (error) {
+        console.error('[Session] Failed to trigger auto-review:', error instanceof Error ? error.message : String(error));
+      }
+
+      // Let workers finish (includes auto-summary + auto-review if triggered)
       await registry.onMeetingEnd();
 
       // Remove shared presence
@@ -941,6 +979,18 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
             case 'analysis':
               return {
                 topic: message.prompt || 'Analyze current discussion',
+                context: window,
+              };
+            case 'mockup':
+              // Mockup worker requires `description`; the prompt is that.
+              return {
+                description: message.prompt || 'UI mockup from the current discussion',
+                context: window,
+              };
+            case 'codegen':
+              // CodeGen worker requires `task`.
+              return {
+                task: message.prompt || 'Code from the current discussion',
                 context: window,
               };
             default:
@@ -1132,6 +1182,59 @@ registry.on('action.completed', (action: ActionLifecycle) => {
   });
 });
 
+// ─── Transcript Stitcher → persistence + broadcast ─────────────────────────
+// The stitcher grows a per-source open segment and emits it on every change.
+// Every emit broadcasts a transcript.update with replace:true (so the UI
+// replaces the open line in place); only CLOSED (cohesive) segments are
+// persisted to SQLite, fed to intelligence, and appended to the shared JSONL.
+transcriptStitcher.on(
+  'segment',
+  ({ segment, final }: { segment: TranscriptSegment; final: boolean }) => {
+    if (!sessionActive || !sessionStore) return;
+
+    if (final) {
+      sessionStore.addTranscript(segment);
+      intelligence.addTranscript(segment);
+      // Event-driven monitor triggers fire on the cleaned, cohesive segment.
+      if (factCheck.isRunning()) factCheck.noteSegment(segment.text);
+      if (coach.isRunning()) coach.noteSegment(segment.text, segment.source);
+      debug.recordTranscriptWords(segment.wordCount);
+      debug.recordTranscriptSegment(segment);
+      eventLogger?.log('transcript.segment', {
+        segmentId: segment.id,
+        source: segment.source,
+        wordCount: segment.wordCount,
+        audioDurationSec: segment.audioDurationSec,
+        transcriptionLatencyMs: segment.transcriptionLatencyMs,
+        sequence: segment.sequence,
+      });
+      appendTranscript(segment);
+    }
+
+    // Broadcast to all clients (dates as ISO-8601 for Swift Codable).
+    // `duration` kept during v2 rollout for backward compat; `replace` tells
+    // the dashboard to update the existing line rather than insert a new one.
+    broadcast({
+      type: 'transcript.update',
+      segment: {
+        id: segment.id,
+        text: segment.text,
+        source: segment.source,
+        label: segment.label,
+        timestamp: new Date(segment.timestamp).toISOString(),
+        audioDurationSec: segment.audioDurationSec,
+        transcriptionLatencyMs: segment.transcriptionLatencyMs,
+        captureStartedAt: segment.captureStartedAt,
+        captureEndedAt: segment.captureEndedAt,
+        sequence: segment.sequence,
+        duration: segment.audioDurationSec,
+        wordCount: segment.wordCount,
+        replace: true,
+      },
+    });
+  },
+);
+
 // ─── Intelligence Events ───────────────────────────────────────────────────
 
 intelligence.on('intelligence.eval', (data) => {
@@ -1195,14 +1298,17 @@ async function start(): Promise<void> {
     }
   }
 
-  // Report which LLM providers are wired up for each realtime path so
-  // first-run users can tell whether they're on the fast API path or the
-  // CLI fallback. Keys missing is not an error — CLI chain still works.
+  // All realtime intelligence (triage, suggestions, agenda, coach, fact-check)
+  // and every worker now run on the headless CLIs (the subscription). The
+  // OpenAI/Anthropic keys power ONLY the ⚡ Fast button and highlight-to-ask.
   const openaiOk = isOpenAiApiAvailable();
   const anthropicOk = isAnthropicApiAvailable();
-  debugLog(`[LLM] triage=${openaiOk ? 'openai:gpt-5.4-mini' : 'cli:claudeTriage'} suggest=${anthropicOk ? 'anthropic:sonnet-4-6(+cache)' : 'cli:claudeSuggest'} fast-research=${openaiOk ? 'openai:gpt-5.4-mini+web_search' : 'cli:haiku+WebSearch'}`);
-  if (!openaiOk) debugLog('[LLM] OPENAI_API_KEY not set — triage and Fast Research fall back to CLI (slower)');
-  if (!anthropicOk) debugLog('[LLM] ANTHROPIC_API_KEY not set — Sonnet suggestions fall back to CLI (slower, no cache)');
+  if (paidApiDisabled()) {
+    debugLog('[LLM] COPILOT_DISABLE_PAID_API set — ALL inference forced to the CLIs. Zero OpenAI/Anthropic spend this run (Fast + highlight-to-ask fall back to CLI).');
+  } else {
+    debugLog('[LLM] triage/suggest/agenda/coach/factcheck=cli (subscription) · workers=cli');
+    debugLog(`[LLM] Fast button=${openaiOk ? 'openai:gpt-5.4-mini+web_search' : 'cli:haiku+WebSearch (no OPENAI_API_KEY)'} · highlight-to-ask=${openaiOk ? 'openai' : anthropicOk ? 'anthropic' : 'cli'}`);
+  }
 
   // Start listening on Unix domain socket
   server.listen(SOCKET_PATH, () => {

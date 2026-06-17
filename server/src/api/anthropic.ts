@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { paidApiDisabled } from './killswitch.js';
 
 const HAIKU_MODEL = 'claude-haiku-4-5-20251001';
 const SONNET_MODEL = 'claude-sonnet-4-6';
@@ -20,6 +21,7 @@ function getClient(): Anthropic {
 }
 
 export function isAnthropicApiAvailable(): boolean {
+  if (paidApiDisabled()) return false; // cost-safe test mode — force CLI
   return !!(process.env.ANTHROPIC_API_KEY ?? '').trim();
 }
 

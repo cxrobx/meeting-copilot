@@ -1,18 +1,11 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID, createHash } from 'node:crypto';
-import {
-  isOpenAiApiAvailable,
-  openaiTriageJson,
-  openaiFastResearchStream,
-  type FastResearchSource,
-} from '../api/openai.js';
-import { isAnthropicApiAvailable, anthropicTriageJson } from '../api/anthropic.js';
+import { claudeTriage, claudeSuggest } from '../claude-cli.js';
+import type { FastResearchSource } from '../api/openai.js';
 import {
   FACTCHECK_EXTRACT_SYSTEM,
-  FACTCHECK_EXTRACT_SCHEMA,
   FACTCHECK_VERIFY_SYSTEM,
   FACTCHECK_KNOWLEDGE_SYSTEM,
-  FACTCHECK_KNOWLEDGE_SCHEMA,
   buildFactcheckExtractPrompt,
   buildFactcheckVerifyPrompt,
   buildFactcheckKnowledgePrompt,
@@ -113,11 +106,6 @@ export class FactCheckMonitor extends EventEmitter {
     this.sessionTitle = options.sessionTitle ?? '';
     this.lastCheckWordCount = this.wordCountProvider();
 
-    if (!isOpenAiApiAvailable() && !isAnthropicApiAvailable()) {
-      this.emit('error', 'fact-check needs OPENAI_API_KEY or ANTHROPIC_API_KEY');
-      return;
-    }
-
     this.running = true;
     this.timer = setInterval(() => {
       this.scheduleCheck('interval').catch(() => {/* surfaced via error event */});
@@ -209,15 +197,14 @@ export class FactCheckMonitor extends EventEmitter {
     this.lastRunAt = Date.now();
 
     // Stage 1: extract claims
+    // CLI-only (subscription, no paid API): Gemini → Haiku → Codex chain.
     this.extractionsRun++;
     const extractPrompt = buildFactcheckExtractPrompt(window, this.checkedClaimTexts.slice(-15));
-    const raw = isOpenAiApiAvailable()
-      ? await openaiTriageJson(extractPrompt, FACTCHECK_EXTRACT_SYSTEM, FACTCHECK_EXTRACT_SCHEMA, { signal, label: 'factcheck-extract' })
-      : await anthropicTriageJson(
-          `${extractPrompt}\n\nRespond with JSON: {"claims": [{"claim", "speaker" ("you"|"meeting"), "quote", "checkWorthiness" (0-1)}]}`,
-          FACTCHECK_EXTRACT_SYSTEM,
-          { signal, label: 'factcheck-extract' },
-        );
+    const raw = await claudeTriage(
+      `${extractPrompt}\n\nRespond with JSON only, no prose or code fences: {"claims": [{"claim", "speaker" ("you"|"meeting"), "quote", "checkWorthiness" (0-1)}]}`,
+      FACTCHECK_EXTRACT_SYSTEM,
+      signal,
+    );
     if (gen !== this.generation) return;
 
     let extraction: ClaimExtractionResult;
@@ -249,13 +236,11 @@ export class FactCheckMonitor extends EventEmitter {
       const knowledgePrompt = buildFactcheckKnowledgePrompt(candidate.claim, candidate.quote);
       let assessment: KnowledgeAssessment;
       try {
-        const raw2 = isOpenAiApiAvailable()
-          ? await openaiTriageJson(knowledgePrompt, FACTCHECK_KNOWLEDGE_SYSTEM, FACTCHECK_KNOWLEDGE_SCHEMA, { signal, label: 'factcheck-knowledge' })
-          : await anthropicTriageJson(
-              `${knowledgePrompt}\n\nRespond with JSON: {"assessment" ("correct"|"suspect_incorrect"|"uncertain"), "timeSensitive" (bool), "confidence" (0-1), "correction", "explanation"}`,
-              FACTCHECK_KNOWLEDGE_SYSTEM,
-              { signal, label: 'factcheck-knowledge' },
-            );
+        const raw2 = await claudeTriage(
+          `${knowledgePrompt}\n\nRespond with JSON only, no prose or code fences: {"assessment" ("correct"|"suspect_incorrect"|"uncertain"), "timeSensitive" (bool), "confidence" (0-1), "correction", "explanation"}`,
+          FACTCHECK_KNOWLEDGE_SYSTEM,
+          signal,
+        );
         assessment = JSON.parse(extractJson(raw2)) as KnowledgeAssessment;
       } catch (err) {
         if (gen === this.generation) {
@@ -272,28 +257,7 @@ export class FactCheckMonitor extends EventEmitter {
       }
 
       // ── Tier 2: web verification for suspect / uncertain / time-sensitive ──
-      if (!isOpenAiApiAvailable()) {
-        // No web search available: flag only confident knowledge-tier suspicions.
-        this.emit('eval', { verified: candidate.claim.slice(0, 80), tier: 'knowledge', verdict: assessment.assessment, confidence: assessment.confidence, trigger });
-        if (assessment.assessment === 'suspect_incorrect' && assessment.confidence >= MIN_FLAG_CONFIDENCE) {
-          this.flagsEmitted++;
-          this.emit('flag', {
-            id: randomUUID(),
-            claim: candidate.claim,
-            speaker: candidate.speaker,
-            quote: candidate.quote,
-            verdict: 'likely_incorrect',
-            confidence: assessment.confidence,
-            correction: assessment.correction ?? '',
-            explanation: assessment.explanation ?? '',
-            sources: [],
-            webSearched: false,
-            checkedAt: Date.now(),
-          } satisfies FactFlag);
-        }
-        continue;
-      }
-
+      // CLI-only (subscription, no paid API): Sonnet with WebSearch/WebFetch.
       if (!this.takeVerificationSlot()) {
         this.emit('eval', { skipped: 'verification-budget', trigger });
         return;
@@ -304,14 +268,15 @@ export class FactCheckMonitor extends EventEmitter {
       let verdictRaw: string;
       let sources: FastResearchSource[] = [];
       try {
-        const res = await openaiFastResearchStream({
-          systemPrompt: FACTCHECK_VERIFY_SYSTEM,
-          userContent: verifyPrompt,
+        verdictRaw = await claudeSuggest(
+          verifyPrompt,
+          FACTCHECK_VERIFY_SYSTEM,
           signal,
-          label: 'factcheck-verify',
-        });
-        verdictRaw = res.text;
-        sources = res.sources;
+          ['WebSearch', 'WebFetch'],
+        );
+        // claudeSuggest returns prose+JSON, not structured citations — pull
+        // any URLs the model surfaced as best-effort source links.
+        sources = extractSources(verdictRaw);
       } catch (err) {
         if (gen === this.generation) {
           this.emit('eval', { verifyFailed: candidate.claim.slice(0, 80), error: err instanceof Error ? err.message : String(err) });
@@ -371,4 +336,26 @@ function extractJson(text: string): string {
   const end = text.lastIndexOf('}');
   if (start === -1 || end === -1 || end <= start) return text;
   return text.slice(start, end + 1);
+}
+
+const URL_RE = /https?:\/\/[^\s)\]}"'<>]+/g;
+
+/**
+ * Best-effort source extraction: the CLI verify path returns prose+JSON, not
+ * structured citations, so we scrape any URLs the model surfaced. Deduped,
+ * trailing punctuation stripped, capped at 5.
+ */
+function extractSources(text: string): FastResearchSource[] {
+  const seen = new Set<string>();
+  const out: FastResearchSource[] = [];
+  URL_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = URL_RE.exec(text)) !== null) {
+    const url = m[0].replace(/[.,;:]+$/, '');
+    if (seen.has(url)) continue;
+    seen.add(url);
+    out.push({ url, title: url });
+    if (out.length >= 5) break;
+  }
+  return out;
 }

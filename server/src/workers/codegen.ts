@@ -18,7 +18,8 @@ export class CodeGenWorker implements Worker {
       write: ['/tmp/meeting-copilot/**'],
     },
     subprocess: true,
-    maxDurationMs: 300_000,
+    // Generous safety cap (~15 min): jobs run until done or the user cancels.
+    maxDurationMs: 900_000,
     maxMemoryMB: 300,
   };
 

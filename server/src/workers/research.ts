@@ -7,7 +7,8 @@ export class ResearchWorker implements Worker {
     network: 'web-search',
     filesystem: { read: [], write: [] },
     subprocess: false,
-    maxDurationMs: 90_000,
+    // Generous safety cap (~15 min): jobs run until done or the user cancels.
+    maxDurationMs: 900_000,
     maxMemoryMB: 100,
   };
 

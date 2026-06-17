@@ -11,7 +11,7 @@ export interface WorkerResult {
   data: any;
   summary: string;
   artifacts?: Array<{
-    type: 'text' | 'markdown' | 'image' | 'code';
+    type: 'text' | 'markdown' | 'image' | 'code' | 'html';
     content: string;
     title?: string;
   }>;
@@ -28,7 +28,7 @@ export interface Worker {
 }
 
 export interface ActionSuggestion {
-  type: 'research' | 'fast-research' | 'summary' | 'mockup' | 'codegen' | 'analysis';
+  type: 'research' | 'fast-research' | 'summary' | 'mockup' | 'codegen' | 'analysis' | 'review';
   title: string;
   description: string;
   triggerQuote: string;

@@ -19,6 +19,13 @@ cleanup() {
         wait "$WHISPER_PID" 2>/dev/null || true
     fi
 
+    # Kill Parakeet sidecar if running
+    if [ -n "${PARAKEET_PID:-}" ] && kill -0 "$PARAKEET_PID" 2>/dev/null; then
+        echo "  Stopping Parakeet sidecar (PID $PARAKEET_PID)..."
+        kill "$PARAKEET_PID" 2>/dev/null || true
+        wait "$PARAKEET_PID" 2>/dev/null || true
+    fi
+
     # Kill Node server if running
     if [ -n "${NODE_PID:-}" ] && kill -0 "$NODE_PID" 2>/dev/null; then
         echo "  Stopping Node server (PID $NODE_PID)..."
@@ -39,11 +46,64 @@ if [ -e "$SOCKET_PATH" ]; then
     rm -f "$SOCKET_PATH"
 fi
 
-# Start whisper-server if available
+# ── Transcription backend selection ──────────────────────────────────────────
+# DEFAULT is Parakeet (NVIDIA Parakeet-TDT via parakeet-mlx; Apple Silicon,
+# fully local, free, best meeting accuracy). It runs as a sidecar that speaks
+# the same /inference contract as whisper-server, and the Node server points
+# WhisperProvider at it. If `uv` or the sidecar script is missing, we fall back
+# to whisper-server so transcription never hard-breaks. Force a backend with
+# TRANSCRIPTION_PROVIDER=parakeet|whisper|deepgram.
+PROVIDER_LC="$(printf '%s' "${TRANSCRIPTION_PROVIDER:-}" | tr '[:upper:]' '[:lower:]')"
+PARAKEET_PORT="${PARAKEET_PORT:-8077}"
+PARAKEET_SCRIPT="$SCRIPT_DIR/parakeet-server.py"
+WHISPER_PID=""
+PARAKEET_PID=""
+
+parakeet_available() { command -v uv >/dev/null 2>&1 && [ -f "$PARAKEET_SCRIPT" ]; }
+
+# Resolve the default backend when none was forced.
+if [ -z "$PROVIDER_LC" ]; then
+    if parakeet_available; then
+        PROVIDER_LC="parakeet"
+    else
+        PROVIDER_LC="whisper"
+        echo "  (uv / parakeet sidecar not found — defaulting transcription to whisper)"
+    fi
+fi
+
+if [ "$PROVIDER_LC" = "parakeet" ]; then
+    if parakeet_available; then
+        echo "Starting Parakeet sidecar on port $PARAKEET_PORT (model loads on first start)..."
+        uv run "$PARAKEET_SCRIPT" --port "$PARAKEET_PORT" &
+        PARAKEET_PID=$!
+        echo "  Parakeet sidecar PID: $PARAKEET_PID"
+        # Wait for the model to load + the HTTP server to come up before the
+        # Node server starts probing it.
+        for _ in $(seq 1 60); do
+            if curl -s -m1 "http://127.0.0.1:$PARAKEET_PORT/" >/dev/null 2>&1; then break; fi
+            sleep 1
+        done
+        # Pin the Node server to the backend we actually launched.
+        export TRANSCRIPTION_PROVIDER=parakeet
+        export PARAKEET_PORT
+    else
+        echo "  WARNING: Parakeet requested but 'uv' or $PARAKEET_SCRIPT is missing — falling back to whisper."
+        echo "           Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        PROVIDER_LC="whisper"
+    fi
+fi
+
+# Start whisper-server (default fallback, or explicit; skipped when Parakeet ran)
 WHISPER_BIN=$(command -v whisper-server 2>/dev/null || echo "")
 WHISPER_MODEL="$MODELS_DIR/ggml-base.en.bin"
 
-if [ -n "$WHISPER_BIN" ] && [ -f "$WHISPER_MODEL" ]; then
+if [ "$PROVIDER_LC" = "parakeet" ]; then
+    : # Parakeet sidecar already started above
+elif [ "$PROVIDER_LC" = "deepgram" ]; then
+    echo "Using Deepgram cloud transcription (TRANSCRIPTION_PROVIDER=deepgram)."
+    export TRANSCRIPTION_PROVIDER=deepgram
+elif [ -n "$WHISPER_BIN" ] && [ -f "$WHISPER_MODEL" ]; then
+    export TRANSCRIPTION_PROVIDER=whisper
     # VAD is optional at the binary level (older whisper-cpp lacks the flag)
     # but required for the latency/silence-handling story. Detect via --help
     # so older installs don't blow up on an unknown flag.

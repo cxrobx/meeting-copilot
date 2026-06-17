@@ -1,7 +1,78 @@
 import { claudeSuggest } from '../claude-cli.js';
 import type { Worker, WorkerCapabilities, WorkerResult } from './types.js';
 
-const WIREFRAME_DELIMITER = '---WIREFRAME---';
+// Fixed wireframe width. The prompt asks the model to pad every line to this
+// many columns; normalizeWireframe() then enforces it so the box borders line
+// up in a perfect column even when the model drifts a few characters.
+const WIREFRAME_WIDTH = 58;
+
+const ASCII_SYSTEM = `You are a UI wireframe generator. Given a UI description, output a SINGLE ASCII wireframe using box-drawing characters.
+
+Palette:
+  ┌─┐ │ └─┘ ├─┤   box borders and dividers
+  [ Button ]      buttons
+  [____________]  text inputs
+  ☐ Option        checkboxes      ○ Option   radio buttons
+  ≡               menu / hamburger ▓▓▓        image / media placeholder
+
+STRICT FORMATTING RULES:
+- The wireframe is EXACTLY ${WIREFRAME_WIDTH} columns wide. Every single line must be exactly ${WIREFRAME_WIDTH} characters — pad short lines with trailing spaces BEFORE the right border so every right-hand │ lines up in one straight column.
+- Use one outer box; keep all inner content inside it and vertically aligned.
+- Keep it tight: key layout regions and the most important controls only.
+- Output ONLY the wireframe. No title, no prose, no explanation, no markdown code fences.`;
+
+const HTML_SYSTEM = `You are a UI mockup generator. Given a UI description, output ONE self-contained HTML document that visually mocks up the described interface.
+
+RULES:
+- A complete <!DOCTYPE html> document with ALL CSS inline in a single <style> block. No external stylesheets, web fonts, scripts, or remote images.
+- Use neutral system fonts only: font-family: system-ui, -apple-system, "Segoe UI", sans-serif.
+- Square edges only — set border-radius: 0 everywhere.
+- Clean and realistic: light background, clear visual hierarchy, sensible spacing, and plausible placeholder copy drawn from the description. Use CSS blocks/gradients for any image placeholders.
+- No JavaScript whatsoever — a static mockup only.
+- Output ONLY the HTML document. No prose, no explanation, no markdown code fences.`;
+
+/**
+ * Right-pad every line to the max visual width so the wireframe renders as a
+ * clean rectangle and the right-hand box borders line up. For bordered rows
+ * (start and end with a vertical box char), the padding is inserted BEFORE the
+ * trailing border so the right edge aligns rather than trailing off the box.
+ */
+export function normalizeWireframe(raw: string): string {
+  const lines = stripFences(raw)
+    .replace(/\t/g, '  ')
+    .split('\n')
+    .map((l) => l.replace(/\s+$/g, '')); // strip trailing whitespace first
+
+  // Drop leading/trailing blank lines.
+  while (lines.length && lines[0]!.trim() === '') lines.shift();
+  while (lines.length && lines[lines.length - 1]!.trim() === '') lines.pop();
+
+  // Box-drawing chars are single-column in a monospace cell, so code-point
+  // count is the visual width.
+  const width = (s: string): number => Array.from(s).length;
+  const maxW = lines.reduce((m, l) => Math.max(m, width(l)), 0);
+
+  return lines
+    .map((l) => {
+      const w = width(l);
+      if (w >= maxW) return l;
+      const pad = ' '.repeat(maxW - w);
+      // Bordered row → insert padding before the trailing vertical border.
+      if (/^[│|┃]/.test(l) && /[│|┃]$/.test(l)) {
+        return l.slice(0, -1) + pad + l.slice(-1);
+      }
+      return l + pad;
+    })
+    .join('\n');
+}
+
+/** Strip a leading/trailing markdown code fence (```lang ... ```), if present. */
+function stripFences(text: string): string {
+  let t = text.trim();
+  const fence = t.match(/^```[^\n]*\n([\s\S]*?)\n?```$/);
+  if (fence) return fence[1]!.trim();
+  return t;
+}
 
 export class MockupWorker implements Worker {
   public readonly name = 'mockup';
@@ -12,7 +83,9 @@ export class MockupWorker implements Worker {
       write: ['/tmp/meeting-copilot/**'],
     },
     subprocess: true,
-    maxDurationMs: 180_000,
+    // Generous safety cap (~15 min): jobs run until done or the user cancels.
+    // A truly-hung CLI still fails via its own timeout → the card shows Retry.
+    maxDurationMs: 900_000,
     maxMemoryMB: 200,
   };
 
@@ -23,7 +96,7 @@ export class MockupWorker implements Worker {
     const description = params.description as string | undefined;
     const context = params.context as string | undefined;
     const platform = (params.platform as string) ?? 'web';
-    const style = (params.style as string) ?? 'detailed';
+    const emitEarly = params._emitEarly as ((partial: WorkerResult) => void) | undefined;
 
     if (!description) {
       return {
@@ -43,76 +116,87 @@ export class MockupWorker implements Worker {
       };
     }
 
+    const contextSuffix = context ? `\n\nMeeting context:\n${context}` : '';
+
     try {
-      const systemPrompt = `You are a UI/UX designer creating wireframe specifications from meeting discussions. Your output has two parts separated by the exact delimiter "${WIREFRAME_DELIMITER}".
-
-PART 1 (Markdown Specification):
-- Component hierarchy and layout structure
-- Interaction patterns (clicks, hovers, navigation)
-- Data bindings and dynamic content areas
-- Responsive behavior notes
-- Key design decisions
-
-${WIREFRAME_DELIMITER}
-
-PART 2 (ASCII Wireframe):
-Create a visual wireframe using box-drawing characters. Use:
-  ┌─────────┐  for containers/cards
-  │         │  for content areas
-  └─────────┘
-  ├─────────┤  for dividers
-  ┃ ▓▓▓▓▓▓ ┃  for images/media placeholders
-  [ Button ]   for buttons
-  [________]   for input fields
-  ○ Option     for radio buttons
-  ☐ Option     for checkboxes
-  ≡            for menu/hamburger
-
-Platform: ${platform}
-Style: ${style === 'minimal' ? 'Keep the wireframe simple — key layout elements only, no fine details.' : 'Include detailed layout with all UI elements, spacing indicators, and annotations.'}
-
-Important: Output the markdown spec first, then "${WIREFRAME_DELIMITER}" on its own line, then the ASCII wireframe. Do not include any other delimiters or separators.`;
-
-      const userContent = context
-        ? `Design a UI mockup for: ${description}\n\nMeeting context:\n${context}`
-        : `Design a UI mockup for: ${description}`;
-
-      const text = await claudeSuggest(userContent, systemPrompt, signal);
+      // ── Phase A: fast ASCII wireframe (shown immediately) ──
+      const asciiRaw = await claudeSuggest(
+        `Design an ASCII wireframe for: ${description}\nPlatform: ${platform}${contextSuffix}`,
+        ASCII_SYSTEM,
+        signal,
+      );
 
       if (signal.aborted) {
         return {
           success: false,
           data: null,
-          summary: 'Mockup cancelled during execution',
+          summary: 'Mockup cancelled during wireframe',
           error: 'Aborted',
         };
       }
 
-      // Split on delimiter
-      const parts = text.split(WIREFRAME_DELIMITER);
-      const specSection = parts[0]!.trim();
-      const wireframeSection = parts.length > 1 ? parts.slice(1).join(WIREFRAME_DELIMITER).trim() : null;
+      const wireframe = normalizeWireframe(asciiRaw);
+      const asciiArtifact = {
+        type: 'code' as const,
+        content: wireframe,
+        title: `Wireframe: ${description}`,
+      };
 
-      const artifacts: WorkerResult['artifacts'] = [
-        {
-          type: 'markdown',
-          content: specSection,
-          title: `Mockup: ${description}`,
-        },
-      ];
+      // Surface the wireframe right away while the HTML phase runs.
+      emitEarly?.({
+        success: true,
+        data: { description, platform, wireframe },
+        summary: `Wireframe ready for: ${description} — rendering HTML…`,
+        artifacts: [asciiArtifact],
+      });
 
-      if (wireframeSection) {
+      // ── Phase B: styled, self-contained HTML mockup ──
+      let html: string | null = null;
+      let htmlError: string | null = null;
+      try {
+        const htmlRaw = await claudeSuggest(
+          `Build an HTML mockup for: ${description}\nPlatform: ${platform}${contextSuffix}`,
+          HTML_SYSTEM,
+          signal,
+        );
+        if (signal.aborted) {
+          return {
+            success: false,
+            data: null,
+            summary: 'Mockup cancelled during HTML render',
+            error: 'Aborted',
+          };
+        }
+        html = stripFences(htmlRaw);
+      } catch (err) {
+        if (signal.aborted) {
+          return {
+            success: false,
+            data: null,
+            summary: 'Mockup cancelled during HTML render',
+            error: 'Aborted',
+          };
+        }
+        // HTML phase failed but the ASCII already rendered — degrade
+        // gracefully and keep the wireframe rather than failing the card.
+        htmlError = err instanceof Error ? err.message : String(err);
+      }
+
+      const artifacts: WorkerResult['artifacts'] = [asciiArtifact];
+      if (html) {
         artifacts.push({
-          type: 'code',
-          content: wireframeSection,
-          title: `Wireframe: ${description}`,
+          type: 'html',
+          content: html,
+          title: `HTML Mockup: ${description}`,
         });
       }
 
       return {
         success: true,
-        data: { description, platform, style, spec: specSection, wireframe: wireframeSection },
-        summary: `Mockup generated for: ${description}`,
+        data: { description, platform, wireframe, html },
+        summary: html
+          ? `Mockup generated for: ${description}`
+          : `Wireframe generated for: ${description} (HTML render failed: ${htmlError})`,
         artifacts,
       };
     } catch (error) {

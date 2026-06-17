@@ -647,12 +647,21 @@ final class SessionManager {
     private func handleServerMessage(_ message: ServerMessage) {
         switch message {
         case .transcriptUpdate(let segment):
-            transcriptSegments.append(segment)
-            totalWordCount += segment.wordCount
+            // The server's transcript stitcher emits the same stable id
+            // repeatedly as an open sentence grows in place, then once more
+            // when it closes. Replace the existing row instead of appending a
+            // duplicate fragment, adjusting the running word count by the delta.
+            if let idx = transcriptSegments.firstIndex(where: { $0.id == segment.id }) {
+                totalWordCount += segment.wordCount - transcriptSegments[idx].wordCount
+                transcriptSegments[idx] = segment
+            } else {
+                transcriptSegments.append(segment)
+                totalWordCount += segment.wordCount
 
-            // Keep last N segments
-            if transcriptSegments.count > maxTranscriptSegments {
-                transcriptSegments.removeFirst(transcriptSegments.count - maxTranscriptSegments)
+                // Keep last N segments
+                if transcriptSegments.count > maxTranscriptSegments {
+                    transcriptSegments.removeFirst(transcriptSegments.count - maxTranscriptSegments)
+                }
             }
 
         case .actionSuggested(let action):

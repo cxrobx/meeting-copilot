@@ -7,6 +7,7 @@ import type { WorkerRegistry } from '../workers/registry.js';
 import type { ActionLifecycle } from '../workers/types.js';
 import { isOpenAiApiAvailable, openaiFastResearchStream } from '../api/openai.js';
 import { isAnthropicApiAvailable, anthropicTriageJson } from '../api/anthropic.js';
+import { claudeSuggest } from '../claude-cli.js';
 
 // ─── Highlight-to-ask prompts ───────────────────────────────────────────────
 const ASK_SYSTEM: Record<string, string> = {
@@ -263,7 +264,16 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
         });
         send('token', { text: `${text}\n\n_(model knowledge only — no web search without OPENAI_API_KEY)_` });
       } else {
-        send('error', { message: 'No API key configured — set OPENAI_API_KEY or ANTHROPIC_API_KEY in ~/.meeting-copilot/.env' });
+        // No paid API (no keys, or COPILOT_DISABLE_PAID_API cost-safe mode) —
+        // fall back to the CLI subscription with web search so highlight-to-ask
+        // still works for free, just slower (CLI spawn).
+        await claudeSuggest(
+          userContent,
+          systemPrompt,
+          controller.signal,
+          ['WebSearch', 'WebFetch'],
+          { onDelta: (text) => send('token', { text }) },
+        );
       }
     } catch (err) {
       if (!controller.signal.aborted) {
@@ -1198,6 +1208,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .card-type.mockup { background: rgba(177,98,134,0.12); color: var(--gb-mauve); }
   .card-type.codegen { background: rgba(69,133,136,0.12); color: var(--gb-blue); }
   .card-type.analysis { background: rgba(214,93,14,0.12); color: var(--gb-peach); }
+  .card-type.review { background: rgba(104,157,106,0.14); color: var(--gb-aqua, var(--gb-green)); }
   .card-type.failed { background: rgba(204,36,29,0.12); color: var(--gb-red); }
 
   .card-title {
@@ -1254,6 +1265,18 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   .artifact-divider { border-top: 1px solid var(--gb-surface2); margin: 14px 0; padding-top: 10px; }
   .artifact-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gb-overlay2); margin-bottom: 6px; }
+
+  /* ─── Mockup ASCII/HTML toggle ─────────────────────────────── */
+  .mockup-toggle { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  .mockup-toggle .btn { font-size: 11px; padding: 3px 10px; }
+  .mockup-toggle .btn.active { background: var(--gb-blue); color: #fff; }
+  .mockup-pane { margin: 0; }
+  .mockup-frame {
+    width: 100%;
+    height: 440px;
+    border: 1px solid var(--gb-surface2);
+    background: #fff;
+  }
 
   .spinner {
     display: inline-block;
@@ -1850,9 +1873,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
   var micWords = 0;
   var meetingWords = 0;
   var segments = [];
+  // seg id -> { el, wordCount, source } for the stitcher's in-place growth.
+  var segById = new Map();
   var currentFilter = 'all';
   var autoScroll = true;
   var actionCards = new Map();
+  // actionId -> generated HTML mockup string, for Open-in-tab / Download.
+  var mockupHtml = new Map();
   var headingIdCounter = 0;
   var availableProjects = [];
   var availableContextSources = [];
@@ -2548,6 +2575,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     tocEntries.innerHTML = '';
     transcriptFeed.innerHTML = '';
     segments = [];
+    segById.clear();
     totalWords = 0; micWords = 0; meetingWords = 0;
     segCountEl.textContent = '0';
     sessionTimerEl.textContent = '';
@@ -2754,6 +2782,41 @@ const PRESENT_HTML = `<!DOCTYPE html>
   };
 
   window.cancelAction = function(id) { wsSend({ type: 'action.cancel', actionId: id }); };
+
+  // ─── Mockup ASCII/HTML toggle + open/download ──────────────
+  // Escape a full HTML document for use inside an iframe srcdoc="" attribute.
+  function escapeSrcdoc(s) { return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
+
+  window.toggleMockupView = function(id, which, btn) {
+    var card = document.getElementById('action-' + id);
+    if (!card) return;
+    card.querySelectorAll('.mockup-pane').forEach(function(p) {
+      p.style.display = (p.dataset.pane === which) ? '' : 'none';
+    });
+    btn.parentNode.querySelectorAll('button[data-view]').forEach(function(b) { b.classList.remove('active'); });
+    btn.classList.add('active');
+  };
+
+  window.openMockupHtml = function(id) {
+    var html = mockupHtml.get(id);
+    if (!html) return;
+    var url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+    window.open(url, '_blank');
+    setTimeout(function() { URL.revokeObjectURL(url); }, 60000);
+  };
+
+  window.downloadMockupHtml = function(id) {
+    var html = mockupHtml.get(id);
+    if (!html) return;
+    var url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'mockup-' + String(id).slice(0, 8) + '.html';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+  };
 
   // ─── Highlight-to-Ask (transcript selection) ──────────────
   // Highlight transcript text → right-click → Fact check / Explain / Custom
@@ -3013,19 +3076,58 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   // ─── Transcript ───────────────────────────────────────────
   function addSegment(seg) {
-    segments.push(seg);
     var wc = seg.wordCount || (seg.text ? seg.text.split(/\\s+/).filter(Boolean).length : 0);
+    var prior = (seg.id != null && seg.replace) ? segById.get(seg.id) : null;
+
+    if (prior) {
+      // Stitcher in-place growth: the open segment grew/closed under the same
+      // stable id. Adjust the running counts by the word-count delta and
+      // update the rendered line's text rather than inserting a new one.
+      var delta = wc - prior.wordCount;
+      totalWords += delta;
+      if (seg.source === 'mic') micWords += delta;
+      else meetingWords += delta;
+      prior.wordCount = wc;
+      updateStats();
+      updateSegmentEl(prior.el, seg);
+      return;
+    }
+
+    segments.push(seg);
     totalWords += wc;
     if (seg.source === 'mic') micWords += wc;
     else meetingWords += wc;
 
     segCountEl.textContent = segments.length;
     updateStats();
-    renderSegment(seg);
+    var el = renderSegment(seg);
+    if (el && seg.id != null) segById.set(seg.id, { el: el, wordCount: wc, source: seg.source });
+  }
+
+  // Update an already-rendered segment line in place as its text grows.
+  function updateSegmentEl(el, seg) {
+    if (!el) return;
+    el.dataset.text = (seg.text || '').toLowerCase();
+    var textEl = el.querySelector('.seg-text');
+    if (textEl) textEl.textContent = seg.text || '';
+    // Re-evaluate signal tags as the sentence fills in.
+    var top = el.querySelector('.seg-top');
+    if (top) {
+      var existingTags = top.querySelectorAll('.signal-tag');
+      existingTags.forEach(function(t) { t.remove(); });
+      var srcSpan = top.querySelector('.seg-source');
+      detectSignals(seg.text || '').forEach(function(s) {
+        var tag = document.createElement('span');
+        tag.className = 'signal-tag ' + s;
+        tag.textContent = s;
+        if (srcSpan && srcSpan.nextSibling) top.insertBefore(tag, srcSpan.nextSibling);
+        else top.appendChild(tag);
+      });
+    }
   }
 
   function renderSegment(seg) {
-    if (!seg.text || seg.text.trim() === '') return;
+    if (!seg.text || seg.text.trim() === '') return null;
 
     var srcClass = seg.source === 'mic' ? 'mic' : 'meeting';
     var srcLabel = seg.source === 'mic' ? 'You' : 'Meeting';
@@ -3036,6 +3138,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     el.className = 'seg ' + srcClass;
     el.dataset.source = seg.source;
     el.dataset.text = seg.text.toLowerCase();
+    if (seg.id != null) el.dataset.segId = seg.id;
 
     var signalHtml = signals.map(function(s) { return '<span class="signal-tag ' + s + '">' + s + '</span>'; }).join('');
 
@@ -3063,6 +3166,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       transcriptFeed.insertBefore(el, transcriptFeed.firstChild);
       if (autoScroll) transcriptFeed.scrollTop = 0;
     }
+    return el;
   }
 
   window.setFilter = function(filter, btn) {
@@ -3082,6 +3186,51 @@ const PRESENT_HTML = `<!DOCTYPE html>
   };
 
   // ─── Action Card Rendering ────────────────────────────────
+  // Render a result's artifacts as card-body inner HTML (no wrapper div).
+  // Handles markdown / code / text and, for mockups, an ASCII⇄HTML toggle
+  // (ASCII <pre><code> + a sandboxed HTML iframe) plus open/download. When
+  // both a 'code' (ASCII) and 'html' artifact are present they share one
+  // toggle; otherwise artifacts render as a stacked list. Generalizes to any
+  // worker that emits an 'html' artifact (e.g. CodeGen previews later).
+  function renderArtifactsInner(action) {
+    var arts = action.result.artifacts;
+    var asciiArt = null, htmlArt = null;
+    arts.forEach(function(a) {
+      if (a.type === 'code' && !asciiArt) asciiArt = a;
+      if (a.type === 'html' && !htmlArt) htmlArt = a;
+    });
+
+    if (asciiArt && htmlArt) {
+      mockupHtml.set(action.id, htmlArt.content);
+      return '<div class="mockup-toggle">' +
+          '<button class="btn btn-ghost active" data-view onclick="toggleMockupView(\\'' + action.id + '\\',\\'ascii\\',this)">ASCII</button>' +
+          '<button class="btn btn-ghost" data-view onclick="toggleMockupView(\\'' + action.id + '\\',\\'html\\',this)">HTML</button>' +
+          '<button class="btn btn-ghost" onclick="openMockupHtml(\\'' + action.id + '\\')">Open in new tab</button>' +
+          '<button class="btn btn-ghost" onclick="downloadMockupHtml(\\'' + action.id + '\\')">Download .html</button>' +
+        '</div>' +
+        '<div class="mockup-pane" data-pane="ascii"><pre><code>' + escapeHtml(asciiArt.content) + '</code></pre></div>' +
+        '<div class="mockup-pane" data-pane="html" style="display:none"><iframe class="mockup-frame" sandbox="allow-same-origin" srcdoc="' + escapeSrcdoc(htmlArt.content) + '"></iframe></div>';
+    }
+
+    var inner = '';
+    arts.forEach(function(artifact, i) {
+      if (i > 0) inner += '<div class="artifact-divider"></div>';
+      if (artifact.title) inner += '<div class="artifact-label">' + escapeHtml(artifact.title) + '</div>';
+      if (artifact.type === 'markdown') inner += renderMarkdown(artifact.content);
+      else if (artifact.type === 'code') inner += '<pre><code>' + escapeHtml(artifact.content) + '</code></pre>';
+      else if (artifact.type === 'html') {
+        mockupHtml.set(action.id, artifact.content);
+        inner += '<div class="mockup-toggle">' +
+            '<button class="btn btn-ghost" onclick="openMockupHtml(\\'' + action.id + '\\')">Open in new tab</button>' +
+            '<button class="btn btn-ghost" onclick="downloadMockupHtml(\\'' + action.id + '\\')">Download .html</button>' +
+          '</div>' +
+          '<div class="mockup-pane" data-pane="html"><iframe class="mockup-frame" sandbox="allow-same-origin" srcdoc="' + escapeSrcdoc(artifact.content) + '"></iframe></div>';
+      }
+      else inner += '<pre>' + escapeHtml(artifact.content) + '</pre>';
+    });
+    return inner;
+  }
+
   function renderAction(action) {
     var existing = actionCards.get(action.id);
 
@@ -3113,6 +3262,15 @@ const PRESENT_HTML = `<!DOCTYPE html>
     } else if (action.state === 'running') {
       if (isReplay) {
         body = '<div class="card-body"><p style="color:var(--gb-overlay2)">Did not complete during session.</p></div>';
+      } else if (action.result && action.result.artifacts && action.result.artifacts.length > 0) {
+        // Partial result already streamed in (e.g. mockup ASCII before the
+        // HTML phase finishes). Render it as a first-class result with a
+        // "still working" footer so the fast output shows immediately.
+        body = '<div class="card-body">' +
+          renderArtifactsInner(action) +
+          '<div class="streaming-placeholder"><span class="spinner"></span> Rendering HTML\\u2026</div>' +
+          '<div class="card-actions"><button class="btn btn-ghost-red" onclick="cancelAction(\\'' + action.id + '\\')">Cancel</button></div>' +
+        '</div>';
       } else {
         // Streaming-ready running body: placeholder shown until first delta,
         // then the streaming-text div is appended to by the action.stream handler.
@@ -3123,20 +3281,20 @@ const PRESENT_HTML = `<!DOCTYPE html>
         '</div>';
       }
     } else if (action.result && action.result.artifacts && action.result.artifacts.length > 0) {
-      body = '<div class="card-body">';
-      action.result.artifacts.forEach(function(artifact, i) {
-        if (i > 0) body += '<div class="artifact-divider"></div>';
-        if (artifact.title) body += '<div class="artifact-label">' + escapeHtml(artifact.title) + '</div>';
-        if (artifact.type === 'markdown') body += renderMarkdown(artifact.content);
-        else if (artifact.type === 'code') body += '<pre><code>' + escapeHtml(artifact.content) + '</code></pre>';
-        else body += '<pre>' + escapeHtml(artifact.content) + '</pre>';
-      });
-      body += '</div>';
+      body = '<div class="card-body">' + renderArtifactsInner(action) + '</div>';
     } else if (action.result && action.result.summary) {
       body = '<div class="card-body"><p>' + escapeHtml(action.result.summary) + '</p></div>';
     } else if (action.state === 'failed') {
       var errMsg = (action.result && action.result.error) || 'Unknown error';
-      body = '<div class="card-body"><p style="color:var(--gb-red)">' + escapeHtml(errMsg) + '</p></div>';
+      body = '<div class="card-body"><p style="color:var(--gb-red)">' + escapeHtml(errMsg) + '</p>';
+      // Failed/timed-out workers are re-runnable: action.approve resets the
+      // failed action and re-executes it (registry.approve handles the reset).
+      if (!isReplay) {
+        body += '<div class="card-actions">' +
+          '<button class="btn btn-green" onclick="approveAction(\\'' + action.id + '\\')">Retry</button>' +
+        '</div>';
+      }
+      body += '</div>';
     }
 
     card.innerHTML = header + body;
@@ -3505,6 +3663,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
               // Clear any duplicates from WS messages received during fetch
               transcriptFeed.innerHTML = '';
               segments = [];
+              segById.clear();
               totalWords = 0; micWords = 0; meetingWords = 0;
               t.segments.forEach(function(seg) { addSegment(seg); });
               // Segments prepend in live mode, so newest is already at the top.
@@ -3555,6 +3714,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
             sessionStartTime = null;
             totalWords = 0; micWords = 0; meetingWords = 0;
             segments = [];
+            segById.clear();
             transcriptFeed.innerHTML = '';
             segCountEl.textContent = '0';
             clearAgenda();
