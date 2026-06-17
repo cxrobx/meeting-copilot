@@ -86,32 +86,12 @@ export class WorkerRegistry extends EventEmitter {
     this.emit('action.status', action);
   }
 
-  suggest(suggestion: ActionSuggestion): ActionLifecycle | null {
-    // Dedup check 1: exact hash of type + params
-    const dedupKey = createHash('sha256')
-      .update(JSON.stringify({ type: suggestion.type, params: suggestion.params }))
-      .digest('hex');
-
-    if (this.suggestionHashes.has(dedupKey)) {
-      return null; // Duplicate suggestion
-    }
-
-    // Dedup check 2: similar title within same type (fuzzy — catches "Extract key points from Rory" vs "Extract key items from Rory")
-    const titleWords = new Set(suggestion.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 3));
-    for (const existing of this.actions.values()) {
-      if (existing.type !== suggestion.type) continue;
-      if (existing.state === 'cancelled' || existing.state === 'expired') continue;
-      const existingWords = new Set(existing.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 3));
-      // Jaccard similarity on title words
-      let intersection = 0;
-      for (const w of titleWords) { if (existingWords.has(w)) intersection++; }
-      const union = titleWords.size + existingWords.size - intersection;
-      if (union > 0 && intersection / union >= 0.75) {
-        return null; // Similar title already exists
-      }
-    }
-
-    this.suggestionHashes.add(dedupKey);
+  suggest(suggestion: ActionSuggestion, opts?: { force?: boolean }): ActionLifecycle | null {
+    // `force` skips the dedup gate for deliberate user actions (e.g. a
+    // right-click "Revise mock" or card-derived mockup) so an explicit click
+    // never silently vanishes against a near-identical recent card.
+    if (!opts?.force && this.isDuplicate(suggestion)) return null;
+    this.addDedupHash(suggestion);
 
     const action: ActionLifecycle = {
       id: uuidv4(),
@@ -130,18 +110,162 @@ export class WorkerRegistry extends EventEmitter {
 
     this.actions.set(action.id, action);
     this.emit('action.suggested', action);
+    this.startSuggestionTtl(action.id);
+    return action;
+  }
 
+  /** Exact (type+params) or fuzzy (similar title within type) duplicate check. */
+  private isDuplicate(s: { type: string; params: Record<string, any>; title: string }, excludeId?: string): boolean {
+    const dedupKey = createHash('sha256')
+      .update(JSON.stringify({ type: s.type, params: s.params }))
+      .digest('hex');
+    if (this.suggestionHashes.has(dedupKey)) return true;
+
+    const titleWords = new Set(s.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter((w) => w.length > 3));
+    for (const existing of this.actions.values()) {
+      if (existing.id === excludeId) continue;
+      if (existing.type !== s.type) continue;
+      if (existing.state === 'cancelled' || existing.state === 'expired') continue;
+      const existingWords = new Set(existing.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter((w) => w.length > 3));
+      let intersection = 0;
+      for (const w of titleWords) { if (existingWords.has(w)) intersection++; }
+      const union = titleWords.size + existingWords.size - intersection;
+      if (union > 0 && intersection / union >= 0.75) return true;
+    }
+    return false;
+  }
+
+  private addDedupHash(s: { type: string; params: Record<string, any> }): void {
+    const dedupKey = createHash('sha256')
+      .update(JSON.stringify({ type: s.type, params: s.params }))
+      .digest('hex');
+    this.suggestionHashes.add(dedupKey);
+  }
+
+  private startSuggestionTtl(actionId: string): void {
     const timer = setTimeout(() => {
-      this.suggestionTimers.delete(action.id);
-      const current = this.actions.get(action.id);
+      this.suggestionTimers.delete(actionId);
+      const current = this.actions.get(actionId);
       if (!current || current.state !== 'suggested') return;
       current.state = 'expired';
       current.completedAt = Date.now();
       this.emit('action.status', current);
-      this.actions.delete(action.id);
+      this.actions.delete(actionId);
     }, SUGGESTION_TTL_MS);
-    this.suggestionTimers.set(action.id, timer);
+    this.suggestionTimers.set(actionId, timer);
+  }
 
+  // ─── Streaming suggestion lifecycle ────────────────────────────────────────
+  // A suggestion is created EARLY (while its JSON is still generating) so the
+  // user can watch the card form and pre-approve it before it's fully written.
+
+  /** Create a card from the first partial (needs at least type + title). */
+  suggestStreaming(
+    id: string,
+    fields: { type: string; title: string; description?: string; triggerQuote?: string; estimatedDurationSec?: number; params?: Record<string, any> },
+  ): ActionLifecycle {
+    const action: ActionLifecycle = {
+      id,
+      type: fields.type,
+      title: fields.title,
+      description: fields.description ?? '',
+      triggerQuote: fields.triggerQuote ?? '',
+      estimatedDurationSec: fields.estimatedDurationSec ?? 0,
+      params: fields.params ?? {},
+      state: 'suggested',
+      streaming: true,
+      paramsReady: false,
+      createdAt: Date.now(),
+      timeoutMs: this.getTimeoutForType(fields.type),
+      retryCount: 0,
+      cancelController: new AbortController(),
+    };
+    this.actions.set(id, action);
+    this.emit('action.suggested', action);
+    return action;
+  }
+
+  /** Merge streamed fields. If params just closed and the user pre-approved, dispatch now. */
+  updateStreaming(
+    id: string,
+    fields: { title?: string; description?: string; triggerQuote?: string; estimatedDurationSec?: number; params?: Record<string, any>; paramsReady?: boolean },
+  ): void {
+    const action = this.actions.get(id);
+    if (!action || !action.streaming) return;
+    if (fields.title !== undefined) action.title = fields.title;
+    if (fields.description !== undefined) action.description = fields.description;
+    if (fields.triggerQuote !== undefined) action.triggerQuote = fields.triggerQuote;
+    if (fields.estimatedDurationSec !== undefined) action.estimatedDurationSec = fields.estimatedDurationSec;
+    if (fields.params !== undefined) action.params = fields.params;
+
+    if (fields.paramsReady && !action.paramsReady) {
+      action.paramsReady = true;
+      if (action.pendingApproval && action.state === 'suggested') {
+        this.startApproved(action); // pre-approved + params now ready → launch
+        return;
+      }
+    }
+    // No action.status emit here: the streamed card text is broadcast by index.ts
+    // as action.suggested (one message type, no per-frame DB writes). Dispatch and
+    // terminal state changes still emit via startApproved/finalizeStreaming.
+  }
+
+  /** Lock in the complete suggestion. Dispatches if pre-approved; else starts the TTL. */
+  finalizeStreaming(id: string, full: ActionSuggestion | null): ActionLifecycle | null {
+    const action = this.actions.get(id);
+    if (!action) return null;
+    if (!action.streaming) return action; // already finalized/dispatched
+
+    if (!full) {
+      // Parse failed and nothing started → drop the in-progress card.
+      if (action.state === 'suggested') {
+        this.actions.delete(id);
+        action.state = 'cancelled';
+        action.completedAt = Date.now();
+      }
+      action.streaming = false;
+      this.emit('action.status', action);
+      return null;
+    }
+
+    action.type = full.type;
+    action.title = full.title;
+    action.description = full.description;
+    action.triggerQuote = full.triggerQuote;
+    action.estimatedDurationSec = full.estimatedDurationSec;
+    action.streaming = false;
+    // Only adopt the final params if they were NEVER finalized mid-stream.
+    // Otherwise action.params already holds the (context-injected, possibly
+    // in-use by an early-dispatched worker) version — don't clobber it.
+    if (!action.paramsReady) {
+      action.params = full.params;
+      action.paramsReady = true;
+    }
+
+    // Already dispatched early (running/approved/queued) — just refresh display.
+    if (action.state !== 'suggested') {
+      this.emit('action.status', action);
+      return action;
+    }
+
+    // Drop now-revealed duplicates (compare against OTHER actions).
+    if (this.isDuplicate(full, id)) {
+      this.actions.delete(id);
+      action.state = 'cancelled';
+      action.completedAt = Date.now();
+      this.emit('action.status', action);
+      return null;
+    }
+    this.addDedupHash(full);
+
+    if (action.pendingApproval) {
+      this.startApproved(action); // approved during stream → launch now
+      return action;
+    }
+
+    // Complete, unapproved card → normal suggested lifecycle + TTL.
+    this.emit('action.status', action);
+    this.startSuggestionTtl(id);
     return action;
   }
 
@@ -157,7 +281,24 @@ export class WorkerRegistry extends EventEmitter {
     const action = this.actions.get(actionId);
     if (!action) return;
     if (action.state !== 'suggested' && action.state !== 'failed') return;
-    this.clearSuggestionTimer(actionId);
+
+    // Early approval: the suggestion is still streaming and its params haven't
+    // closed yet. Record the intent — updateStreaming/finalizeStreaming will
+    // dispatch the instant params are ready, with no second click needed.
+    if (action.streaming && !action.paramsReady) {
+      action.pendingApproval = true;
+      this.emit('action.status', action);
+      return;
+    }
+
+    this.startApproved(action);
+  }
+
+  /** Transition an approved (or pre-approved, now-ready) action into execution. */
+  private startApproved(action: ActionLifecycle): void {
+    this.clearSuggestionTimer(action.id);
+    action.streaming = false;
+    action.pendingApproval = false;
 
     // Reset execution state on retry from failed
     if (action.state === 'failed') {
@@ -176,7 +317,7 @@ export class WorkerRegistry extends EventEmitter {
       this.executeAction(action);
     } else {
       action.state = 'queued';
-      this.approvedQueue.push(actionId);
+      this.approvedQueue.push(action.id);
       this.emit('action.status', action);
     }
   }

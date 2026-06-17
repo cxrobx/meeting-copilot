@@ -1,6 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createInterface } from 'node:readline';
+import { runWarm } from './persistent-claude.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -20,8 +21,29 @@ export async function claudeChat(
     allowedTools?: string[];
   } = {},
 ): Promise<string> {
+  // Warm fast-path: stateless, tool-less calls with a known model reuse a
+  // persistent `claude` session (no per-call cold start). Falls through to the
+  // cold spawn below on any warm failure, so behavior is never worse.
+  if (!options.allowedTools?.length && options.model) {
+    try {
+      const text = await runWarm(prompt, {
+        model: options.model,
+        system: options.systemPrompt ?? '',
+        signal: options.signal,
+      });
+      if (text && text.trim().length > 0) return text;
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Aborted') throw err;
+      // any other warm failure → cold spawn below
+    }
+  }
+
   const maxTurns = options.allowedTools?.length ? '8' : '1';
-  const args = ['--print', '--output-format', 'json', '--no-session-persistence', '--max-turns', maxTurns];
+  // --strict-mcp-config: do NOT load the user's ~27 global MCP servers on every
+  // spawn. They add ~6s of CPU cold-start per call and cause the concurrency
+  // thrash that starved realtime suggestions (agenda latency blew up to ~45s).
+  // Auth/subscription is unaffected; built-in tools (WebSearch/Bash/…) still work.
+  const args = ['--print', '--output-format', 'json', '--strict-mcp-config', '--no-session-persistence', '--max-turns', maxTurns];
 
   if (options.systemPrompt) {
     args.push('--system-prompt', options.systemPrompt);
@@ -51,6 +73,12 @@ export async function claudeChat(
   const env = { ...process.env };
   delete env.CLAUDECODE;
   delete env.CLAUDE_PROJECT;
+  // Force OAuth/subscription billing: the `claude` CLI must NEVER see an API key.
+  // A live ANTHROPIC_API_KEY in its env makes the CLI bill the API console instead
+  // of the subscription — this silently cost ~19M tokens on 2026-06-17. Direct-API
+  // spend, if ever wanted, goes through the SDK paths (api/anthropic.ts), not here.
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
 
   try {
     const { stdout } = await execFileAsync('claude', args, {
@@ -232,6 +260,25 @@ export async function claudeSuggest(
   options?: { onDelta?: (text: string) => void; model?: string },
 ): Promise<string> {
   const model = options?.model ?? 'claude-sonnet-4-6';
+
+  // Warm fast-path: tool-less suggestions reuse a persistent session (deltas are
+  // forwarded as they stream). Tool-using calls (research/analysis) skip this
+  // and use the cold spawn below, which can load WebSearch/WebFetch/etc.
+  if (!allowedTools?.length) {
+    try {
+      const text = await runWarm(prompt, {
+        model,
+        system: systemPrompt,
+        signal,
+        onDelta: options?.onDelta,
+      });
+      if (text && text.trim().length > 0) return text;
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Aborted') throw err;
+      // any other warm failure → cold spawn below
+    }
+  }
+
   const maxTurns = allowedTools?.length ? '8' : '1';
 
   const args = [
@@ -239,6 +286,7 @@ export async function claudeSuggest(
     '--output-format', 'stream-json',
     '--verbose',                  // required with stream-json
     '--include-partial-messages', // token-level deltas
+    '--strict-mcp-config',        // skip the ~27 global MCP servers (see claudeChat)
     '--no-session-persistence',
     '--max-turns', maxTurns,
     '--model', model,
@@ -253,6 +301,12 @@ export async function claudeSuggest(
   const env = { ...process.env };
   delete env.CLAUDECODE;
   delete env.CLAUDE_PROJECT;
+  // Force OAuth/subscription billing: the `claude` CLI must NEVER see an API key.
+  // A live ANTHROPIC_API_KEY in its env makes the CLI bill the API console instead
+  // of the subscription — this silently cost ~19M tokens on 2026-06-17. Direct-API
+  // spend, if ever wanted, goes through the SDK paths (api/anthropic.ts), not here.
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
 
   if (signal?.aborted) {
     throw new Error('Aborted');
@@ -263,6 +317,10 @@ export async function claudeSuggest(
 
   return new Promise<string>((resolve, reject) => {
     const child = spawn('claude', args, { env });
+    // The prompt is passed via -p, so close stdin immediately. Otherwise the CLI
+    // waits ~3s for piped input ("no stdin data received in 3s…") and can exit
+    // non-zero, which tool workers (research/etc.) then surface as a failure.
+    child.stdin.end();
 
     let accumulated = '';
     let finalResult = '';

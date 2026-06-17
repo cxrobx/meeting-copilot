@@ -55,10 +55,16 @@ export function appendReview(record: ReviewRecord): void {
   }
 }
 
-/** The most recent prior review (excluding the one being written), or null. */
-export function lastReview(): ReviewRecord | null {
+/**
+ * The most recent prior review, or null. Pass the current session's id to
+ * EXCLUDE its own record — otherwise re-reviewing the latest meeting compares it
+ * against itself (its prior record is the last element). "Prior" = a different
+ * meeting reviewed before this one.
+ */
+export function lastReview(excludeSessionId?: string): ReviewRecord | null {
   const all = readReviews();
-  return all.length > 0 ? all[all.length - 1]! : null;
+  const pool = excludeSessionId ? all.filter((r) => r.sessionId !== excludeSessionId) : all;
+  return pool.length > 0 ? pool[pool.length - 1]! : null;
 }
 
 const arrow = (delta: number): string => (delta > 0 ? '↑' : delta < 0 ? '↓' : '→');

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import Database from 'better-sqlite3';
 import type { WorkerRegistry } from '../workers/registry.js';
-import type { ActionLifecycle } from '../workers/types.js';
+import type { ActionLifecycle, WorkerResult } from '../workers/types.js';
 import { ReviewWorker, buildReviewParams } from '../workers/review.js';
 import { isOpenAiApiAvailable, openaiFastResearchStream } from '../api/openai.js';
 import { isAnthropicApiAvailable, anthropicTriageJson } from '../api/anthropic.js';
@@ -24,6 +24,10 @@ const ASK_SYSTEM: Record<string, string> = {
   custom:
     'Answer the user\'s question about an excerpt highlighted from a live meeting transcript. ' +
     'Be direct and concise — under 150 words unless the question genuinely demands more.',
+  summarize:
+    'You condense an AI-generated result card from a live meeting copilot into its essentials. ' +
+    'Return 3-6 tight bullet points (or a 2-3 sentence recap if the content is short). ' +
+    'Preserve concrete facts, numbers, names, decisions, and action items; drop filler. No preamble.',
 };
 
 function buildAskUserContent(params: { selection: string; context: string; question: string }): string {
@@ -31,6 +35,39 @@ function buildAskUserContent(params: { selection: string; context: string; quest
   if (params.context) parts.push(`Surrounding transcript:\n${params.context}`);
   if (params.question) parts.push(`Question: ${params.question}`);
   return parts.join('\n\n');
+}
+
+/**
+ * Persist a freshly generated self-review into the session's own `action` table
+ * so it is saved with the meeting and re-viewable without regenerating. Upserts
+ * the existing review row when present (so a re-run overwrites rather than piling
+ * up duplicates). Best-effort — never throws to the request handler.
+ */
+function persistReview(dbPath: string, sessionId: string, title: string, result: WorkerResult): void {
+  try {
+    const db = new Database(dbPath);
+    const resultJson = JSON.stringify(result);
+    const now = Date.now();
+    const existing = db
+      .prepare("SELECT id FROM action WHERE type = 'review' ORDER BY createdAt DESC LIMIT 1")
+      .get() as { id?: string } | undefined;
+    if (existing?.id) {
+      db.prepare('UPDATE action SET result = ?, state = ?, completedAt = ? WHERE id = ?').run(
+        resultJson,
+        'completed',
+        now,
+        existing.id,
+      );
+    } else {
+      db.prepare(
+        `INSERT INTO action (id, sessionId, type, title, description, triggerQuote, state, params, result, createdAt, completedAt)
+         VALUES (?, ?, 'review', ?, ?, '', 'completed', '{}', ?, ?, ?)`,
+      ).run(`review-${sessionId}-${now}`, sessionId, `Self-Review: ${title}`, 'On-demand self-review', resultJson, now, now);
+    }
+    db.close();
+  } catch (err) {
+    console.warn('[Present] Failed to persist review:', err instanceof Error ? err.message : String(err));
+  }
 }
 
 export function createPresentRouter(registry: WorkerRegistry): Router {
@@ -202,12 +239,14 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
   });
 
   // ─── POST /present/review — self-review for a PAST (ended) meeting ────────
-  // Reads the session's own SQLite DB read-only, runs the ReviewWorker on the
-  // stored transcript, and returns the scorecard markdown. This is the primary
-  // "review a finished meeting" path — a fresh on-demand run, so it is never
-  // subject to the session.stop grace window that can cancel the auto-review.
+  // Returns the review SAVED with the meeting (in its `action` table) when one
+  // exists, so reopening a past review is instant and stable. With {refresh:true}
+  // it regenerates: runs the ReviewWorker on the stored transcript and persists
+  // the new scorecard back to the session's own DB. A fresh run is never subject
+  // to the session.stop grace window that can cancel the auto-review.
   router.post('/present/review', async (req, res) => {
     const sessionId = String((req.body?.sessionId ?? '')).trim();
+    const refresh = req.body?.refresh === true;
     // sessionIds are directory names — guard against path traversal.
     if (!sessionId || !/^[A-Za-z0-9_-]+$/.test(sessionId)) {
       res.status(400).json({ error: 'valid sessionId required' });
@@ -219,18 +258,45 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
       return;
     }
 
+    // One read-only open: title, any previously saved review, and (only if we
+    // actually need to regenerate) the transcript.
     let records: Array<{ source: string; label: string; text: string; wordCount: number }> = [];
     let title = 'Untitled';
+    let saved: { markdown: string; data: unknown } | null = null;
     try {
       const db = new Database(dbPath, { readonly: true });
       const srow = db.prepare('SELECT title FROM session LIMIT 1').get() as { title?: string } | undefined;
       title = srow?.title || 'Untitled';
-      records = db
-        .prepare('SELECT source, label, text, wordCount FROM transcript ORDER BY timestamp ASC, rowid ASC')
-        .all() as Array<{ source: string; label: string; text: string; wordCount: number }>;
+      if (!refresh) {
+        const rrow = db
+          .prepare(
+            "SELECT result FROM action WHERE type = 'review' AND result IS NOT NULL " +
+              'ORDER BY completedAt DESC, createdAt DESC LIMIT 1',
+          )
+          .get() as { result?: string } | undefined;
+        if (rrow?.result) {
+          try {
+            const parsed = JSON.parse(rrow.result);
+            const md = parsed?.artifacts?.[0]?.content || parsed?.summary || '';
+            if (md) saved = { markdown: md, data: parsed?.data ?? null };
+          } catch {
+            /* fall through to regenerate */
+          }
+        }
+      }
+      if (!saved) {
+        records = db
+          .prepare('SELECT source, label, text, wordCount FROM transcript ORDER BY timestamp ASC, rowid ASC')
+          .all() as Array<{ source: string; label: string; text: string; wordCount: number }>;
+      }
       db.close();
     } catch (err) {
       res.status(500).json({ error: String(err) });
+      return;
+    }
+
+    if (saved) {
+      res.json({ ok: true, title, markdown: saved.markdown, data: saved.data, cached: true });
       return;
     }
 
@@ -251,8 +317,10 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
         res.status(422).json({ error: result.error || result.summary });
         return;
       }
+      // Save it with the meeting so future opens are instant and don't re-spend.
+      persistReview(dbPath, sessionId, title, result);
       const markdown = result.artifacts?.[0]?.content || result.summary || '';
-      res.json({ ok: true, title, markdown, data: result.data ?? null });
+      res.json({ ok: true, title, markdown, data: result.data ?? null, cached: false });
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }
@@ -265,7 +333,9 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
     const body = (req.body ?? {}) as { mode?: string; selection?: string; context?: string; question?: string };
     const mode = body.mode && ASK_SYSTEM[body.mode] ? body.mode : null;
     const selection = (body.selection ?? '').toString().slice(0, 1_500).trim();
-    const context = (body.context ?? '').toString().slice(0, 4_000).trim();
+    // Roomy context budget: whole-card Summarize/Custom passes the full card text
+    // (capped ~6000 client-side) here, so 4000 would silently drop long cards.
+    const context = (body.context ?? '').toString().slice(0, 8_000).trim();
     const question = (body.question ?? '').toString().slice(0, 1_000).trim();
 
     if (!mode || !selection) {
@@ -376,6 +446,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
 <meta name="color-scheme" content="light">
 <title>Meeting Copilot</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"><\/script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"><\/script>
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"><\/script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/gruvbox-light.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -515,6 +586,16 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .state-pill.degraded { background: var(--gb-yellow); }
   .state-pill.error { background: var(--gb-red); }
   .state-pill.archived { background: var(--gb-subtext0); }
+
+  /* Progress hint shown next to the state pill while the meeting is wrapping up
+     (post-meeting summary + self-review running). */
+  .ending-hint {
+    font-size: 11px;
+    color: var(--gb-subtext0);
+    font-style: italic;
+    margin-right: 4px;
+    white-space: nowrap;
+  }
 
   /* Audio activity indicator: a small red dot that pulses when audio chunks
      arrive, so the user can see the mic/system audio is actually flowing. */
@@ -905,6 +986,76 @@ const PRESENT_HTML = `<!DOCTYPE html>
     vertical-align: middle;
     margin-right: 5px;
   }
+  /* Self-review modal: processing spinner + time-estimated progress bar. */
+  .review-spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    flex: 0 0 auto;
+    border: 2px solid var(--gb-overlay1);
+    border-top-color: var(--gb-blue);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    margin-right: 9px;
+  }
+  .review-progress {
+    margin-top: 14px;
+    height: 6px;
+    width: 100%;
+    background: var(--gb-surface1);
+    overflow: hidden;
+  }
+  .review-progress-bar {
+    height: 100%;
+    width: 0%;
+    background: var(--gb-blue);
+    transition: width 0.25s linear;
+  }
+  /* Self-review rendered markdown — readable hierarchy + breathing room. */
+  .review-md { color: var(--gb-text); font-size: 13px; line-height: 1.62; }
+  .review-md > :first-child { margin-top: 0; }
+  .review-md h2 { display: none; } /* title duplicates the modal header */
+  .review-md h3 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    font-weight: 700;
+    color: var(--accent);
+    margin: 26px 0 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--gb-surface2);
+  }
+  .review-md p { margin: 11px 0; }
+  .review-md ul { margin: 8px 0; padding-left: 4px; list-style: none; }
+  .review-md ul > li {
+    position: relative;
+    margin: 11px 0;
+    padding-left: 18px;
+  }
+  .review-md ul > li::before {
+    content: "";
+    position: absolute;
+    left: 2px;
+    top: 0.62em;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .review-md ol { margin: 8px 0; padding-left: 22px; }
+  .review-md ol > li { margin: 8px 0; padding-left: 4px; }
+  .review-md li::marker { color: var(--accent); font-weight: 700; }
+  .review-md strong { color: var(--gb-text); font-weight: 700; }
+  .review-md em { color: var(--gb-subtext1); font-style: italic; }
+  .review-md blockquote {
+    margin: 0 0 20px;
+    padding: 9px 14px;
+    background: var(--gb-surface0);
+    border-left: 3px solid var(--accent);
+    color: var(--gb-subtext1);
+    font-size: 12px;
+  }
+  .review-md blockquote p { margin: 0; }
   .agenda-editor-list {
     border: 1px solid var(--gb-surface2);
     border-radius: 5px;
@@ -1301,6 +1452,17 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .card-body ul, .card-body ol { padding-left: 18px; margin-bottom: 8px; }
   .card-body li { margin-bottom: 3px; }
   .card-body strong { color: var(--gb-text); }
+  /* Fixed-height, scrollable, user-resizable result/stream region (like the ask
+     widget). Keeps long worker output from ballooning the card; drag the bottom
+     edge to make it taller/shorter. */
+  .card-scroll {
+    height: 340px;        /* default size; drag the bottom edge to grow/shrink */
+    min-height: 80px;
+    max-height: 88vh;     /* ceiling for expansion (was a hard 340px cap) */
+    overflow-y: auto;
+    overflow-x: hidden;
+    resize: vertical;
+  }
   .card-body a { color: var(--gb-blue); text-decoration: none; }
   .card-body a:hover { text-decoration: underline; }
   .card-body pre { background: var(--gb-surface1); border: 1px solid var(--gb-surface2); border-radius: 5px; padding: 12px; overflow-x: auto; margin: 10px 0; font-size: 12px; line-height: 1.5; }
@@ -1823,6 +1985,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       <span class="audio-dot" id="audioDot"></span>
       <span>REC</span>
     </span>
+    <span class="ending-hint" id="endingHint" style="display:none"></span>
     <span class="state-pill idle" id="statePill">Idle</span>
     <span class="session-timer" id="sessionTimer"></span>
     <button class="btn btn-ghost" id="newMeetingBtn" style="display:none" onclick="newMeeting()">&larr; New Meeting</button>
@@ -1893,6 +2056,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   var statusDot = document.getElementById('statusDot');
   var headerTitle = document.getElementById('headerTitle');
   var statePill = document.getElementById('statePill');
+  var endingHintEl = document.getElementById('endingHint');
   var sessionTimerEl = document.getElementById('sessionTimer');
   var startStopBtn = document.getElementById('startStopBtn');
   var newMeetingBtn = document.getElementById('newMeetingBtn');
@@ -1933,6 +2097,16 @@ const PRESENT_HTML = `<!DOCTYPE html>
   var sessionId = null;
   var sessionTitle = '';
   var sessionStartTime = null;
+  // Progress text + safety watchdog for the 'ending' state. The server runs
+  // post-meeting workers (summary + self-review) before broadcasting 'archived';
+  // if that terminal event never arrives (server error, dropped socket), the
+  // watchdog flips the UI to 'archived' so it can never strand on "Ending…".
+  var endingMessage = '';
+  var endingWatchdog = null;
+  // > the server's 240s worker grace window (END_GRACE_MS) so this only fires on
+  // a true hang (server froze before the terminal broadcast), not a slow-but-
+  // legitimate Opus wrap-up that's about to settle on its own.
+  var ENDING_WATCHDOG_MS = 300000; // 5 min
   var timerInterval = null;
   var totalWords = 0;
   var micWords = 0;
@@ -2382,14 +2556,41 @@ const PRESENT_HTML = `<!DOCTYPE html>
   function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
   function renderMarkdown(text) {
-    if (typeof marked !== 'undefined') return marked.parse(text);
-    return '<pre>' + escapeHtml(text) + '</pre>';
+    if (typeof marked === 'undefined') return '<pre>' + escapeHtml(text) + '</pre>';
+    var html = marked.parse(text);
+    // Sanitize before this HTML hits any innerHTML sink (streaming worker output,
+    // ask/summarize panel, review). Modern marked passes raw HTML through, and
+    // streamed research/analysis can echo web-derived markup — strip scripts and
+    // event handlers so a hostile page can't run JS in the localhost dashboard.
+    if (typeof DOMPurify !== 'undefined') return DOMPurify.sanitize(html);
+    return html;
   }
 
   function highlightCode() {
     if (typeof hljs !== 'undefined') {
       document.querySelectorAll('.card-body pre code:not(.hljs)').forEach(function(b) { hljs.highlightElement(b); });
     }
+  }
+
+  // Live markdown rendering for streaming worker output. Raw markdown accumulates
+  // on each .streaming-text element (el._md); we re-render to formatted HTML at
+  // most once per animation frame (coalescing token deltas), following the stream
+  // to the bottom unless the user has scrolled up to read.
+  var streamPending = new Set();
+  var streamRenderScheduled = false;
+  function scheduleStreamRender() {
+    if (streamRenderScheduled) return;
+    streamRenderScheduled = true;
+    requestAnimationFrame(function() {
+      streamRenderScheduled = false;
+      streamPending.forEach(function(el) {
+        var nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+        el.innerHTML = renderMarkdown(el._md || '');
+        if (nearBottom) el.scrollTop = el.scrollHeight;
+      });
+      streamPending.clear();
+      highlightCode();
+    });
   }
 
   function formatTime(iso) {
@@ -2430,6 +2631,28 @@ const PRESENT_HTML = `<!DOCTYPE html>
     if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
   }
 
+  // ─── Ending watchdog ───────────────────────────────────────
+  // Safety net so the UI can never strand on "Ending…". If the server's terminal
+  // 'archived' broadcast never arrives within ENDING_WATCHDOG_MS, force the
+  // archived view locally. Worker results still stream in via action.status, and
+  // any later reconnect re-syncs the real state from the server.
+  function armEndingWatchdog() {
+    disarmEndingWatchdog();
+    endingWatchdog = setTimeout(function() {
+      endingWatchdog = null;
+      if (sessionState === 'ending') {
+        endingMessage = '';
+        sessionState = 'archived';
+        stopTimer();
+        clearAgenda();
+        updateUI();
+      }
+    }, ENDING_WATCHDOG_MS);
+  }
+  function disarmEndingWatchdog() {
+    if (endingWatchdog) { clearTimeout(endingWatchdog); endingWatchdog = null; }
+  }
+
   // ─── Stats ─────────────────────────────────────────────────
   function updateStats() {
     document.getElementById('statWords').textContent = totalWords;
@@ -2458,6 +2681,16 @@ const PRESENT_HTML = `<!DOCTYPE html>
     // State pill
     statePill.className = 'state-pill ' + sessionState;
     statePill.textContent = sessionState.charAt(0).toUpperCase() + sessionState.slice(1);
+
+    // Wrap-up progress hint (only while ending, and only if the server sent one)
+    if (endingHintEl) {
+      if (sessionState === 'ending' && endingMessage) {
+        endingHintEl.textContent = endingMessage;
+        endingHintEl.style.display = '';
+      } else {
+        endingHintEl.style.display = 'none';
+      }
+    }
 
     // Show REC indicator while a session is live or degraded
     var audioIndicator = document.getElementById('audioIndicator');
@@ -2606,6 +2839,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
         '<button class="btn btn-ghost" onclick="triggerAction(\\'research\\')">Research</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'summary\\')">Summary</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'analysis\\')">Analysis</button>' +
+        '<button class="btn btn-ghost" onclick="triggerAction(\\'mockup\\')" title="UI wireframe from the discussion (type a screen in the box first)">Mockup</button>' +
+        '<button class="btn btn-ghost" onclick="triggerAction(\\'codegen\\')" title="Generate code from the discussion">Code</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'review\\')" title="Self-review: how you did so far">Review</button>' +
       '</div>' +
     '</div>';
@@ -2631,6 +2866,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
   window.newMeeting = function() {
     // Reset client-side state from archived → idle so the setup form re-renders.
     // Server is already idle/archived; the next session.start will move it forward.
+    disarmEndingWatchdog();
+    endingMessage = '';
     sessionState = 'idle';
     sessionTitle = '';
     sessionStartTime = null;
@@ -2687,6 +2924,11 @@ const PRESENT_HTML = `<!DOCTYPE html>
       // sees their click register; the authoritative broadcast will settle
       // the final state when the server catches up.
       sessionState = 'ending';
+      endingMessage = 'Wrapping up — generating summary & self-review…';
+      // Arm the safety watchdog immediately on the optimistic flip — even if the
+      // server's authoritative 'ending'/'archived' broadcasts never arrive, the
+      // UI will recover instead of stranding on "Ending…".
+      armEndingWatchdog();
       // Freeze the displayed duration at end-press. The server may take
       // many seconds (auto-summary + up to 60s worker grace period) before
       // it broadcasts session.state=archived, and the meeting is logically
@@ -2892,7 +3134,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
   var askAbort = null;
   var askMenuEl, askMenuInputRow, askMenuInput;
   var askPanelEl, askPanelEyebrow, askPanelQuote, askPanelBody;
-  var ASK_LABELS = { factcheck: 'Fact check', explain: 'Explain', custom: 'Your question' };
+  var ASK_LABELS = { factcheck: 'Fact check', explain: 'Explain', custom: 'Your question', summarize: 'Summarize' };
+
+  // Card-level right-click menu (Summarize / Custom prompt / Mockup). Distinct
+  // from the transcript ask menu above; shares the .askmenu styles + ask panel.
+  var cardSel = null; // { el, actionId, title, text, context, rect, isMock, baseWireframe, baseHtml }
+  var cardMenuEl, cardMenuInput, cardMenuInputRow, cardMenuMode;
+  var cardMenuCustom, cardMenuMockup;
 
   function buildAskUi() {
     askMenuEl = document.createElement('div');
@@ -3123,7 +3371,177 @@ const PRESENT_HTML = `<!DOCTYPE html>
     });
   }
 
+  // ─── Card right-click menu (Summarize / Custom / Mockup) ───
+  // Mirrors the ask widget: right-click a result card with no text selected to
+  // act on the WHOLE card. Highlighting text inside a card instead opens the
+  // same ask menu the transcript uses (handled in the resultsEl listener below).
+  function buildCardMenu() {
+    cardMenuEl = document.createElement('div');
+    cardMenuEl.className = 'askmenu';
+
+    var summarize = document.createElement('div');
+    summarize.className = 'askmenu-item';
+    summarize.innerHTML = '<span class="askmenu-ico">\\u2261</span>Summarize';
+    summarize.addEventListener('click', function() { startCardPanelAsk('summarize', ''); });
+    cardMenuEl.appendChild(summarize);
+
+    cardMenuCustom = document.createElement('div');
+    cardMenuCustom.className = 'askmenu-item';
+    cardMenuCustom.addEventListener('click', function() { openCardInput('custom'); });
+    cardMenuEl.appendChild(cardMenuCustom);
+
+    cardMenuMockup = document.createElement('div');
+    cardMenuMockup.className = 'askmenu-item';
+    cardMenuMockup.innerHTML = '<span class="askmenu-ico">\\u25A5</span>Mockup\\u2026';
+    cardMenuMockup.addEventListener('click', function() { openCardInput('mockup'); });
+    cardMenuEl.appendChild(cardMenuMockup);
+
+    cardMenuInputRow = document.createElement('div');
+    cardMenuInputRow.className = 'askmenu-input-row';
+    cardMenuInput = document.createElement('textarea');
+    cardMenuInput.rows = 2;
+    cardMenuInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitCardInput(); }
+      if (e.key === 'Escape') hideCardMenu();
+      e.stopPropagation();
+    });
+    var go = document.createElement('button');
+    go.className = 'btn btn-green';
+    go.textContent = 'Go';
+    go.addEventListener('click', submitCardInput);
+    cardMenuInputRow.appendChild(cardMenuInput);
+    cardMenuInputRow.appendChild(go);
+    cardMenuEl.appendChild(cardMenuInputRow);
+    document.body.appendChild(cardMenuEl);
+  }
+
+  // Snapshot the card under the cursor: its text (title + body), whether it's a
+  // mockup, and — if so — the base wireframe/HTML to revise.
+  function buildCardSel(cardEl) {
+    var actionId = (cardEl.id || '').replace('action-', '');
+    var titleEl = cardEl.querySelector('.card-title');
+    var bodyEl = cardEl.querySelector('.card-body');
+    var title = titleEl ? (titleEl.innerText || '') : '';
+    var bodyText = bodyEl ? (bodyEl.innerText || '') : '';
+    var text = (title + (bodyText ? '\\n\\n' + bodyText : '')).trim().slice(0, 6000);
+    var isMock = !!cardEl.querySelector('.mockup-pane');
+    var baseWireframe = '', baseHtml = '';
+    if (isMock) {
+      var asciiEl = cardEl.querySelector('.mockup-pane[data-pane="ascii"] code');
+      if (asciiEl) baseWireframe = (asciiEl.innerText || '').slice(0, 8000);
+      baseHtml = (mockupHtml.get(actionId) || '').slice(0, 16000);
+    }
+    return {
+      el: cardEl, actionId: actionId, title: title,
+      text: text || title || 'this card',
+      context: text,
+      rect: cardEl.getBoundingClientRect(),
+      isMock: isMock, baseWireframe: baseWireframe, baseHtml: baseHtml,
+    };
+  }
+
+  function showCardMenu(x, y) {
+    cardMenuInputRow.classList.remove('open');
+    cardMenuInput.value = '';
+    cardMenuMode = null;
+    var mockLive = cardSel && cardSel.isMock && !isReplay;
+    // On a live mock card, "Custom prompt" revises the mock into a new card
+    // (per request); otherwise it's a plain ask-about-this-card.
+    cardMenuCustom.innerHTML = mockLive
+      ? '<span class="askmenu-ico">\\u270E</span>Revise mock\\u2026'
+      : '<span class="askmenu-ico">\\u2026</span>Custom prompt\\u2026';
+    // Generate-a-new-mockup only makes sense on non-mock cards in a live session.
+    cardMenuMockup.style.display = (cardSel && !cardSel.isMock && !isReplay) ? '' : 'none';
+    cardMenuEl.style.display = 'block';
+    var mw = cardMenuEl.offsetWidth || 200;
+    var mh = cardMenuEl.offsetHeight || 130;
+    cardMenuEl.style.left = Math.max(6, Math.min(x, window.innerWidth - mw - 8)) + 'px';
+    cardMenuEl.style.top = Math.max(6, Math.min(y, window.innerHeight - mh - 8)) + 'px';
+  }
+  function hideCardMenu() { if (cardMenuEl) cardMenuEl.style.display = 'none'; }
+
+  function openCardInput(mode) {
+    cardMenuMode = mode;
+    var mockLive = cardSel && cardSel.isMock && !isReplay;
+    if (mode === 'mockup') {
+      cardMenuInput.placeholder = 'Describe the screen to mock (optional)\\u2026';
+    } else {
+      cardMenuInput.placeholder = mockLive
+        ? 'Describe changes \\u2014 renders a new mock card\\u2026'
+        : 'Ask about this card\\u2026';
+    }
+    cardMenuInputRow.classList.add('open');
+    cardMenuInput.focus();
+  }
+
+  function submitCardInput() {
+    var q = cardMenuInput.value.trim();
+    if (cardMenuMode === 'mockup') {
+      spawnMockup(q, false); // new mockup from this card's content (desc optional)
+    } else { // custom
+      if (cardSel && cardSel.isMock && !isReplay) {
+        if (!q) return;            // a revision needs a concrete change to apply
+        spawnMockup(q, true);      // revise base → new card
+      } else {
+        if (!q) return;
+        startCardPanelAsk('custom', q);
+      }
+    }
+  }
+
+  // Reuse the transcript ask panel for card Summarize/Custom (streamed answer).
+  // Selection carries only a short headline (the card title) so the server's
+  // 1500-char selection clamp can't truncate it; the full card text rides in
+  // context (no duplication) where it's clamped at a roomier budget.
+  function startCardPanelAsk(mode, question) {
+    if (!cardSel) return;
+    var headline = (cardSel.title || cardSel.text || 'this card').slice(0, 300);
+    askSel = { text: headline, context: cardSel.text, rect: cardSel.rect };
+    hideCardMenu();
+    startAsk(mode, question);
+  }
+
+  // Spawn a real mockup worker card. withBase=true sends the existing
+  // wireframe/HTML so the worker revises rather than starting from scratch.
+  function spawnMockup(instruction, withBase) {
+    if (isReplay) { showToast('Mockup needs a live session'); hideCardMenu(); return; }
+    if (!cardSel) { hideCardMenu(); return; }
+    var msg = { type: 'action.trigger', actionType: 'mockup' };
+    if (instruction) msg.prompt = instruction;
+    if (cardSel.text) msg.cardContent = cardSel.text.slice(0, 6000);
+    if (withBase) {
+      if (cardSel.baseWireframe) msg.baseWireframe = cardSel.baseWireframe;
+      if (cardSel.baseHtml) msg.baseHtml = cardSel.baseHtml;
+    }
+    wsSend(msg);
+    showToast(withBase ? 'Mockup revision queued' : 'Mockup queued');
+    hideCardMenu();
+  }
+
+  // Text highlighted inside a result card → same Fact check/Explain/Custom menu
+  // the transcript uses. Returns null unless the selection is inside a card body.
+  function captureCardSelection() {
+    var s = window.getSelection();
+    if (!s || s.isCollapsed || s.rangeCount === 0) return null;
+    var text = s.toString().replace(/\\s+/g, ' ').trim();
+    if (!text) return null;
+    var range = s.getRangeAt(0);
+    var node = range.commonAncestorContainer;
+    if (node && node.nodeType === 3) node = node.parentElement;
+    if (!node || !resultsEl.contains(node)) return null;
+    var bodyEl = node.closest ? node.closest('.card-body') : null;
+    if (!bodyEl) return null;
+    var cardEl = node.closest('.card');
+    var ctx = '';
+    if (cardEl) {
+      var t = cardEl.querySelector('.card-title');
+      ctx = ((t ? t.innerText + '\\n' : '') + (bodyEl.innerText || '')).slice(0, 4000);
+    }
+    return { text: text.slice(0, 1500), context: ctx, rect: range.getBoundingClientRect() };
+  }
+
   buildAskUi();
+  buildCardMenu();
   transcriptFeed.addEventListener('contextmenu', function(e) {
     var captured = captureTranscriptSelection();
     if (!captured) { hideAskMenu(); return; }
@@ -3131,12 +3549,32 @@ const PRESENT_HTML = `<!DOCTYPE html>
     e.preventDefault();
     showAskMenu(e.clientX, e.clientY);
   });
+  resultsEl.addEventListener('contextmenu', function(e) {
+    // Text selected inside a card body → highlight-to-ask (reuse ask menu).
+    var sel = captureCardSelection();
+    if (sel) {
+      askSel = sel;
+      hideCardMenu();
+      e.preventDefault();
+      showAskMenu(e.clientX, e.clientY);
+      return;
+    }
+    // Otherwise, right-click an action card → the card-level menu.
+    var cardEl = e.target.closest ? e.target.closest('.card') : null;
+    if (!cardEl || (cardEl.id || '').indexOf('action-') !== 0) { hideCardMenu(); return; }
+    cardSel = buildCardSel(cardEl);
+    hideAskMenu();
+    e.preventDefault();
+    showCardMenu(e.clientX, e.clientY);
+  });
   document.addEventListener('mousedown', function(e) {
     if (askMenuEl && askMenuEl.style.display === 'block' && !askMenuEl.contains(e.target)) hideAskMenu();
+    if (cardMenuEl && cardMenuEl.style.display === 'block' && !cardMenuEl.contains(e.target)) hideCardMenu();
   });
   document.addEventListener('keydown', function(e) {
     if (e.key !== 'Escape') return;
-    if (askMenuEl && askMenuEl.style.display === 'block') hideAskMenu();
+    if (cardMenuEl && cardMenuEl.style.display === 'block') hideCardMenu();
+    else if (askMenuEl && askMenuEl.style.display === 'block') hideAskMenu();
     else if (askPanelEl && askPanelEl.classList.contains('open')) closeAskPanel();
   });
 
@@ -3297,6 +3735,34 @@ const PRESENT_HTML = `<!DOCTYPE html>
     return inner;
   }
 
+  // Update a still-streaming suggested card in place — never replaces the card
+  // element, so the Approve button stays clickable while the description grows.
+  function updateStreamingCardInPlace(action) {
+    var card = actionCards.get(action.id);
+    if (!card) return;
+    var titleEl = card.querySelector('.card-title');
+    if (titleEl) titleEl.textContent = action.title || '';
+    var descEl = card.querySelector('.card-desc');
+    if (descEl) descEl.textContent = action.description || '';
+    var trigEl = card.querySelector('.card-trigger');
+    if (trigEl) {
+      if (action.triggerQuote) {
+        trigEl.style.display = '';
+        trigEl.textContent = '"' + action.triggerQuote.slice(0, 120) + (action.triggerQuote.length > 120 ? '...' : '') + '"';
+      } else {
+        trigEl.style.display = 'none';
+      }
+    }
+    var cta = card.querySelector('.card-cta');
+    if (cta && action.pendingApproval && !cta.querySelector('.pending-approve')) {
+      cta.innerHTML = '<span class="pending-approve" style="color:var(--gb-green);font-size:13px;font-weight:600">\\u2713 Approved \\u2014 starting when ready\\u2026</span>';
+    }
+    if (!action.streaming) {
+      var pill = card.querySelector('.streaming-pill');
+      if (pill) pill.style.display = 'none';
+    }
+  }
+
   function renderAction(action) {
     var existing = actionCards.get(action.id);
 
@@ -3314,15 +3780,23 @@ const PRESENT_HTML = `<!DOCTYPE html>
     var body = '';
 
     if (action.state === 'suggested') {
-      body = '<div class="card-body"><p>' + escapeHtml(action.description || '') + '</p>';
-      if (action.triggerQuote) {
-        body += '<div class="card-trigger">"' + escapeHtml(action.triggerQuote.slice(0, 120)) + (action.triggerQuote.length > 120 ? '...' : '') + '"</div>';
-      }
+      var pill = action.streaming
+        ? '<span class="streaming-pill" style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--gb-overlay2);margin-bottom:6px"><span class="spinner"></span>generating\\u2026</span>'
+        : '';
+      body = '<div class="card-body">' + pill + '<p class="card-desc">' + escapeHtml(action.description || '') + '</p>';
+      body += '<div class="card-trigger"' + (action.triggerQuote ? '' : ' style="display:none"') + '>' +
+        (action.triggerQuote ? '"' + escapeHtml(action.triggerQuote.slice(0, 120)) + (action.triggerQuote.length > 120 ? '...' : '') + '"' : '') + '</div>';
       if (!isReplay) {
-        body += '<div class="card-actions">' +
-          '<button class="btn btn-green" onclick="approveAction(\\'' + action.id + '\\')">Approve</button>' +
-          '<button class="btn btn-ghost" onclick="dismissAction(\\'' + action.id + '\\')">Dismiss</button>' +
-        '</div>';
+        body += '<div class="card-actions card-cta">';
+        if (action.pendingApproval) {
+          body += '<span class="pending-approve" style="color:var(--gb-green);font-size:13px;font-weight:600">\\u2713 Approved \\u2014 starting when ready\\u2026</span>';
+        } else {
+          // Approve is live even while streaming: pre-approve and the worker
+          // launches the instant params finish (no need to read the whole card).
+          body += '<button class="btn btn-green" onclick="approveAction(\\'' + action.id + '\\')">Approve</button>' +
+            '<button class="btn btn-ghost" onclick="dismissAction(\\'' + action.id + '\\')">Dismiss</button>';
+        }
+        body += '</div>';
       }
       body += '</div>';
     } else if (action.state === 'running') {
@@ -3342,16 +3816,19 @@ const PRESENT_HTML = `<!DOCTYPE html>
         // then the streaming-text div is appended to by the action.stream handler.
         body = '<div class="card-body">' +
           '<div class="streaming-placeholder"><span class="spinner"></span> Running...</div>' +
-          '<div class="streaming-text" style="white-space:pre-wrap;font-family:\\'JetBrains Mono\\',monospace;font-size:12px;line-height:1.5;color:var(--gb-text)"></div>' +
+          '<div class="streaming-text card-scroll" style="font-size:13px;line-height:1.55;color:var(--gb-text)"></div>' +
           '<div class="card-actions"><button class="btn btn-ghost-red" onclick="cancelAction(\\'' + action.id + '\\')">Cancel</button></div>' +
         '</div>';
       }
-    } else if (action.result && action.result.artifacts && action.result.artifacts.length > 0) {
-      body = '<div class="card-body">' + renderArtifactsInner(action) + '</div>';
-    } else if (action.result && action.result.summary) {
-      body = '<div class="card-body"><p>' + escapeHtml(action.result.summary) + '</p></div>';
+    } else if (action.state !== 'failed' && action.result && action.result.artifacts && action.result.artifacts.length > 0) {
+      body = '<div class="card-body card-scroll">' + renderArtifactsInner(action) + '</div>';
+    } else if (action.state !== 'failed' && action.result && action.result.summary) {
+      body = '<div class="card-body card-scroll"><p>' + escapeHtml(action.result.summary) + '</p></div>';
     } else if (action.state === 'failed') {
-      var errMsg = (action.result && action.result.error) || 'Unknown error';
+      // Failed results carry a descriptive summary ("Research failed: …") — show
+      // it, and ALWAYS render Retry (this branch must win over the summary branch
+      // above, hence the explicit !== 'failed' guards there).
+      var errMsg = (action.result && (action.result.summary || action.result.error)) || 'Unknown error';
       body = '<div class="card-body"><p style="color:var(--gb-red)">' + escapeHtml(errMsg) + '</p>';
       // Failed/timed-out workers are re-runnable: action.approve resets the
       // failed action and re-executes it (registry.approve handles the reset).
@@ -3627,37 +4104,90 @@ const PRESENT_HTML = `<!DOCTYPE html>
     card.innerHTML =
       '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--gb-overlay0);position:sticky;top:0;background:var(--gb-base)">' +
         '<strong style="font-size:14px">Self-Review &mdash; ' + escapeHtml(title || 'Meeting') + '</strong>' +
-        '<button class="btn btn-ghost btn-sm" id="reviewModalClose">Close</button>' +
+        '<div style="display:flex;gap:8px">' +
+          '<button class="btn btn-ghost btn-sm" id="reviewModalRerun" style="display:none">&#8635; Re-run</button>' +
+          '<button class="btn btn-ghost btn-sm" id="reviewModalClose">Close</button>' +
+        '</div>' +
       '</div>' +
-      '<div id="reviewModalBody" style="padding:16px 20px;font-size:13px;line-height:1.55">' +
-        '<p style="color:var(--gb-overlay2)">Reviewing the meeting&hellip; runs Sonnet on the full transcript &mdash; this can take ~30&ndash;90s.</p>' +
-      '</div>';
+      '<div id="reviewModalBody" style="padding:16px 20px;font-size:13px;line-height:1.55"></div>';
     modal.appendChild(card);
     document.body.appendChild(modal);
 
-    var close = function() { modal.remove(); };
+    var rerunBtn = card.querySelector('#reviewModalRerun');
+    var progressTimer = null;
+    function stopProgress() { if (progressTimer) { clearInterval(progressTimer); progressTimer = null; } }
+
+    var close = function() { stopProgress(); modal.remove(); };
     card.querySelector('#reviewModalClose').onclick = close;
     modal.addEventListener('click', function(e) { if (e.target === modal) close(); });
 
-    fetch('/present/review', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: id }),
-    })
-      .then(function(r) { return r.json().then(function(j) { return { ok: r.ok, j: j }; }); })
-      .then(function(res) {
-        var body = document.getElementById('reviewModalBody');
-        if (!body) return;
-        if (!res.ok || !res.j || res.j.error) {
-          body.innerHTML = '<p style="color:var(--gb-red)">Review failed: ' + escapeHtml((res.j && res.j.error) || 'unknown error') + '</p>';
-          return;
-        }
-        body.innerHTML = renderMarkdown(res.j.markdown || '(empty review)');
+    // The review is a single blocking call (no streaming), so the bar is a
+    // time-based estimate: it eases toward ~92% over the expected window and
+    // snaps to 100% when the response lands. Never claims done before it is.
+    function showProcessing(refresh) {
+      var body = document.getElementById('reviewModalBody');
+      if (!body) return;
+      body.innerHTML =
+        '<div style="display:flex;align-items:flex-start;color:var(--gb-overlay2)">' +
+          '<span class="review-spinner"></span>' +
+          '<span>' + (refresh ? 'Regenerating the review' : 'Loading the review') +
+          '&hellip; a fresh run uses Opus on the full transcript and can take ~30&ndash;120s.</span>' +
+        '</div>' +
+        '<div class="review-progress"><div class="review-progress-bar" id="reviewProgressBar"></div></div>';
+      var bar = document.getElementById('reviewProgressBar');
+      var start = Date.now();
+      var ESTIMATE_MS = 45000; // easing time-constant
+      stopProgress();
+      progressTimer = setInterval(function() {
+        var pct = 92 * (1 - Math.exp(-(Date.now() - start) / ESTIMATE_MS));
+        if (bar) bar.style.width = pct.toFixed(1) + '%';
+      }, 200);
+    }
+    // Snap the bar to 100%, then run cb after the fill transition so the
+    // completed bar is briefly visible before the result replaces it.
+    function finishProgress(cb) {
+      stopProgress();
+      var bar = document.getElementById('reviewProgressBar');
+      if (bar) { bar.style.width = '100%'; setTimeout(cb, 200); } else { cb(); }
+    }
+
+    // refresh=false → return the review saved with the meeting if one exists
+    // (instant); refresh=true → regenerate with Opus and re-save.
+    function loadReview(refresh) {
+      rerunBtn.style.display = 'none';
+      showProcessing(refresh);
+      fetch('/present/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: id, refresh: !!refresh }),
       })
-      .catch(function(err) {
-        var body = document.getElementById('reviewModalBody');
-        if (body) body.innerHTML = '<p style="color:var(--gb-red)">Review failed: ' + escapeHtml(String(err)) + '</p>';
-      });
+        .then(function(r) { return r.json().then(function(j) { return { ok: r.ok, j: j }; }); })
+        .then(function(res) {
+          finishProgress(function() {
+            var b = document.getElementById('reviewModalBody');
+            if (!b) return;
+            if (!res.ok || !res.j || res.j.error) {
+              b.innerHTML = '<p style="color:var(--gb-red)">Review failed: ' + escapeHtml((res.j && res.j.error) || 'unknown error') + '</p>';
+              rerunBtn.style.display = '';
+              return;
+            }
+            var footer = res.j.cached
+              ? '<p style="color:var(--gb-overlay2);font-size:11px;margin-top:18px;padding-top:10px;border-top:1px solid var(--gb-overlay0)">Saved review &middot; press &#8635; Re-run to regenerate with Opus.</p>'
+              : '';
+            b.innerHTML = '<div class="review-md">' + renderMarkdown(res.j.markdown || '(empty review)') + '</div>' + footer;
+            rerunBtn.style.display = '';
+          });
+        })
+        .catch(function(err) {
+          stopProgress();
+          var b = document.getElementById('reviewModalBody');
+          if (b) b.innerHTML = '<p style="color:var(--gb-red)">Review failed: ' + escapeHtml(String(err)) + '</p>';
+          rerunBtn.style.display = '';
+        });
+    }
+
+    rerunBtn.onclick = function() { loadReview(true); };
+    loadReview(false);
   };
 
   window.toggleManageMode = function() {
@@ -3819,6 +4349,15 @@ const PRESENT_HTML = `<!DOCTYPE html>
         case 'session.state':
           sessionState = msg.state;
           sessionId = msg.sessionId || sessionId;
+          // Manage the wrap-up watchdog: arm it on 'ending', disarm on any
+          // terminal/other state so it can't fire after the session resolves.
+          if (msg.state === 'ending') {
+            endingMessage = msg.message || 'Wrapping up…';
+            armEndingWatchdog();
+          } else {
+            endingMessage = '';
+            disarmEndingWatchdog();
+          }
           if (msg.state === 'live' && !sessionStartTime) {
             sessionStartTime = Date.now();
             startTimer();
@@ -3857,17 +4396,26 @@ const PRESENT_HTML = `<!DOCTYPE html>
           break;
 
         case 'action.suggested':
-          if (msg.action) renderAction({
-            id: msg.action.id,
-            type: msg.action.type,
-            title: msg.action.title,
-            description: msg.action.description,
-            triggerQuote: msg.action.triggerQuote,
-            estimatedDurationSec: msg.action.estimatedDurationSec,
-            state: msg.action.state || 'suggested',
-            completedAt: null,
-            result: null,
-          });
+          if (msg.action) {
+            var sa = {
+              id: msg.action.id,
+              type: msg.action.type,
+              title: msg.action.title,
+              description: msg.action.description,
+              triggerQuote: msg.action.triggerQuote,
+              estimatedDurationSec: msg.action.estimatedDurationSec,
+              state: msg.action.state || 'suggested',
+              completedAt: null,
+              result: null,
+              streaming: msg.action.streaming,
+              paramsReady: msg.action.paramsReady,
+              pendingApproval: msg.action.pendingApproval,
+            };
+            // While streaming, grow the existing card in place (stable Approve
+            // button); for a new card or the final settle, do a full render.
+            if (sa.streaming && actionCards.get(sa.id)) updateStreamingCardInPlace(sa);
+            else renderAction(sa);
+          }
           break;
 
         case 'intelligence.status':
@@ -3908,6 +4456,10 @@ const PRESENT_HTML = `<!DOCTYPE html>
             }
             break;
           }
+          // 'suggested' (incl. streaming + pre-approval) updates arrive via
+          // action.suggested, which preserves the growing card text. Skip here
+          // so this DOM-derived re-render doesn't wipe the streamed description.
+          if (msg.state === 'suggested') break;
           var existing = actionCards.get(msg.actionId);
           if (existing) {
             // Re-render with updated state
@@ -3932,14 +4484,15 @@ const PRESENT_HTML = `<!DOCTYPE html>
           if (streamCard) {
             var streamText = streamCard.querySelector('.streaming-text');
             if (streamText) {
-              // Hide the "Running..." placeholder on first delta
+              // Hide the "Running..." placeholder on the first delta.
               var placeholder = streamCard.querySelector('.streaming-placeholder');
-              if (placeholder && streamText.textContent === '') {
-                placeholder.style.display = 'none';
-              }
-              streamText.textContent += msg.delta;
-              // No auto-scroll: with newest-first ordering the streaming card
-              // is already at the top, and forcing scroll fights reading.
+              if (placeholder && !streamText._md) placeholder.style.display = 'none';
+              // Accumulate raw markdown on the element; render it formatted,
+              // throttled to one paint per frame (the box stays fixed-height +
+              // scrollable, following the stream unless the user scrolls up).
+              streamText._md = (streamText._md || '') + msg.delta;
+              streamPending.add(streamText);
+              scheduleStreamRender();
             }
           }
           break;

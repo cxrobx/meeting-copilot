@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { claudeTriage, claudeSuggest } from '../claude-cli.js';
+import { parsePartialSuggestion, type PartialSuggestion } from './partial-json.js';
 import type { TranscriptSegment } from '../transcription/types.js';
 import type { ActionSuggestion } from '../workers/types.js';
 import type { ProjectContext } from '../project/index.js';
@@ -22,7 +23,7 @@ const WINDOW_DURATION_MS = 5 * 60 * 1000; // 5 minutes
 const BASE_EVAL_INTERVAL_MS = 15_000;
 const BACKOFF_EVAL_INTERVAL_MS = 30_000;
 const MAX_EVAL_IN_FLIGHT = 2;
-const EVAL_QUEUE_DEPTH = 3;
+const EVAL_QUEUE_DEPTH = 5;
 const CONTEXT_COMPRESSION_INTERVAL_MS = 5 * 60 * 1000;
 const OVERLAP_HISTORY_SIZE = 5;
 const OVERLAP_THRESHOLD = 0.8;
@@ -67,6 +68,15 @@ export class IntelligenceEngine extends EventEmitter {
   private suggestionCallback:
     | ((suggestion: ActionSuggestion) => void)
     | null = null;
+  /**
+   * Streaming suggestion updates. Fires repeatedly as the Sonnet JSON streams
+   * in (final=null), then once more when parsing completes (final set, or
+   * done=true with final=null on parse failure so the consumer can drop the
+   * in-progress card). `id` is stable across one suggestion's updates.
+   */
+  private partialSuggestionCallback:
+    | ((update: { id: string; partial: PartialSuggestion; final: ActionSuggestion | null; done: boolean }) => void)
+    | null = null;
   private contextSummaryCallback:
     | ((summary: { summary: string; windowStart: number; windowEnd: number }) => void)
     | null = null;
@@ -77,6 +87,12 @@ export class IntelligenceEngine extends EventEmitter {
 
   onSuggestion(callback: (suggestion: ActionSuggestion) => void): void {
     this.suggestionCallback = callback;
+  }
+
+  onPartialSuggestion(
+    callback: (update: { id: string; partial: PartialSuggestion; final: ActionSuggestion | null; done: boolean }) => void,
+  ): void {
+    this.partialSuggestionCallback = callback;
   }
 
   onContextSummary(
@@ -369,6 +385,33 @@ export class IntelligenceEngine extends EventEmitter {
       : undefined;
 
     // CLI-only (subscription, no paid API): streaming Sonnet via claudeSuggest.
+    // Stable id correlates every partial of this one suggestion so the consumer
+    // can build one growing card and pre-approve it before generation finishes.
+    const sid = randomUUID();
+    let buffer = '';
+    let lastEmit = 0;
+    let lastParamsReady = false;
+    const emit = (final: ActionSuggestion | null, done: boolean): void => {
+      if (!this.partialSuggestionCallback) return;
+      this.partialSuggestionCallback({ id: sid, partial: parsePartialSuggestion(buffer), final, done });
+    };
+    const onDelta = (chunk: string): void => {
+      buffer += chunk;
+      if (!this.partialSuggestionCallback) return;
+      const partial = parsePartialSuggestion(buffer);
+      const now = Date.now();
+      // Throttle to ~50ms, but always emit the instant params closes (that's the
+      // moment a pre-approved worker can launch) or the first time a title lands.
+      if (partial.paramsReady && !lastParamsReady) {
+        lastParamsReady = true;
+        lastEmit = now;
+        this.partialSuggestionCallback({ id: sid, partial, final: null, done: false });
+      } else if (now - lastEmit > 50) {
+        lastEmit = now;
+        this.partialSuggestionCallback({ id: sid, partial, final: null, done: false });
+      }
+    };
+
     const text = await claudeSuggest(
       buildSonnetSuggestPrompt(
         window,
@@ -380,13 +423,16 @@ export class IntelligenceEngine extends EventEmitter {
         contextBlock,
       ),
       SONNET_SUGGEST_SYSTEM,
+      undefined,
+      undefined,
+      { onDelta },
     );
 
     try {
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       const raw = jsonMatch ? jsonMatch[0] : text;
       const result = JSON.parse(raw) as SonnetSuggestionResult;
-      return {
+      const final: ActionSuggestion = {
         type: result.type,
         title: result.title,
         description: result.description,
@@ -394,7 +440,11 @@ export class IntelligenceEngine extends EventEmitter {
         estimatedDurationSec: result.estimatedDurationSec,
         params: result.params,
       };
+      buffer = raw; // ensure the final partial reflects the clean JSON
+      emit(final, true);
+      return final;
     } catch {
+      emit(null, true); // tell the consumer to drop the in-progress card
       return null;
     }
   }

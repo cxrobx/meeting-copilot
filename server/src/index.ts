@@ -46,6 +46,7 @@ import type { ActionSuggestion, ActionLifecycle } from './workers/types.js';
 import { isAnthropicApiAvailable } from './api/anthropic.js';
 import { isOpenAiApiAvailable } from './api/openai.js';
 import { paidApiDisabled } from './api/killswitch.js';
+import { disposeAllWarmSessions } from './persistent-claude.js';
 
 // Load environment — prefer ~/.meeting-copilot/.env so a packaged .app
 // user has a stable, user-writable location for API keys that survives
@@ -56,6 +57,14 @@ if (existsSync(USER_ENV_PATH)) {
 } else {
   dotenv.config();
 }
+
+// ─── Background-CLI marker ────────────────────────────────────────────────
+// Every realtime AI call (triage/suggest/agenda/coach/factcheck) and every
+// worker spawns the `claude`/`gemini`/`codex` CLI in headless --print mode.
+// Each spawn inherits this env var, which propagates to any hooks those CLIs
+// run (e.g. a user's global Stop hook that plays a sound). User hooks should
+// no-op when MEETING_COPILOT is set so a live meeting isn't a wall of dings.
+process.env.MEETING_COPILOT = '1';
 
 // ─── Shared Transcript Config ─────────────────────────────────────────────
 if (process.env.SHARE_TRANSCRIPT === 'false') {
@@ -92,7 +101,16 @@ type InboundMessage =
   | { type: 'action.approve'; actionId: string }
   | { type: 'action.dismiss'; actionId: string }
   | { type: 'action.cancel'; actionId: string }
-  | { type: 'action.trigger'; actionType: string; prompt?: string }
+  | {
+      type: 'action.trigger';
+      actionType: string;
+      prompt?: string;
+      // Card-derived mockups (right-click → Mockup / Revise mock): the source
+      // card's text, and — for revisions — the existing wireframe/HTML to edit.
+      cardContent?: string;
+      baseWireframe?: string;
+      baseHtml?: string;
+    }
   | { type: 'feature.toggle'; feature: 'factcheck' | 'coach'; enabled: boolean }
   | { type: 'meeting.goals'; goals: string };
 
@@ -127,6 +145,9 @@ type OutboundMessage =
         estimatedDurationSec: number;
         state: string;
         createdAt: string; // ISO-8601
+        streaming?: boolean;
+        paramsReady?: boolean;
+        pendingApproval?: boolean;
       };
     }
   | {
@@ -134,6 +155,9 @@ type OutboundMessage =
       actionId: string;
       state: string;
       result?: any;
+      streaming?: boolean;
+      paramsReady?: boolean;
+      pendingApproval?: boolean;
     }
   | {
       type: 'action.stream';
@@ -144,6 +168,8 @@ type OutboundMessage =
       type: 'session.state';
       state: 'idle' | 'priming' | 'live' | 'degraded' | 'ending' | 'error' | 'archived';
       sessionId?: string;
+      // Optional progress hint shown while state==='ending' (post-meeting workers).
+      message?: string;
     }
   | {
       type: 'metrics';
@@ -175,6 +201,16 @@ type OutboundMessage =
 let sessionStore: SessionStore | null = null;
 let eventLogger: EventLogger | null = null;
 let sessionActive = false;
+
+// Post-stop lifecycle, tracked independently of sessionActive so a client that
+// (re)connects — or missed the single terminal broadcast — resolves to the
+// correct view instead of falling back to live/idle and stranding on "Ending…".
+//   'ending'   = stop received; post-meeting workers (summary/self-review) draining
+//   'archived' = fully stopped; review view
+//   null       = no ended session this run (idle or live)
+// Reset to null on session.start.
+let postSessionState: 'ending' | 'archived' | null = null;
+let lastSessionId: string | null = null;
 
 // Rolling summary: periodically refreshes the summary card with updated transcript
 let rollingSummaryId: string | null = null;
@@ -384,11 +420,17 @@ function handleWsConnection(ws: WebSocket, label: string): void {
   clients.add(ws);
   debugLog(`[${label}] Client connected (total: ${clients.size})`);
 
-  // Send current state (values match Swift SessionState enum)
+  // Send current state (values match Swift SessionState enum). postSessionState
+  // takes precedence so a reconnect during/after stop resolves to ending/archived
+  // rather than falling back to live/idle and stranding the UI on "Ending…".
+  const reportedState = postSessionState ?? (sessionActive ? 'live' : 'idle');
   const stateMsg: OutboundMessage = {
     type: 'session.state',
-    state: sessionActive ? 'live' : 'idle',
-    sessionId: sessionStore?.id,
+    state: reportedState,
+    sessionId: sessionStore?.id ?? lastSessionId ?? undefined,
+    ...(reportedState === 'ending'
+      ? { message: 'Wrapping up — generating summary & self-review…' }
+      : {}),
   };
   ws.send(JSON.stringify(stateMsg));
 
@@ -536,6 +578,10 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         console.warn('[Session] Session already active, ignoring start');
         return;
       }
+
+      // A new meeting supersedes any archived/ending lifecycle from the last one.
+      postSessionState = null;
+      lastSessionId = null;
 
       // Create new session
       sessionStore = new SessionStore();
@@ -727,6 +773,15 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         console.warn('[Session] No active session to stop');
         return;
       }
+      // Idempotent: a second stop (double-click, app + browser both sending)
+      // while workers are draining must not re-run the wrap-up sequence.
+      if (postSessionState === 'ending') {
+        debugLog('[Session] Stop already in progress, ignoring');
+        return;
+      }
+
+      postSessionState = 'ending';
+      lastSessionId = sessionStore.id;
 
       eventLogger?.log('session.stop', {
         sessionId: sessionStore.id,
@@ -734,150 +789,182 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       });
       debug.recordStateTransition();
 
-      // Drain any VAD-buffered partial utterance (Phase 3 hook — no-op today).
-      try {
-        await transcription.flushPending();
-      } catch {
-        /* non-critical */
-      }
-      // Close any open stitched sentences so the final transcript (read below
-      // for the summary + review) holds complete, cohesive segments.
-      transcriptStitcher.flushAll();
-      transcription.clearSessionPrompt();
-
-      // Stop rolling summary
-      if (rollingSummaryTimer) {
-        clearInterval(rollingSummaryTimer);
-        rollingSummaryTimer = null;
-      }
-      rollingSummaryId = null;
-      rollingSummaryWordCount = 0;
-
-      // Run a final agenda evaluation so the wrap-up state is captured before stop
-      try {
-        await agendaTracker.evaluateNow();
-      } catch {
-        // Non-critical — don't block shutdown
-      }
-      agendaTracker.stop();
-
-      // Stop opt-in monitors
-      featureFlags.factcheck = false;
-      featureFlags.coach = false;
-      applyFeatureFlags();
-      broadcast({ type: 'feature.state', features: { ...featureFlags } });
-
-      // Stop intelligence
-      intelligence.stop();
-
-      // Auto-generate end-of-meeting summary
-      try {
-        const transcriptRecords = sessionStore.getTranscript();
-        if (transcriptRecords.length > 0) {
-          const fullTranscript = transcriptRecords
-            .map((r) => `${r.label} ${r.text}`)
-            .join('\n');
-          const session = sessionStore.getSession();
-          const summaryAction = registry.suggest({
-            type: 'summary',
-            title: `Meeting Summary: ${session?.title || 'Untitled'}`,
-            description: 'Auto-generated end-of-meeting summary',
-            triggerQuote: fullTranscript.slice(-200),
-            estimatedDurationSec: 30,
-            params: {
-              transcript: fullTranscript,
-              scope: 'full',
-              title: session?.title,
-            },
-          });
-          if (summaryAction) {
-            sessionStore.addAction({
-              id: summaryAction.id,
-              type: summaryAction.type,
-              title: summaryAction.title,
-              description: summaryAction.description,
-              triggerQuote: summaryAction.triggerQuote,
-              state: summaryAction.state,
-              params: summaryAction.params,
-              createdAt: summaryAction.createdAt,
-            });
-            registry.approve(summaryAction.id);
-            debugLog('[Session] Auto-summary triggered');
-          }
-        }
-      } catch (error) {
-        console.error('[Session] Failed to trigger auto-summary:', error instanceof Error ? error.message : String(error));
-      }
-
-      // Auto-generate a post-meeting self-review (how the USER performed) +
-      // cross-meeting trends. Runs in the same onMeetingEnd grace window as the
-      // summary; if a long transcript exceeds the window it fails → Retry card.
-      try {
-        const transcriptRecords = sessionStore.getTranscript();
-        if (transcriptRecords.length > 0) {
-          const session = sessionStore.getSession();
-          const reviewParams = buildReviewParams({
-            transcriptRecords,
-            title: session?.title,
-            sessionId: sessionStore.id,
-            agendaSummary:
-              lastAgendaStatus && lastAgendaStatus.items.length > 0
-                ? lastAgendaStatus.items.map((i) => `[${i.state}] ${i.text}`).join('\n') +
-                  (lastAgendaStatus.missing.length > 0
-                    ? `\nPossibly missing: ${lastAgendaStatus.missing.join('; ')}`
-                    : '')
-                : '',
-            goals: meetingGoals,
-            factFlags: sessionFactFlags
-              .filter((f) => f.speaker === 'you')
-              .map((f) => ({ claim: f.claim, verdict: f.verdict, correction: f.correction })),
-          });
-          const reviewAction = registry.suggest({
-            type: 'review',
-            title: `Self-Review: ${session?.title || 'Untitled'}`,
-            description: 'Post-meeting self-review — how you did, with cross-meeting trends',
-            triggerQuote: String(reviewParams.transcript).slice(-200),
-            estimatedDurationSec: 30,
-            params: reviewParams,
-          });
-          if (reviewAction) {
-            sessionStore.addAction({
-              id: reviewAction.id,
-              type: reviewAction.type,
-              title: reviewAction.title,
-              description: reviewAction.description,
-              triggerQuote: reviewAction.triggerQuote,
-              state: reviewAction.state,
-              params: reviewAction.params,
-              createdAt: reviewAction.createdAt,
-            });
-            registry.approve(reviewAction.id);
-            debugLog('[Session] Auto-review triggered');
-          }
-        }
-      } catch (error) {
-        console.error('[Session] Failed to trigger auto-review:', error instanceof Error ? error.message : String(error));
-      }
-
-      // Let workers finish (includes auto-summary + auto-review if triggered)
-      await registry.onMeetingEnd();
-
-      // Remove shared presence
-      removePresence();
-
-      // Update store
-      sessionStore.updateState('ended');
-      sessionStore.close();
-      sessionStore = null;
-      eventLogger = null;
-      sessionActive = false;
-
-      debugLog('[Session] Stopped');
-
+      // Authoritative "ending" broadcast — settles the optimistic client flip and
+      // lets every client (the app, a reconnecting browser) know the meeting is
+      // wrapping up. The terminal "archived" is broadcast in the finally below so
+      // it fires even if the wrap-up sequence throws.
       broadcast({
         type: 'session.state',
-        state: 'archived',
+        state: 'ending',
+        sessionId: lastSessionId,
+        message: 'Wrapping up — generating summary & self-review…',
       });
+
+      try {
+        // Drain any VAD-buffered partial utterance (Phase 3 hook — no-op today).
+        try {
+          await transcription.flushPending();
+        } catch {
+          /* non-critical */
+        }
+        // Close any open stitched sentences so the final transcript (read below
+        // for the summary + review) holds complete, cohesive segments.
+        transcriptStitcher.flushAll();
+        transcription.clearSessionPrompt();
+
+        // Stop rolling summary
+        if (rollingSummaryTimer) {
+          clearInterval(rollingSummaryTimer);
+          rollingSummaryTimer = null;
+        }
+        rollingSummaryId = null;
+        rollingSummaryWordCount = 0;
+
+        // Run a final agenda evaluation so the wrap-up state is captured before stop
+        try {
+          await agendaTracker.evaluateNow();
+        } catch {
+          // Non-critical — don't block shutdown
+        }
+        agendaTracker.stop();
+
+        // Stop opt-in monitors
+        featureFlags.factcheck = false;
+        featureFlags.coach = false;
+        applyFeatureFlags();
+        broadcast({ type: 'feature.state', features: { ...featureFlags } });
+
+        // Stop intelligence
+        intelligence.stop();
+
+        // Auto-generate end-of-meeting summary
+        try {
+          const transcriptRecords = sessionStore.getTranscript();
+          if (transcriptRecords.length > 0) {
+            const fullTranscript = transcriptRecords
+              .map((r) => `${r.label} ${r.text}`)
+              .join('\n');
+            const session = sessionStore.getSession();
+            const summaryAction = registry.suggest({
+              type: 'summary',
+              title: `Meeting Summary: ${session?.title || 'Untitled'}`,
+              description: 'Auto-generated end-of-meeting summary',
+              triggerQuote: fullTranscript.slice(-200),
+              estimatedDurationSec: 30,
+              params: {
+                transcript: fullTranscript,
+                scope: 'full',
+                title: session?.title,
+              },
+            });
+            if (summaryAction) {
+              sessionStore.addAction({
+                id: summaryAction.id,
+                type: summaryAction.type,
+                title: summaryAction.title,
+                description: summaryAction.description,
+                triggerQuote: summaryAction.triggerQuote,
+                state: summaryAction.state,
+                params: summaryAction.params,
+                createdAt: summaryAction.createdAt,
+              });
+              registry.approve(summaryAction.id);
+              debugLog('[Session] Auto-summary triggered');
+            }
+          }
+        } catch (error) {
+          console.error('[Session] Failed to trigger auto-summary:', error instanceof Error ? error.message : String(error));
+        }
+
+        // Auto-generate a post-meeting self-review (how the USER performed) +
+        // cross-meeting trends. Runs in the same onMeetingEnd grace window as the
+        // summary; if a long transcript exceeds the window it fails → Retry card.
+        try {
+          const transcriptRecords = sessionStore.getTranscript();
+          if (transcriptRecords.length > 0) {
+            const session = sessionStore.getSession();
+            const reviewParams = buildReviewParams({
+              transcriptRecords,
+              title: session?.title,
+              sessionId: sessionStore.id,
+              agendaSummary:
+                lastAgendaStatus && lastAgendaStatus.items.length > 0
+                  ? lastAgendaStatus.items.map((i) => `[${i.state}] ${i.text}`).join('\n') +
+                    (lastAgendaStatus.missing.length > 0
+                      ? `\nPossibly missing: ${lastAgendaStatus.missing.join('; ')}`
+                      : '')
+                  : '',
+              goals: meetingGoals,
+              factFlags: sessionFactFlags
+                .filter((f) => f.speaker === 'you')
+                .map((f) => ({ claim: f.claim, verdict: f.verdict, correction: f.correction })),
+            });
+            const reviewAction = registry.suggest({
+              type: 'review',
+              title: `Self-Review: ${session?.title || 'Untitled'}`,
+              description: 'Post-meeting self-review — how you did, with cross-meeting trends',
+              triggerQuote: String(reviewParams.transcript).slice(-200),
+              estimatedDurationSec: 30,
+              params: reviewParams,
+            });
+            if (reviewAction) {
+              sessionStore.addAction({
+                id: reviewAction.id,
+                type: reviewAction.type,
+                title: reviewAction.title,
+                description: reviewAction.description,
+                triggerQuote: reviewAction.triggerQuote,
+                state: reviewAction.state,
+                params: reviewAction.params,
+                createdAt: reviewAction.createdAt,
+              });
+              registry.approve(reviewAction.id);
+              debugLog('[Session] Auto-review triggered');
+            }
+          }
+        } catch (error) {
+          console.error('[Session] Failed to trigger auto-review:', error instanceof Error ? error.message : String(error));
+        }
+
+        // Let workers finish (includes auto-summary + auto-review if triggered)
+        await registry.onMeetingEnd();
+      } catch (error) {
+        console.error(
+          '[Session] Stop sequence error:',
+          error instanceof Error ? error.message : String(error),
+        );
+      } finally {
+        // Always finalize — even if the wrap-up sequence above threw — so the UI
+        // can never strand on "Ending…". Each step is independently guarded so a
+        // late failure can't skip the terminal broadcast.
+        try {
+          removePresence();
+        } catch {
+          /* non-critical */
+        }
+        try {
+          sessionStore?.updateState('ended');
+        } catch {
+          /* non-critical */
+        }
+        try {
+          sessionStore?.close();
+        } catch {
+          /* non-critical */
+        }
+        sessionStore = null;
+        eventLogger = null;
+        sessionActive = false;
+        postSessionState = 'archived';
+
+        debugLog('[Session] Stopped');
+
+        broadcast({
+          type: 'session.state',
+          state: 'archived',
+          sessionId: lastSessionId ?? undefined,
+        });
+      }
       break;
     }
 
@@ -1009,11 +1096,20 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       const actionType = message.actionType as 'research' | 'fast-research' | 'summary' | 'mockup' | 'codegen' | 'analysis';
       const description = message.prompt ?? `Manual ${actionType} on current transcript`;
 
+      // Card-derived mockup: a right-click "Mockup"/"Revise mock" carries the
+      // source card's text (cardContent) and, for a revision, the base
+      // wireframe/HTML. These are deliberate user clicks, so bypass dedup.
+      const mockupBase = actionType === 'mockup' ? (message.baseWireframe || message.baseHtml) : undefined;
+      const isCardDerived = actionType === 'mockup' && Boolean(message.cardContent || mockupBase);
+
+      const titleVerb = mockupBase ? 'Mockup revision' : `${actionType.charAt(0).toUpperCase() + actionType.slice(1)}`;
       const suggestion: ActionSuggestion = {
         type: actionType,
         title: message.prompt
-          ? `${actionType.charAt(0).toUpperCase() + actionType.slice(1)}: ${message.prompt}`
-          : `Manual ${actionType.charAt(0).toUpperCase() + actionType.slice(1)}`,
+          ? `${titleVerb}: ${message.prompt}`
+          : mockupBase
+            ? 'Mockup revision'
+            : `Manual ${actionType.charAt(0).toUpperCase() + actionType.slice(1)}`,
         description,
         triggerQuote: window.slice(-200),
         estimatedDurationSec: 30,
@@ -1037,12 +1133,26 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
                 topic: message.prompt || 'Analyze current discussion',
                 context: window,
               };
-            case 'mockup':
-              // Mockup worker requires `description`; the prompt is that.
+            case 'mockup': {
+              // Mockup worker requires `description`; the prompt is that. For a
+              // card-derived mockup, fold the source card's text into context and
+              // (for revisions) pass the existing wireframe/HTML through as the base.
+              const mockupContext = [window, message.cardContent ? `Source card:\n${message.cardContent}` : '']
+                .filter(Boolean)
+                .join('\n\n');
               return {
-                description: message.prompt || 'UI mockup from the current discussion',
-                context: window,
+                description:
+                  message.prompt ||
+                  (mockupBase
+                    ? 'Refine and improve this mockup'
+                    : message.cardContent
+                      ? `UI mockup based on: ${message.cardContent.slice(0, 200)}`
+                      : 'UI mockup from the current discussion'),
+                context: mockupContext,
+                ...(message.baseWireframe ? { baseWireframe: message.baseWireframe } : {}),
+                ...(message.baseHtml ? { baseHtml: message.baseHtml } : {}),
               };
+            }
             case 'codegen':
               // CodeGen worker requires `task`.
               return {
@@ -1079,7 +1189,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
           : `Reference Documents:\n${docsBlock}`;
       }
 
-      const action = registry.suggest(suggestion);
+      const action = registry.suggest(suggestion, isCardDerived ? { force: true } : undefined);
       if (!action) {
         debugLog('[Action] Manual trigger filtered by dedup');
         return;
@@ -1130,32 +1240,113 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
 
 // ─── Intelligence → WebSocket Bridge ───────────────────────────────────────
 
-intelligence.onSuggestion((suggestion: ActionSuggestion) => {
-  // Inject project context into worker params so workers get codebase awareness
+// Inject project + context-doc awareness into a worker's params (once per
+// suggestion — the params object that the worker will actually execute with).
+function injectWorkerContext(params: Record<string, any>, triggerQuote: string): void {
   const projectContext = intelligence.getProjectContext();
   if (projectContext.length > 0) {
     const projectBlock = projectContext.map((c) => formatProjectBrief(c)).join('\n---\n');
-    const existing = suggestion.params.context ?? '';
-    suggestion.params.context = existing
-      ? `${existing}\n\nProject Context:\n${projectBlock}`
-      : `Project Context:\n${projectBlock}`;
-    suggestion.params._projectPaths = projectContext.map((c) => c.path);
+    const existing = params.context ?? '';
+    params.context = existing ? `${existing}\n\nProject Context:\n${projectBlock}` : `Project Context:\n${projectBlock}`;
+    params._projectPaths = projectContext.map((c) => c.path);
   }
-
-  // Inject context directory docs into worker params
   const contextDocs = intelligence.getContextDocs();
   if (contextDocs.length > 0) {
-    const docsBlock = buildContextBlock(contextDocs, suggestion.triggerQuote);
-    const existing = suggestion.params.context ?? '';
-    suggestion.params.context = existing
-      ? `${existing}\n\nReference Documents:\n${docsBlock}`
-      : `Reference Documents:\n${docsBlock}`;
+    const docsBlock = buildContextBlock(contextDocs, triggerQuote);
+    const existing = params.context ?? '';
+    params.context = existing ? `${existing}\n\nReference Documents:\n${docsBlock}` : `Reference Documents:\n${docsBlock}`;
+  }
+}
+
+function broadcastActionCard(action: ActionLifecycle): void {
+  broadcast({
+    type: 'action.suggested',
+    action: {
+      id: action.id,
+      type: action.type,
+      title: action.title,
+      description: action.description,
+      triggerQuote: action.triggerQuote,
+      estimatedDurationSec: action.estimatedDurationSec,
+      state: action.state,
+      streaming: action.streaming ?? false,
+      paramsReady: action.paramsReady ?? false,
+      pendingApproval: action.pendingApproval ?? false,
+      createdAt: new Date(action.createdAt).toISOString(),
+    },
+  });
+}
+
+// Streaming suggestion: the card is created and broadcast WHILE the Sonnet JSON
+// is still generating, so the user can pre-approve it. When params close (and
+// if pre-approved), the worker launches immediately — no waiting for the rest.
+const injectedSuggestionIds = new Set<string>();
+
+intelligence.onPartialSuggestion(({ id, partial, final, done }) => {
+  if (!done) {
+    if (!partial.type || !partial.title) return; // need enough to show a card
+
+    if (!registry.getAction(id)) {
+      // First meaningful partial → create the streaming card.
+      let params: Record<string, any> | undefined;
+      if (partial.paramsReady && partial.params) {
+        injectWorkerContext(partial.params, partial.triggerQuote ?? '');
+        injectedSuggestionIds.add(id);
+        params = partial.params;
+      }
+      const action = registry.suggestStreaming(id, {
+        type: partial.type,
+        title: partial.title,
+        description: partial.description,
+        triggerQuote: partial.triggerQuote,
+        estimatedDurationSec: partial.estimatedDurationSec,
+        params,
+      });
+      if (params) action.paramsReady = true;
+      broadcastActionCard(action);
+      return;
+    }
+
+    // Subsequent partial → grow the card.
+    const fields: Record<string, any> = {
+      title: partial.title,
+      description: partial.description,
+      triggerQuote: partial.triggerQuote,
+      estimatedDurationSec: partial.estimatedDurationSec,
+    };
+    if (partial.paramsReady && partial.params && !injectedSuggestionIds.has(id)) {
+      injectWorkerContext(partial.params, partial.triggerQuote ?? '');
+      injectedSuggestionIds.add(id);
+      fields.params = partial.params; // first & only time we set params (now injected)
+      fields.paramsReady = true;
+    }
+    registry.updateStreaming(id, fields); // may auto-dispatch if pre-approved
+    const updated = registry.getAction(id);
+    if (updated) broadcastActionCard(updated);
+    return;
   }
 
-  const action = registry.suggest(suggestion);
-  if (!action) return; // Dedup filtered it
+  // done
+  if (!final) {
+    if (registry.getAction(id)) {
+      registry.finalizeStreaming(id, null); // drop the in-progress card
+      broadcast({ type: 'action.status', actionId: id, state: 'cancelled' });
+    }
+    injectedSuggestionIds.delete(id);
+    return;
+  }
 
-  // Persist to store
+  if (!injectedSuggestionIds.has(id)) {
+    injectWorkerContext(final.params, final.triggerQuote);
+    injectedSuggestionIds.add(id);
+  }
+
+  const action = registry.getAction(id)
+    ? registry.finalizeStreaming(id, final)
+    : registry.suggest(final); // never created a streaming card → normal path
+  injectedSuggestionIds.delete(id);
+  if (!action) return; // dedup filtered or dropped
+
   if (sessionStore) {
     sessionStore.addAction({
       id: action.id,
@@ -1168,26 +1359,8 @@ intelligence.onSuggestion((suggestion: ActionSuggestion) => {
       createdAt: action.createdAt,
     });
   }
-
-  eventLogger?.log('action.suggested', {
-    actionId: action.id,
-    type: action.type,
-    title: action.title,
-  });
-
-  broadcast({
-    type: 'action.suggested',
-    action: {
-      id: action.id,
-      type: action.type,
-      title: action.title,
-      description: action.description,
-      triggerQuote: action.triggerQuote,
-      estimatedDurationSec: action.estimatedDurationSec,
-      state: action.state,
-      createdAt: new Date(action.createdAt).toISOString(),
-    },
-  });
+  eventLogger?.log('action.suggested', { actionId: action.id, type: action.type, title: action.title });
+  broadcastActionCard(action);
 });
 
 intelligence.onContextSummary((summary) => {
@@ -1223,6 +1396,9 @@ registry.on('action.status', (action: ActionLifecycle) => {
     actionId: action.id,
     state: action.state,
     result: action.result,
+    streaming: action.streaming ?? false,
+    paramsReady: action.paramsReady ?? false,
+    pendingApproval: action.pendingApproval ?? false,
   });
 });
 
@@ -1413,6 +1589,9 @@ async function shutdown(signal: string): Promise<void> {
   // Stop intelligence + agenda
   intelligence.stop();
   agendaTracker.stop();
+
+  // Kill any warm persistent `claude` sessions so they don't orphan on :17890.
+  disposeAllWarmSessions();
 
   // Close WebSocket connections
   for (const client of clients) {

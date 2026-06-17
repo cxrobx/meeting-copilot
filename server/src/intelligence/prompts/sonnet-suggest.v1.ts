@@ -7,6 +7,9 @@ Available action types:
 - "codegen": Generate code files (API endpoints, functions, components) from discussion
 - "analysis": Analyze data, compare options, evaluate trade-offs
 
+Type selection — prefer "mockup" for anything visual:
+- If the discussion describes or asks about a UI surface — a screen, page, view, layout, form, dashboard, table, list view, flow, or "what it should look like" — choose "mockup", even when "research" or "analysis" could also apply. A described interface is a strong mockup signal; do NOT default to "analysis" for it. When in doubt between "mockup" and "analysis"/"research" for something a user would SEE, pick "mockup".
+
 Guidelines:
 - Be specific in your title and description - vague suggestions are useless
 - The triggerQuote must be an exact substring from the transcript
@@ -64,13 +67,12 @@ Reason: ${triageResult.reason}
 Trigger: "${triageResult.triggerQuote}"
 </triage_analysis>
 
-Respond with JSON:
+Respond with JSON only. Emit the keys in EXACTLY this order — "type", "title",
+then "params" — so the worker can begin the moment "params" is complete, before
+you finish writing the rest:
 {
   "type": "research" | "summary" | "mockup" | "codegen" | "analysis",
   "title": "Short, specific title (under 60 chars)",
-  "description": "Clear description of what the worker should do",
-  "triggerQuote": "exact quote from transcript that triggered this",
-  "estimatedDurationSec": number,
   "params": {
     // type-specific parameters the worker needs
     // For research: { "query": "...", "context": "..." }
@@ -78,7 +80,10 @@ Respond with JSON:
     // For mockup: { "description": "...", "context": "...", "platform": "web"|"mobile"|"desktop", "style": "minimal"|"detailed" }
     // For codegen: { "task": "...", "context": "...", "language": "typescript", "framework": "express", "style": "scaffold"|"complete"|"snippet" }
     // For analysis: { "topic": "...", "context": "...", "compareOptions": [...] }
-  }
+  },
+  "description": "Clear description of what the worker should do",
+  "triggerQuote": "exact quote from transcript that triggered this",
+  "estimatedDurationSec": number
 }`;
 
   return { staticPrefix, dynamicTail };

@@ -61,4 +61,10 @@ export interface ActionLifecycle {
   retryCount: number;
   result?: WorkerResult;
   cancelController: AbortController;
+  /** True while the suggestion JSON is still streaming in (card is forming). */
+  streaming?: boolean;
+  /** True once `params` has fully parsed — safe to dispatch the worker. */
+  paramsReady?: boolean;
+  /** User approved while still streaming + params not ready; dispatch on ready. */
+  pendingApproval?: boolean;
 }

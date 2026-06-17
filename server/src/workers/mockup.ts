@@ -96,6 +96,11 @@ export class MockupWorker implements Worker {
     const description = params.description as string | undefined;
     const context = params.context as string | undefined;
     const platform = (params.platform as string) ?? 'web';
+    // Revision mode: when a base mockup is supplied, `description` is the change
+    // set ("make the header sticky"), not a from-scratch UI description.
+    const baseWireframe = (params.baseWireframe as string | undefined)?.trim() || undefined;
+    const baseHtml = (params.baseHtml as string | undefined)?.trim() || undefined;
+    const isRevision = Boolean(baseWireframe || baseHtml);
     const emitEarly = params._emitEarly as ((partial: WorkerResult) => void) | undefined;
 
     if (!description) {
@@ -120,11 +125,13 @@ export class MockupWorker implements Worker {
 
     try {
       // ── Phase A: fast ASCII wireframe (shown immediately) ──
-      const asciiRaw = await claudeSuggest(
-        `Design an ASCII wireframe for: ${description}\nPlatform: ${platform}${contextSuffix}`,
-        ASCII_SYSTEM,
-        signal,
-      );
+      // In revision mode with a base wireframe, hand the model the original and
+      // ask for the full updated version; otherwise design from scratch.
+      const asciiPrompt =
+        isRevision && baseWireframe
+          ? `Here is an existing ASCII wireframe:\n\n${baseWireframe}\n\nRevise it to apply these changes: ${description}\nReturn the COMPLETE updated wireframe, keeping the same ${WIREFRAME_WIDTH}-column box format.\nPlatform: ${platform}${contextSuffix}`
+          : `Design an ASCII wireframe for: ${description}\nPlatform: ${platform}${contextSuffix}`;
+      const asciiRaw = await claudeSuggest(asciiPrompt, ASCII_SYSTEM, signal);
 
       if (signal.aborted) {
         return {
@@ -139,14 +146,14 @@ export class MockupWorker implements Worker {
       const asciiArtifact = {
         type: 'code' as const,
         content: wireframe,
-        title: `Wireframe: ${description}`,
+        title: `${isRevision ? 'Wireframe (revised)' : 'Wireframe'}: ${description}`,
       };
 
       // Surface the wireframe right away while the HTML phase runs.
       emitEarly?.({
         success: true,
         data: { description, platform, wireframe },
-        summary: `Wireframe ready for: ${description} — rendering HTML…`,
+        summary: `${isRevision ? 'Revised wireframe' : 'Wireframe'} ready for: ${description} — rendering HTML…`,
         artifacts: [asciiArtifact],
       });
 
@@ -154,11 +161,12 @@ export class MockupWorker implements Worker {
       let html: string | null = null;
       let htmlError: string | null = null;
       try {
-        const htmlRaw = await claudeSuggest(
-          `Build an HTML mockup for: ${description}\nPlatform: ${platform}${contextSuffix}`,
-          HTML_SYSTEM,
-          signal,
-        );
+        // Revise the supplied HTML when present; else build from the (possibly
+        // just-revised) description. Either way the model returns a full doc.
+        const htmlPrompt = baseHtml
+          ? `Here is an existing HTML mockup:\n\n${baseHtml}\n\nRevise it to apply these changes: ${description}\nReturn the COMPLETE updated, self-contained HTML document.\nPlatform: ${platform}${contextSuffix}`
+          : `Build an HTML mockup for: ${description}\nPlatform: ${platform}${contextSuffix}`;
+        const htmlRaw = await claudeSuggest(htmlPrompt, HTML_SYSTEM, signal);
         if (signal.aborted) {
           return {
             success: false,
@@ -187,16 +195,17 @@ export class MockupWorker implements Worker {
         artifacts.push({
           type: 'html',
           content: html,
-          title: `HTML Mockup: ${description}`,
+          title: `${isRevision ? 'HTML Mockup (revised)' : 'HTML Mockup'}: ${description}`,
         });
       }
 
+      const verb = isRevision ? 'revised' : 'generated';
       return {
         success: true,
         data: { description, platform, wireframe, html },
         summary: html
-          ? `Mockup generated for: ${description}`
-          : `Wireframe generated for: ${description} (HTML render failed: ${htmlError})`,
+          ? `Mockup ${verb} for: ${description}`
+          : `Wireframe ${verb} for: ${description} (HTML render failed: ${htmlError})`,
         artifacts,
       };
     } catch (error) {
