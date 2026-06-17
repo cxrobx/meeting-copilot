@@ -11,6 +11,14 @@ import type {
 const MAX_CONCURRENT_WORKERS = 3;
 const MAX_RETRY_COUNT = 2;
 const BASE_RETRY_DELAY_MS = 1_000; // 1s, doubled each retry
+// Ceiling for how long onMeetingEnd lets in-flight workers finish before a
+// force-cancel. The auto-summary + auto-review fired at session.stop run on the
+// CLIs (non-streaming Sonnet) over the FULL transcript, which routinely takes
+// >60s — the old 60s ceiling silently killed the self-review on real meetings.
+// The drain resolves the instant running hits 0, so a higher ceiling adds no
+// latency in the common case; it only raises the cap before a genuinely hung
+// worker is abandoned.
+const END_GRACE_MS = 240_000; // 4 min
 // Auto-expire unactioned suggestions after this long (override via SUGGESTION_TTL_MS env var)
 const SUGGESTION_TTL_MS = (() => {
   const raw = Number(process.env.SUGGESTION_TTL_MS);
@@ -228,7 +236,7 @@ export class WorkerRegistry extends EventEmitter {
     }
     this.approvedQueue = [];
 
-    // Give in-flight workers 60s grace period
+    // Give in-flight workers a grace period (see END_GRACE_MS) to finish.
     const runningActions = this.getActionsByState('running');
     if (runningActions.length > 0) {
       await new Promise<void>((resolve) => {
@@ -241,7 +249,7 @@ export class WorkerRegistry extends EventEmitter {
             this.emit('action.status', action);
           }
           resolve();
-        }, 60_000);
+        }, END_GRACE_MS);
 
         // Check periodically if all done
         const check = setInterval(() => {

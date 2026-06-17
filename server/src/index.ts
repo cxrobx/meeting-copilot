@@ -30,7 +30,7 @@ import { SummaryWorker } from './workers/summary.js';
 import { MockupWorker } from './workers/mockup.js';
 import { CodeGenWorker } from './workers/codegen.js';
 import { AnalysisWorker } from './workers/analysis.js';
-import { ReviewWorker } from './workers/review.js';
+import { ReviewWorker, buildReviewParams } from './workers/review.js';
 import { SessionStore } from './session/store.js';
 import { EventLogger } from './session/events.js';
 import { DebugHandler } from './debug/index.js';
@@ -815,41 +815,30 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       try {
         const transcriptRecords = sessionStore.getTranscript();
         if (transcriptRecords.length > 0) {
-          const fullTranscript = transcriptRecords
-            .map((r) => `${r.label} ${r.text}`)
-            .join('\n');
           const session = sessionStore.getSession();
-          let micWords = 0;
-          let meetingWords = 0;
-          for (const r of transcriptRecords) {
-            if (r.source === 'mic') micWords += r.wordCount || 0;
-            else meetingWords += r.wordCount || 0;
-          }
-          const agendaSummary =
-            lastAgendaStatus && lastAgendaStatus.items.length > 0
-              ? lastAgendaStatus.items.map((i) => `[${i.state}] ${i.text}`).join('\n') +
-                (lastAgendaStatus.missing.length > 0
-                  ? `\nPossibly missing: ${lastAgendaStatus.missing.join('; ')}`
-                  : '')
-              : '';
+          const reviewParams = buildReviewParams({
+            transcriptRecords,
+            title: session?.title,
+            sessionId: sessionStore.id,
+            agendaSummary:
+              lastAgendaStatus && lastAgendaStatus.items.length > 0
+                ? lastAgendaStatus.items.map((i) => `[${i.state}] ${i.text}`).join('\n') +
+                  (lastAgendaStatus.missing.length > 0
+                    ? `\nPossibly missing: ${lastAgendaStatus.missing.join('; ')}`
+                    : '')
+                : '',
+            goals: meetingGoals,
+            factFlags: sessionFactFlags
+              .filter((f) => f.speaker === 'you')
+              .map((f) => ({ claim: f.claim, verdict: f.verdict, correction: f.correction })),
+          });
           const reviewAction = registry.suggest({
             type: 'review',
             title: `Self-Review: ${session?.title || 'Untitled'}`,
             description: 'Post-meeting self-review — how you did, with cross-meeting trends',
-            triggerQuote: fullTranscript.slice(-200),
+            triggerQuote: String(reviewParams.transcript).slice(-200),
             estimatedDurationSec: 30,
-            params: {
-              transcript: fullTranscript,
-              title: session?.title,
-              sessionId: sessionStore.id,
-              micWords,
-              meetingWords,
-              agendaSummary,
-              goals: meetingGoals,
-              factFlags: sessionFactFlags
-                .filter((f) => f.speaker === 'you')
-                .map((f) => ({ claim: f.claim, verdict: f.verdict, correction: f.correction })),
-            },
+            params: reviewParams,
           });
           if (reviewAction) {
             sessionStore.addAction({
@@ -947,6 +936,73 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       if (!sessionActive || !sessionStore) {
         console.warn('[Action] No active session for manual trigger');
         return;
+      }
+
+      // Self-review is special: it needs the FULL transcript + talk-ratio +
+      // agenda + fact flags, not the recent triage window. Build it via the
+      // same helper the stop-path auto-review uses, then auto-approve so it
+      // runs immediately as a normal card.
+      if (message.actionType === 'review') {
+        const transcriptRecords = sessionStore.getTranscript();
+        if (transcriptRecords.length === 0) {
+          debugLog('[Action] Review trigger ignored — no transcript yet');
+          return;
+        }
+        const session = sessionStore.getSession();
+        const reviewParams = buildReviewParams({
+          transcriptRecords,
+          title: session?.title,
+          sessionId: sessionStore.id,
+          agendaSummary:
+            lastAgendaStatus && lastAgendaStatus.items.length > 0
+              ? lastAgendaStatus.items.map((i) => `[${i.state}] ${i.text}`).join('\n') +
+                (lastAgendaStatus.missing.length > 0
+                  ? `\nPossibly missing: ${lastAgendaStatus.missing.join('; ')}`
+                  : '')
+              : '',
+          goals: meetingGoals,
+          factFlags: sessionFactFlags
+            .filter((f) => f.speaker === 'you')
+            .map((f) => ({ claim: f.claim, verdict: f.verdict, correction: f.correction })),
+        });
+        const reviewAction = registry.suggest({
+          type: 'review',
+          title: `Self-Review: ${session?.title || 'Untitled'}`,
+          description: message.prompt || 'Self-review of the meeting so far',
+          triggerQuote: String(reviewParams.transcript).slice(-200),
+          estimatedDurationSec: 30,
+          params: reviewParams,
+        });
+        if (!reviewAction) {
+          debugLog('[Action] Review trigger filtered by dedup');
+          return;
+        }
+        sessionStore.addAction({
+          id: reviewAction.id,
+          type: reviewAction.type,
+          title: reviewAction.title,
+          description: reviewAction.description,
+          triggerQuote: reviewAction.triggerQuote,
+          state: reviewAction.state,
+          params: reviewAction.params,
+          createdAt: reviewAction.createdAt,
+        });
+        broadcast({
+          type: 'action.suggested',
+          action: {
+            id: reviewAction.id,
+            type: reviewAction.type,
+            title: reviewAction.title,
+            description: reviewAction.description,
+            triggerQuote: reviewAction.triggerQuote,
+            estimatedDurationSec: reviewAction.estimatedDurationSec,
+            state: reviewAction.state,
+            createdAt: new Date(reviewAction.createdAt).toISOString(),
+          },
+        });
+        registry.approve(reviewAction.id);
+        eventLogger?.log('action.approved', { actionId: reviewAction.id, source: 'manual-review' });
+        break;
       }
 
       const window = intelligence.getTranscriptWindow();

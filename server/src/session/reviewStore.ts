@@ -31,11 +31,18 @@ export function readReviews(): ReviewRecord[] {
   }
 }
 
-/** Append one record, atomically (write tmp → rename). Best-effort. */
+/**
+ * Append one record, atomically (write tmp → rename). Best-effort.
+ * Records are keyed by `sessionId`: re-reviewing the same meeting (e.g. from
+ * the past-meetings "Review" button) REPLACES its prior record rather than
+ * appending a duplicate, so cross-meeting trends never double-count one session.
+ */
 export function appendReview(record: ReviewRecord): void {
   try {
     if (!existsSync(BASE_DIR)) mkdirSync(BASE_DIR, { recursive: true });
-    const all = readReviews();
+    const all = record.sessionId
+      ? readReviews().filter((r) => r.sessionId !== record.sessionId)
+      : readReviews();
     all.push(record);
     const tmp = `${REVIEWS_FILE}.tmp`;
     writeFileSync(tmp, JSON.stringify(all, null, 2), 'utf-8');

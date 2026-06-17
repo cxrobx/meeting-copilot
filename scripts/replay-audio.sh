@@ -30,6 +30,7 @@ fi
 
 # Check server is reachable
 PORT=17890
+prev_arg=""   # initialise so `set -u` doesn't abort on the first loop iteration
 for arg in "$@"; do
     if [ "$prev_arg" = "--port" ]; then
         PORT="$arg"

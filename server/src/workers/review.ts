@@ -206,3 +206,52 @@ function clampScore(v: unknown): number {
   if (!Number.isFinite(n)) return 3;
   return Math.min(5, Math.max(1, n));
 }
+
+export interface ReviewTranscriptRecord {
+  source: string; // 'mic' = you, anything else = the other side
+  label: string; // e.g. "[You]" / "[Meeting]"
+  text: string;
+  wordCount?: number;
+}
+
+export interface BuildReviewParamsInput {
+  transcriptRecords: ReviewTranscriptRecord[];
+  title?: string;
+  sessionId?: string;
+  agendaSummary?: string;
+  goals?: string;
+  factFlags?: Array<{ claim: string; verdict: string; correction?: string }>;
+}
+
+/**
+ * Assemble the params `ReviewWorker.execute` expects from raw transcript records
+ * + session metadata. Shared by all three entry points so they feed the worker
+ * identically: the live stop-path auto-review, the manual in-meeting "Review"
+ * Quick Action, and the past-meeting `/present/review` endpoint.
+ */
+export function buildReviewParams(input: BuildReviewParamsInput): Record<string, any> {
+  const { transcriptRecords, title, sessionId, agendaSummary, goals, factFlags } = input;
+  const fullTranscript = transcriptRecords.map((r) => `${r.label} ${r.text}`).join('\n');
+  let micWords = 0;
+  let meetingWords = 0;
+  for (const r of transcriptRecords) {
+    const w =
+      typeof r.wordCount === 'number' && r.wordCount > 0
+        ? r.wordCount
+        : r.text.trim()
+          ? r.text.trim().split(/\s+/).length
+          : 0;
+    if (r.source === 'mic') micWords += w;
+    else meetingWords += w;
+  }
+  return {
+    transcript: fullTranscript,
+    title,
+    sessionId: sessionId || '',
+    micWords,
+    meetingWords,
+    agendaSummary: agendaSummary || '',
+    goals: goals || '',
+    factFlags: factFlags || [],
+  };
+}

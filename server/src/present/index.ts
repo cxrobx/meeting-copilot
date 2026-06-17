@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import Database from 'better-sqlite3';
 import type { WorkerRegistry } from '../workers/registry.js';
 import type { ActionLifecycle } from '../workers/types.js';
+import { ReviewWorker, buildReviewParams } from '../workers/review.js';
 import { isOpenAiApiAvailable, openaiFastResearchStream } from '../api/openai.js';
 import { isAnthropicApiAvailable, anthropicTriageJson } from '../api/anthropic.js';
 import { claudeSuggest } from '../claude-cli.js';
@@ -195,6 +196,63 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
         .sort((a: any, b: any) => (b.startedAt ?? '').localeCompare(a.startedAt ?? ''));
 
       res.json({ sessions });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  // ─── POST /present/review — self-review for a PAST (ended) meeting ────────
+  // Reads the session's own SQLite DB read-only, runs the ReviewWorker on the
+  // stored transcript, and returns the scorecard markdown. This is the primary
+  // "review a finished meeting" path — a fresh on-demand run, so it is never
+  // subject to the session.stop grace window that can cancel the auto-review.
+  router.post('/present/review', async (req, res) => {
+    const sessionId = String((req.body?.sessionId ?? '')).trim();
+    // sessionIds are directory names — guard against path traversal.
+    if (!sessionId || !/^[A-Za-z0-9_-]+$/.test(sessionId)) {
+      res.status(400).json({ error: 'valid sessionId required' });
+      return;
+    }
+    const dbPath = join(homedir(), '.meeting-copilot', 'sessions', sessionId, 'session.db');
+    if (!existsSync(dbPath)) {
+      res.status(404).json({ error: 'session not found' });
+      return;
+    }
+
+    let records: Array<{ source: string; label: string; text: string; wordCount: number }> = [];
+    let title = 'Untitled';
+    try {
+      const db = new Database(dbPath, { readonly: true });
+      const srow = db.prepare('SELECT title FROM session LIMIT 1').get() as { title?: string } | undefined;
+      title = srow?.title || 'Untitled';
+      records = db
+        .prepare('SELECT source, label, text, wordCount FROM transcript ORDER BY timestamp ASC, rowid ASC')
+        .all() as Array<{ source: string; label: string; text: string; wordCount: number }>;
+      db.close();
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+      return;
+    }
+
+    if (records.length === 0) {
+      res.status(400).json({ error: 'No transcript stored for this meeting — nothing to review.' });
+      return;
+    }
+
+    const params = buildReviewParams({ transcriptRecords: records, title, sessionId });
+    const controller = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+
+    try {
+      const result = await new ReviewWorker().execute(params, controller.signal);
+      if (!result.success) {
+        res.status(422).json({ error: result.error || result.summary });
+        return;
+      }
+      const markdown = result.artifacts?.[0]?.content || result.summary || '';
+      res.json({ ok: true, title, markdown, data: result.data ?? null });
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }
@@ -1111,6 +1169,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
     flex-shrink: 0; margin-left: 8px;
   }
   .session-delete-btn:hover { background: var(--gb-red); color: #fff; }
+  .session-review-btn {
+    flex-shrink: 0;
+    margin-left: 16px;
+    font-size: 11px;
+    padding: 5px 12px;
+    border-radius: 4px;
+  }
   .session-toolbar {
     display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;
   }
@@ -2541,6 +2606,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
         '<button class="btn btn-ghost" onclick="triggerAction(\\'research\\')">Research</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'summary\\')">Summary</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'analysis\\')">Analysis</button>' +
+        '<button class="btn btn-ghost" onclick="triggerAction(\\'review\\')" title="Self-review: how you did so far">Review</button>' +
       '</div>' +
     '</div>';
   }
@@ -2728,7 +2794,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     return removeToast;
   }
 
-  var ACTION_LABELS = { 'fast-research': 'Fast research', research: 'Research', summary: 'Summary', analysis: 'Analysis' };
+  var ACTION_LABELS = { 'fast-research': 'Fast research', research: 'Research', summary: 'Summary', analysis: 'Analysis', review: 'Self-review' };
 
   window.triggerAction = function(type) {
     var prompt = (document.getElementById('quickPrompt') || {}).value || '';
@@ -3515,6 +3581,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
             '<div>' + (s.actionCount || 0) + ' actions</div>' +
             '<div>' + (s.segmentCount || 0) + ' segments</div>' +
           '</div>' +
+          (!sessionManageMode && (s.segmentCount || 0) > 0
+            ? '<button class="btn btn-ghost btn-sm session-review-btn" title="Review this meeting — how you did">Review</button>'
+            : '') +
           (sessionManageMode ? '<button class="session-delete-btn" title="Delete">&#x2715;</button>' : '');
 
         // Attach event listeners via DOM instead of inline onclick
@@ -3527,6 +3596,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
               delBtn.addEventListener('click', function(e) { e.stopPropagation(); deleteSession(sid, stitle); });
             })(s.id, s.title);
           }
+        } else {
+          var revBtn = item.querySelector('.session-review-btn');
+          if (revBtn) {
+            (function(sid, stitle) {
+              revBtn.addEventListener('click', function(e) { e.stopPropagation(); reviewSession(sid, stitle); });
+            })(s.id, s.title);
+          }
         }
 
         el.appendChild(item);
@@ -3534,6 +3610,55 @@ const PRESENT_HTML = `<!DOCTYPE html>
       updateBulkBar();
     });
   }
+
+  // Review a PAST (ended) meeting on demand — POSTs to /present/review, which
+  // runs the ReviewWorker on that session's stored transcript and returns the
+  // scorecard markdown. Rendered in a self-contained overlay (no alert/confirm —
+  // those are blocked in WKWebView).
+  window.reviewSession = function(id, title) {
+    var existing = document.getElementById('reviewModal');
+    if (existing) existing.remove();
+
+    var modal = document.createElement('div');
+    modal.id = 'reviewModal';
+    modal.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:24px';
+    var card = document.createElement('div');
+    card.style.cssText = 'background:var(--gb-base);color:var(--gb-text);max-width:760px;width:100%;max-height:85vh;overflow:auto;border:1px solid var(--gb-surface2);box-shadow:0 10px 40px rgba(0,0,0,.3)';
+    card.innerHTML =
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--gb-overlay0);position:sticky;top:0;background:var(--gb-base)">' +
+        '<strong style="font-size:14px">Self-Review &mdash; ' + escapeHtml(title || 'Meeting') + '</strong>' +
+        '<button class="btn btn-ghost btn-sm" id="reviewModalClose">Close</button>' +
+      '</div>' +
+      '<div id="reviewModalBody" style="padding:16px 20px;font-size:13px;line-height:1.55">' +
+        '<p style="color:var(--gb-overlay2)">Reviewing the meeting&hellip; runs Sonnet on the full transcript &mdash; this can take ~30&ndash;90s.</p>' +
+      '</div>';
+    modal.appendChild(card);
+    document.body.appendChild(modal);
+
+    var close = function() { modal.remove(); };
+    card.querySelector('#reviewModalClose').onclick = close;
+    modal.addEventListener('click', function(e) { if (e.target === modal) close(); });
+
+    fetch('/present/review', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: id }),
+    })
+      .then(function(r) { return r.json().then(function(j) { return { ok: r.ok, j: j }; }); })
+      .then(function(res) {
+        var body = document.getElementById('reviewModalBody');
+        if (!body) return;
+        if (!res.ok || !res.j || res.j.error) {
+          body.innerHTML = '<p style="color:var(--gb-red)">Review failed: ' + escapeHtml((res.j && res.j.error) || 'unknown error') + '</p>';
+          return;
+        }
+        body.innerHTML = renderMarkdown(res.j.markdown || '(empty review)');
+      })
+      .catch(function(err) {
+        var body = document.getElementById('reviewModalBody');
+        if (body) body.innerHTML = '<p style="color:var(--gb-red)">Review failed: ' + escapeHtml(String(err)) + '</p>';
+      });
+  };
 
   window.toggleManageMode = function() {
     sessionManageMode = !sessionManageMode;
