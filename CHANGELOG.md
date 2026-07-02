@@ -4,6 +4,27 @@ All notable changes to Meeting Copilot will be documented in this file.
 
 ## [Unreleased]
 
+### Finish-the-Migration UX Program (2026-07-02)
+
+Eleven-commit program closing out the unfinished native→web migration. Full audit + plan in the session that produced commits f169087…HEAD.
+
+**Tier 1 — broken things:**
+- End-of-meeting durability: auto-summary/self-review/rolling summary are `system` actions — bypass the 3-worker cap and survive `onMeetingEnd`'s cancel sweep; post-stop worker results persist via `persistActionPostSession`; rolling summaries persist and survive reload
+- Honest dashboard feedback: `wsSend` reports delivery; Quick Actions/Approve/Cancel/Dismiss/Stop show real errors + optimistic busy states reconciled by server echo (6s revert)
+- Menubar Start + ⌘⇧S revived (front panel + focus web start form via `runDashboardJS` bridge); notification Approve/Dismiss actually route to the session (UNUserNotificationCenter delegate, banner hygiene: suppressed when panel visible, 60s sound spacing, cleared when actioned); server-start failure shows an error row + Retry instead of a perpetual spinner
+- Deleted the unreachable native dashboard (~2,900 lines: ActionPanelView et al.) + orphaned SessionManager APIs
+
+**Tier 2 — live-meeting UX:**
+- Gemini triage circuit breaker (12s timeout, 2 failures → 5min Haiku-direct) + `intelligence.error` WS message + dashboard ⚠ badge; context-compression summaries re-injected into the eval window
+- Pausable transcript auto-scroll with "N new" pill; selection mini-toolbar for highlight-to-ask (right-click still works); `session.state` carries authoritative `startedAt` (timer survives refresh) + actions re-fetched on reconnect; TOC scroll-spy fixed (listened on `window`, content scrolls in `.main`)
+
+**Tier 3 — settings, consent, polish:**
+- Real settings: `~/.meeting-copilot/settings.json` (gear panel → GET/POST `/settings`, applied live: eval cadence, suggestion TTL, monitor defaults, retention, summary auto-write); native Settings scene + retention sync removed
+- Consent affirmation checkbox required on the start form (invariant restored; native refuses `consent == false`)
+- REC + ticking timer in the menubar (orange when degraded); panel clamps to screen; Accessibility onboarding step for the global hotkey (optional)
+- `ServerConfig` port single source of truth (COPILOT_PORT honored app-side, injected into child server)
+- Vendored dashboard assets (marked/DOMPurify/hljs/JetBrains Mono → `/vendor`, zero external hosts); word-boundary signal tags (`src/present/signals.ts`); truthful 2-retry worker loop; transcript DOM cap (400 rows + Show older); legacy `/transcribe` gated to 410; pragmatic a11y pass (Escape/focus-trap/menus/aria-live)
+
 ### Added
 - 2026-03-24: Audio replay testing — `replay-audio.ts` + `scripts/replay-audio.sh` streams recorded WAV files through the full pipeline (audio → whisper → intelligence → workers) with `--speed` and `--auto-approve` flags
 - 2026-03-24: Web-first dashboard at `/present` — 3-column layout (transcript, action results, TOC outline) with Gruvbox Light theme (AnuPpuccin), JetBrains Mono font, session controls, approval flow, quick actions

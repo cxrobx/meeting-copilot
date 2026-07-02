@@ -53,7 +53,9 @@ cd app/MeetingCopilot && swift build
 ## Environment
 
 - `DEEPGRAM_API_KEY` — optional, for cloud transcription
-- `COPILOT_PORT` — TCP port (default: 17890)
+- `COPILOT_PORT` — TCP port (default: 17890; honored by BOTH server and app via `ServerConfig`)
+- `COPILOT_DISABLE_PAID_API=1` — hard zero-API-spend mode (CLIs/subscription only)
+- User-tunable settings live in `~/.meeting-copilot/settings.json` (dashboard gear panel → `POST /settings`; beats env vars)
 - No API keys required — all AI calls use headless CLIs (`claude`, `gemini`, `codex`) via user subscriptions
 
 ## Golden Commands
