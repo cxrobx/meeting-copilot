@@ -9,9 +9,12 @@ import ScreenCaptureKit
 struct PermissionsView: View {
     @State private var screenRecordingGranted = false
     @State private var microphoneGranted = false
+    @State private var accessibilityGranted = false
     @State private var isCheckingPermissions = false
     let onComplete: () -> Void
 
+    // Accessibility is deliberately NOT required — it only gates the global
+    // ⌘⇧M hotkey while other apps are focused.
     var allPermissionsGranted: Bool {
         screenRecordingGranted && microphoneGranted
     }
@@ -60,6 +63,20 @@ struct PermissionsView: View {
                     },
                     actionLabel: "Grant Access"
                 )
+
+                // Step 3: Accessibility (optional) — the global ⌘⇧M hotkey
+                // only receives keystrokes from other apps with this grant.
+                // The hotkey always works while a Copilot window is focused.
+                PermissionRow(
+                    step: 3,
+                    title: "Accessibility (optional)",
+                    description: "Enables the global \u{2318}\u{21E7}M panel hotkey while other apps are focused. Skippable — the shortcut still works inside Meeting Copilot.",
+                    isGranted: accessibilityGranted,
+                    action: {
+                        openAccessibilitySettings()
+                    },
+                    actionLabel: "Open System Settings"
+                )
             }
 
             Spacer()
@@ -106,6 +123,9 @@ struct PermissionsView: View {
         // Check microphone
         microphoneGranted = checkMicrophonePermission()
 
+        // Check accessibility (optional — global hotkey only)
+        accessibilityGranted = AXIsProcessTrusted()
+
         isCheckingPermissions = false
     }
 
@@ -132,6 +152,12 @@ struct PermissionsView: View {
 
     private func openScreenRecordingSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func openAccessibilitySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
         }
     }

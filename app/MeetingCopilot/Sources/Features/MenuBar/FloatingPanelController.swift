@@ -30,6 +30,9 @@ final class FloatingPanelController {
 
     func showPanel<Content: View>(contentView: Content) {
         if let existingPanel = panel {
+            // A display change (unplugged monitor, resolution switch) can
+            // leave the remembered frame off-screen — clamp before fronting.
+            clampToVisibleScreen(existingPanel)
             existingPanel.makeKeyAndOrderFront(nil)
             return
         }
@@ -58,6 +61,7 @@ final class FloatingPanelController {
 
         // Position in the bottom-right of the main screen
         positionPanel(panel)
+        clampToVisibleScreen(panel)
 
         panel.makeKeyAndOrderFront(nil)
         self.panel = panel
@@ -134,5 +138,23 @@ final class FloatingPanelController {
         let y = screenFrame.minY + 20
 
         panel.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    /// Keep the panel fully inside the visible screen bounds — the min size
+    /// (1040×760) plus a fixed bottom-right origin can otherwise push it
+    /// partially off small laptop displays or after a display change.
+    private func clampToVisibleScreen(_ panel: NSPanel) {
+        guard let screen = panel.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        var frame = panel.frame
+
+        frame.size.width = min(frame.size.width, visible.width)
+        frame.size.height = min(frame.size.height, visible.height)
+        frame.origin.x = max(visible.minX, min(frame.origin.x, visible.maxX - frame.width))
+        frame.origin.y = max(visible.minY, min(frame.origin.y, visible.maxY - frame.height))
+
+        if frame != panel.frame {
+            panel.setFrame(frame, display: true)
+        }
     }
 }

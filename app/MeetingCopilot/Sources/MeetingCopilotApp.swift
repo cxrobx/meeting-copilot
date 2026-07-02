@@ -35,19 +35,15 @@ struct MenuBarLabel: View {
         Group {
             switch sessionManager.state {
             case .live:
-                HStack(spacing: 4) {
-                    menuBarGhost
-                    Circle()
-                        .fill(.red)
-                        .frame(width: 6, height: 6)
-                }
+                // The persistent recording cue (privacy requirement): the old
+                // 6px dot was easy to miss and the panel is not always-on-top.
+                // "REC + ticking timer" is unambiguous even in monochrome
+                // menubar rendering. sessionElapsedTime already ticks 1/s, so
+                // the label re-renders for free via @Observable.
+                recLabel(color: .red)
             case .degraded:
-                HStack(spacing: 4) {
-                    menuBarGhost
-                    Circle()
-                        .fill(.orange)
-                        .frame(width: 6, height: 6)
-                }
+                // Degraded is STILL recording — must not look stopped.
+                recLabel(color: .orange)
             case .priming, .ending:
                 menuBarGhost
                     .opacity(0.5)
@@ -57,6 +53,29 @@ struct MenuBarLabel: View {
                 menuBarGhost
             }
         }
+    }
+
+    private func recLabel(color: Color) -> some View {
+        HStack(spacing: 4) {
+            menuBarGhost
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text("REC \(Self.elapsedText(sessionManager.sessionElapsedTime))")
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .monospacedDigit()
+                .foregroundStyle(color)
+        }
+    }
+
+    private static func elapsedText(_ interval: TimeInterval) -> String {
+        let hours = Int(interval) / 3600
+        let minutes = (Int(interval) % 3600) / 60
+        let seconds = Int(interval) % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+        }
+        return String(format: "%d:%02d", minutes, seconds)
     }
 
     private var menuBarGhost: some View {
@@ -149,13 +168,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Global hotkey: Cmd+Shift+M to toggle panel
+        // Global hotkey: Cmd+Shift+M to toggle panel. Global key monitoring
+        // only receives events when the app has Accessibility trust — without
+        // it the hotkey silently works ONLY while a Copilot window is focused
+        // (the panel's local monitor). Log the truth instead of failing mute;
+        // PermissionsView offers the grant as an optional step. No forced
+        // prompt — a meeting tool must not nag.
         NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.modifierFlags.contains([.command, .shift]) && event.charactersIgnoringModifiers == "m" {
                 Task { @MainActor in
                     self?.togglePanel()
                 }
             }
+        }
+        if !AXIsProcessTrusted() {
+            appLog("[Hotkey] ⌘⇧M works only while the app is focused — grant Accessibility (System Settings → Privacy & Security → Accessibility) for the global hotkey")
         }
 
         // Check if first launch - show permissions
