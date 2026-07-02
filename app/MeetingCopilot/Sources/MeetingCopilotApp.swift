@@ -12,6 +12,7 @@ struct MeetingCopilotApp: App {
         MenuBarExtra {
             MenuBarView(
                 sessionManager: appDelegate.sessionManager,
+                onStartSession: { appDelegate.showPanelAndFocusStart() },
                 onTogglePanel: { appDelegate.togglePanel() },
                 onQuit: { NSApplication.shared.terminate(nil) }
             )
@@ -107,9 +108,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Sync saved retention setting to server once it's ready
         syncRetentionToServer()
 
-        // Set up notifications
+        // Set up notifications — including routing banner Approve/Dismiss taps
+        // back into the session, and suppressing banners while the panel is
+        // already on screen.
         NotificationManager.shared.setupCategories()
         NotificationManager.shared.requestPermission()
+        NotificationManager.shared.onAction = { [weak self] action in
+            guard let self = self else { return }
+            switch action {
+            case .approve(let id):
+                self.sessionManager.approveAction(id: id)
+            case .dismiss(let id):
+                self.sessionManager.dismissAction(id: id)
+            case .open:
+                self.showPanel()
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+        NotificationManager.shared.shouldPresentBanner = { [weak self] in
+            guard let self = self else { return true }
+            return !(self.floatingPanelController.isVisible && NSApp.isActive)
+        }
 
         // Show floating panel with main content
         showPanel()
@@ -131,7 +150,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 break
             case .toggleSession:
                 if self.sessionManager.state == .idle || self.sessionManager.state == .archived {
-                    self.sessionManager.requestStartSession()
+                    // The web start form owns session setup — front it.
+                    self.showPanelAndFocusStart()
                 } else if self.sessionManager.state == .live || self.sessionManager.state == .degraded {
                     self.sessionManager.stopSession()
                 }
@@ -216,6 +236,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             showPanel()
         }
+    }
+
+    /// Menubar "Start Session" / ⌘⇧S while idle: the web start form owns
+    /// title, agenda, projects, and context, so front the panel and put the
+    /// caret in the form instead of starting with an empty payload.
+    func showPanelAndFocusStart() {
+        showPanel()
+        // The web view must be in the key window for .focus() to take.
+        NSApp.activate(ignoringOtherApps: true)
+        sessionManager.focusWebStartForm()
     }
 
     // MARK: - Permissions

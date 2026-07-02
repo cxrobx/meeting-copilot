@@ -516,6 +516,21 @@ final class SessionManager {
     /// into a JS toast so the user sees them without a native error panel).
     var onError: ((String) -> Void)?
 
+    /// Evaluates JavaScript inside the dashboard WKWebView (wired by
+    /// WebDashboardView). Nil until the web panel has been created.
+    var runDashboardJS: ((String) -> Void)?
+
+    /// Menubar / hotkey "Start Session": the web start form owns title, agenda,
+    /// projects, and context — there is no native start form — so front-of-app
+    /// callers focus it instead of starting with an empty payload. Safe no-op
+    /// while a session is live (the idle overlay, and #startTitle with it, is
+    /// not in the DOM) or before the page loads.
+    func focusWebStartForm() {
+        let js = "(function(){var el=document.getElementById('startTitle');" +
+            "if(el){el.focus();el.scrollIntoView({block:'center'});}})();"
+        runDashboardJS?(js)
+    }
+
     func surfaceError(_ message: String) {
         errorMessage = message
         onError?(message)
@@ -668,6 +683,7 @@ final class SessionManager {
             actions.append(action)
             hasNewSuggestion = true
             NotificationManager.shared.postSuggestionNotification(
+                actionId: action.id,
                 actionTitle: action.title,
                 actionType: action.type.rawValue
             )
@@ -680,10 +696,16 @@ final class SessionManager {
         case .actionStatus(let actionId, let newState, let result):
             if let index = actions.firstIndex(where: { $0.id == actionId }) {
                 if newState == .expired {
+                    // Suggestion is gone — a stale banner's Approve would no-op.
+                    NotificationManager.shared.clearSuggestionNotification(actionId: actionId)
                     withAnimation(.easeOut(duration: 0.3)) {
                         _ = actions.remove(at: index)
                     }
                     return
+                }
+                if newState != .suggested {
+                    // Actioned (approved/dismissed/running/…) — retire the banner.
+                    NotificationManager.shared.clearSuggestionNotification(actionId: actionId)
                 }
                 actions[index].state = newState
                 if let result = result {

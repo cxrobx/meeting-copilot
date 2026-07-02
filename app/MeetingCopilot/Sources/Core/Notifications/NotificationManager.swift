@@ -3,15 +3,35 @@ import UserNotifications
 
 // MARK: - Notification Manager
 
+/// What the user did on a suggestion banner.
+enum SuggestionNotificationAction {
+    case approve(String)
+    case dismiss(String)
+    case open
+}
+
 /// Manages local notifications for meeting suggestions and actions.
 /// Posts macOS notifications when new suggestions arrive so the user
-/// doesn't have to keep the panel visible at all times.
+/// doesn't have to keep the panel visible at all times. Acts as the
+/// UNUserNotificationCenter delegate so the banner's Approve/Dismiss
+/// buttons actually route back into the session.
 @MainActor
-final class NotificationManager: NSObject {
+final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     static let shared = NotificationManager()
 
     private let center = UNUserNotificationCenter.current()
     private var hasPermission = false
+    private var lastBannerAt: Date?
+
+    /// Wired by AppDelegate: routes banner actions to SessionManager.
+    var onAction: ((SuggestionNotificationAction) -> Void)?
+    /// Wired by AppDelegate: false when the panel is visible and the app is
+    /// active — no point bannering something already on screen.
+    var shouldPresentBanner: (() -> Bool)?
+
+    /// Minimum spacing between audible banners. Suggestions arriving faster
+    /// still post (grouped under the same thread) but without sound.
+    private let bannerSoundSpacing: TimeInterval = 60
 
     private override init() {
         super.init()
@@ -25,22 +45,39 @@ final class NotificationManager: NSObject {
         }
     }
 
-    func postSuggestionNotification(actionTitle: String, actionType: String) {
+    func postSuggestionNotification(actionId: String, actionTitle: String, actionType: String) {
         guard hasPermission else { return }
+        if let gate = shouldPresentBanner, !gate() { return }
 
         let content = UNMutableNotificationContent()
         content.title = "Meeting Copilot"
         content.body = "\(actionType.capitalized): \(actionTitle)"
-        content.sound = .default
         content.categoryIdentifier = "SUGGESTION"
+        content.threadIdentifier = "suggestions"
+        content.userInfo = ["actionId": actionId]
+
+        // Coalesce: rapid-fire suggestions group silently instead of dinging
+        // every 15s triage cycle.
+        let now = Date()
+        if lastBannerAt == nil || now.timeIntervalSince(lastBannerAt!) >= bannerSoundSpacing {
+            content.sound = .default
+            lastBannerAt = now
+        }
 
         let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
+            identifier: "suggestion-\(actionId)",
             content: content,
             trigger: nil // deliver immediately
         )
 
         center.add(request)
+    }
+
+    /// Remove a suggestion's banner once it is actioned or expires — a stale
+    /// Approve button that silently no-ops is worse than no banner.
+    func clearSuggestionNotification(actionId: String) {
+        center.removeDeliveredNotifications(withIdentifiers: ["suggestion-\(actionId)"])
+        center.removePendingNotificationRequests(withIdentifiers: ["suggestion-\(actionId)"])
     }
 
     /// Fires when the supervisor has exhausted its automatic restart budget.
@@ -70,10 +107,13 @@ final class NotificationManager: NSObject {
     }
 
     func setupCategories() {
+        // Approve deliberately has NO .foreground option — approving from a
+        // banner must not steal focus mid-meeting. Tapping the banner body
+        // (default action) is the "open the panel" gesture.
         let approveAction = UNNotificationAction(
             identifier: "APPROVE",
             title: "Approve",
-            options: [.foreground]
+            options: []
         )
         let dismissAction = UNNotificationAction(
             identifier: "DISMISS",
@@ -88,5 +128,46 @@ final class NotificationManager: NSObject {
         )
 
         center.setNotificationCategories([category])
+        center.delegate = self
+    }
+
+    // MARK: - UNUserNotificationCenterDelegate
+    // Delegate callbacks arrive on arbitrary queues; extract what we need,
+    // then hop to the main actor to touch state.
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let identifier = response.actionIdentifier
+        let actionId = response.notification.request.content.userInfo["actionId"] as? String
+
+        Task { @MainActor in
+            switch identifier {
+            case "APPROVE":
+                if let id = actionId { NotificationManager.shared.onAction?(.approve(id)) }
+            case "DISMISS":
+                if let id = actionId { NotificationManager.shared.onAction?(.dismiss(id)) }
+            case UNNotificationDefaultActionIdentifier:
+                // Banner body tap — open the panel (suggestions AND the
+                // crash-loop alert both want eyes on the app).
+                NotificationManager.shared.onAction?(.open)
+            default:
+                break
+            }
+            completionHandler()
+        }
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        // Show banners even while the app is frontmost — the "panel already
+        // visible" gate runs before posting, so anything that got here was
+        // deliberately posted.
+        completionHandler([.banner, .sound])
     }
 }

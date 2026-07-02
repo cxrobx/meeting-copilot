@@ -5,8 +5,11 @@ import SwiftUI
 /// The menubar extra popover content showing session status and controls.
 struct MenuBarView: View {
     let sessionManager: SessionManager
+    let onStartSession: () -> Void
     let onTogglePanel: () -> Void
     let onQuit: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(spacing: 12) {
@@ -52,34 +55,73 @@ struct MenuBarView: View {
 
             // Actions
             VStack(spacing: 4) {
-                // Start/Stop Button
-                Button(action: {
-                    if sessionManager.state == .idle || sessionManager.state == .archived {
-                        sessionManager.requestStartSession()
-                    } else if sessionManager.state == .live || sessionManager.state == .degraded {
-                        sessionManager.stopSession()
-                    }
-                }) {
-                    HStack {
-                        if !sessionManager.serverReady && !sessionManager.isRecording {
-                            ProgressView()
-                                .controlSize(.small)
-                                .frame(width: 16, height: 16)
-                            Text("Starting server...")
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Image(systemName: sessionManager.isRecording ? "stop.circle.fill" : "record.circle")
-                                .foregroundStyle(sessionManager.isRecording ? .red : .green)
-                            Text(sessionManager.isRecording ? "Stop Session" : "Start Session")
+                if sessionManager.serverStartFailed {
+                    // Server never came up — a perpetual spinner with no way
+                    // out is a dead end. Show what happened and offer Retry.
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.red)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Server failed to start")
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                Text(sessionManager.errorMessage ?? "Check ~/.meeting-copilot/server.log")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(3)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
-                        Spacer()
+                        Button(action: {
+                            // startServer() is a no-op if the process is alive
+                            // and resets the restart budget after a crash-loop
+                            // give-up; then re-enter the health poll.
+                            sessionManager.processSupervisor.startServer()
+                            sessionManager.retryServerConnection()
+                        }) {
+                            HStack {
+                                Image(systemName: "arrow.clockwise")
+                                Text("Retry")
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .contentShape(Rectangle())
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 4)
+                } else {
+                    // Start/Stop Button
+                    Button(action: {
+                        if sessionManager.state == .idle || sessionManager.state == .archived {
+                            dismiss() // close the popover so the panel gets focus
+                            onStartSession()
+                        } else if sessionManager.state == .live || sessionManager.state == .degraded {
+                            sessionManager.stopSession()
+                        }
+                    }) {
+                        HStack {
+                            if !sessionManager.serverReady && !sessionManager.isRecording {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .frame(width: 16, height: 16)
+                                Text("Starting server...")
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Image(systemName: sessionManager.isRecording ? "stop.circle.fill" : "record.circle")
+                                    .foregroundStyle(sessionManager.isRecording ? .red : .green)
+                                Text(sessionManager.isRecording ? "Stop Session" : "Start Session")
+                            }
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!sessionManager.serverReady && !sessionManager.isRecording)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 4)
                 }
-                .buttonStyle(.plain)
-                .disabled(!sessionManager.serverReady && !sessionManager.isRecording)
-                .padding(.horizontal, 4)
-                .padding(.vertical, 4)
 
                 // Show Panel
                 Button(action: onTogglePanel) {
@@ -175,12 +217,12 @@ struct MenuBarView: View {
 
     private var statusSubtitle: String {
         switch sessionManager.state {
-        case .idle:     return "No active session"
+        case .idle:     return sessionManager.serverStartFailed ? "Server failed to start" : "No active session"
         case .priming:  return "Acquiring audio..."
         case .live:     return formatElapsedTime(sessionManager.sessionElapsedTime)
         case .degraded: return sessionManager.degradedReasons.joined(separator: ", ")
         case .ending:   return "Waiting for actions to complete..."
-        case .error:    return "Something went wrong"
+        case .error:    return sessionManager.errorMessage ?? "Something went wrong"
         case .archived: return "All data saved"
         }
     }

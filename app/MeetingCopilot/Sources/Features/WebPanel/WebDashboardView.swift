@@ -79,6 +79,14 @@ private struct WebViewWrapper: NSViewRepresentable {
             coordinator?.pushError(message)
         }
 
+        // Let native controls (menubar Start, ⌘⇧S) drive the dashboard —
+        // e.g. focusing the web start form, which owns all session setup.
+        sessionManager.runDashboardJS = { [weak webView] js in
+            DispatchQueue.main.async {
+                webView?.evaluateJavaScript(js, completionHandler: nil)
+            }
+        }
+
         // Enable Cmd+/- browser-style zoom via CSS font-size scaling
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             guard event.modifierFlags.contains(.command) else { return event }
