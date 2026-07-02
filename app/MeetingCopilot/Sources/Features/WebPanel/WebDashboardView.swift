@@ -1,8 +1,8 @@
 import SwiftUI
 import WebKit
 
-/// Wraps WKWebView to display the web dashboard at /present.
-/// Replaces the SwiftUI ActionPanelView with the Gruvbox-themed web UI.
+/// Wraps WKWebView to display the web dashboard at /present — the app's one
+/// and only session UI (transcript, approvals, results, start/stop form).
 struct WebDashboardView: View {
     let sessionManager: SessionManager
 

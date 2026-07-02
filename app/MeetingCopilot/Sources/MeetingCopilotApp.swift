@@ -145,9 +145,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let topSuggestion = self.sessionManager.suggestedActions.first {
                     self.sessionManager.dismissAction(id: topSuggestion.id)
                 }
-            case .exportSession:
-                // Export will be handled elsewhere
-                break
             case .toggleSession:
                 if self.sessionManager.state == .idle || self.sessionManager.state == .archived {
                     // The web start form owns session setup — front it.
@@ -213,20 +210,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Web dashboard — loads the Gruvbox-themed /present page in a WKWebView.
         // The web UI handles session control, transcript, approvals, and action results.
         let panelContent = WebDashboardView(sessionManager: sessionManager)
-
-        // NOTE: To restore the native SwiftUI panel, uncomment below and comment out the WebDashboardView line above:
-        // let panelContent = ActionPanelView(sessionManager: sessionManager)
-        //     .sheet(isPresented: Binding(
-        //         get: { self.sessionManager.showingConsentDialog },
-        //         set: { _ in }
-        //     )) {
-        //         ConsentView(
-        //             sessionManager: self.sessionManager,
-        //             onConsent: { self.sessionManager.consentGranted() },
-        //             onCancel: { self.sessionManager.consentDenied() }
-        //         )
-        //     }
-
         floatingPanelController.showPanel(contentView: panelContent)
     }
 

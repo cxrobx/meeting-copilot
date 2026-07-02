@@ -1,7 +1,6 @@
 import Foundation
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 // File-based debug logging (stdout invisible when launched from Finder)
 func appLog(_ msg: String) {
@@ -31,14 +30,10 @@ final class SessionManager {
     var transcriptSegments: [TranscriptSegment] = []
     var actions: [ActionSuggestion] = []
     var isRecording: Bool = false
-    var showingConsentDialog: Bool = false
     var degradedReasons: [String] = []
     var totalWordCount: Int = 0
     var sessionElapsedTime: TimeInterval = 0
-    var hasNewSuggestion: Bool = false
-    var availableProjects: [ProjectInfo] = []
     var selectedProjectNames: [String] = []
-    var availableContextSources: [ContextSourceInfo] = []
     var selectedContextPaths: [String] = []
     var serverReady: Bool = false
     var serverStartFailed: Bool = false
@@ -68,10 +63,6 @@ final class SessionManager {
 
     var runningActions: [ActionSuggestion] {
         actions.filter { $0.state.isActive }
-    }
-
-    var completedActions: [ActionSuggestion] {
-        actions.filter { $0.state.isTerminal }
     }
 
     var isConnected: Bool {
@@ -123,18 +114,6 @@ final class SessionManager {
         }
     }
 
-    func requestStartSession() {
-        guard state == .idle, serverReady else { return }
-        showingConsentDialog = true
-    }
-
-    func consentGranted() {
-        showingConsentDialog = false
-        Task {
-            await startSession()
-        }
-    }
-
     /// Start a session initiated from the embedded web UI.
     /// The web form already collected title/agenda/etc. and the user's click on
     /// "Start Session" is treated as consent, so we skip the native consent sheet
@@ -160,107 +139,6 @@ final class SessionManager {
     func stopSessionFromWeb() {
         guard state == .live || state == .degraded else { return }
         stopSession()
-    }
-
-    func consentDenied() {
-        showingConsentDialog = false
-        selectedProjectNames = []
-        // Stay in idle
-    }
-
-    func fetchProjects() async {
-        guard let url = URL(string: "http://localhost:17890/projects") else { return }
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            let response = try JSONDecoder().decode(ProjectListResponse.self, from: data)
-            availableProjects = response.projects
-        } catch {
-            print("[SessionManager] Failed to fetch projects: \(error)")
-        }
-    }
-
-    func toggleProjectSelection(_ name: String) {
-        if selectedProjectNames.contains(name) {
-            selectedProjectNames.removeAll { $0 == name }
-        } else {
-            selectedProjectNames.append(name)
-        }
-    }
-
-    func fetchContextSources() async {
-        guard let url = URL(string: "http://localhost:17890/context-sources") else { return }
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            let response = try JSONDecoder().decode(ContextSourceListResponse.self, from: data)
-            availableContextSources = response.items
-        } catch {
-            print("[SessionManager] Failed to fetch context sources: \(error)")
-        }
-    }
-
-    func toggleContextSelection(_ path: String) {
-        if selectedContextPaths.contains(path) {
-            selectedContextPaths.removeAll { $0 == path }
-        } else {
-            selectedContextPaths.append(path)
-        }
-    }
-
-    func addContextFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.message = "Select a folder of reference documents"
-        panel.prompt = "Add Folder"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task {
-            await addContextSource(path: url.path, type: .folder)
-        }
-    }
-
-    func addContextFile() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [UTType.plainText, UTType.yaml, UTType.json].compactMap { $0 }
-        panel.message = "Select reference documents"
-        panel.prompt = "Add Files"
-        guard panel.runModal() == .OK else { return }
-        Task {
-            for fileURL in panel.urls {
-                await addContextSource(path: fileURL.path, type: .file)
-            }
-        }
-    }
-
-    private func addContextSource(path: String, type: ContextSourceType) async {
-        guard let url = URL(string: "http://localhost:17890/context-sources/add") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: String] = ["path": path, "type": type.rawValue]
-        request.httpBody = try? JSONEncoder().encode(body)
-        _ = try? await URLSession.shared.data(for: request)
-        await fetchContextSources()
-        // Auto-select the newly added item
-        if !selectedContextPaths.contains(path) {
-            selectedContextPaths.append(path)
-        }
-    }
-
-    func removeContextSource(path: String) {
-        selectedContextPaths.removeAll { $0 == path }
-        Task {
-            guard let url = URL(string: "http://localhost:17890/context-sources") else { return }
-            var request = URLRequest(url: url)
-            request.httpMethod = "DELETE"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONEncoder().encode(["path": path])
-            _ = try? await URLSession.shared.data(for: request)
-            await fetchContextSources()
-        }
     }
 
     private func startSession() async {
@@ -500,7 +378,6 @@ final class SessionManager {
         totalWordCount = 0
         sessionElapsedTime = 0
         degradedReasons = []
-        hasNewSuggestion = false
         selectedProjectNames = []
         selectedContextPaths = []
         meetingTitle = ""
@@ -615,48 +492,6 @@ final class SessionManager {
         }
     }
 
-    func cancelAction(id: String) {
-        guard let index = actions.firstIndex(where: { $0.id == id }) else { return }
-        actions[index].state = .cancelled
-        Task {
-            try? await webSocketClient.send(.actionCancel(actionId: id))
-        }
-    }
-
-    func triggerManualAction(type: String, prompt: String? = nil) {
-        guard state == .live || state == .degraded else { return }
-        Task {
-            try? await webSocketClient.send(.actionTrigger(actionType: type, prompt: prompt))
-        }
-    }
-
-    // MARK: - Session History & Export
-
-    func exportSession(sessionId: String, format: String = "markdown") async -> String? {
-        guard let url = URL(string: "http://localhost:17890/sessions/\(sessionId)/export?format=\(format)") else { return nil }
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            return String(data: data, encoding: .utf8)
-        } catch {
-            appLog("[SessionManager] Export failed: \(error)")
-            return nil
-        }
-    }
-
-    func fetchSessionHistory() async -> [SessionHistoryItem] {
-        guard let url = URL(string: "http://localhost:17890/sessions") else { return [] }
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            let items = try JSONDecoder().decode([SessionHistoryItem].self, from: data)
-            return items.sorted { a, b in
-                (a.startDate ?? .distantPast) > (b.startDate ?? .distantPast)
-            }
-        } catch {
-            appLog("[SessionManager] Fetch session history failed: \(error)")
-            return []
-        }
-    }
-
     // MARK: - Server Message Handling
 
     private func handleServerMessage(_ message: ServerMessage) {
@@ -681,17 +516,11 @@ final class SessionManager {
 
         case .actionSuggested(let action):
             actions.append(action)
-            hasNewSuggestion = true
             NotificationManager.shared.postSuggestionNotification(
                 actionId: action.id,
                 actionTitle: action.title,
                 actionType: action.type.rawValue
             )
-            // Auto-clear the badge after a short delay
-            Task {
-                try? await Task.sleep(nanoseconds: 3_000_000_000) // 3s
-                hasNewSuggestion = false
-            }
 
         case .actionStatus(let actionId, let newState, let result):
             if let index = actions.firstIndex(where: { $0.id == actionId }) {

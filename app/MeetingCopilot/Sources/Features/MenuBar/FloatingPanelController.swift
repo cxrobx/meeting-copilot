@@ -6,7 +6,6 @@ import SwiftUI
 enum KeyboardAction {
     case approveTop
     case dismissTop
-    case exportSession
     case toggleSession
 }
 
@@ -112,12 +111,6 @@ final class FloatingPanelController {
         // Cmd+D — dismiss top suggestion
         if modifiers == .command && chars == "d" {
             onKeyboardAction?(.dismissTop)
-            return nil
-        }
-
-        // Cmd+E — export session
-        if modifiers == .command && chars == "e" {
-            onKeyboardAction?(.exportSession)
             return nil
         }
 

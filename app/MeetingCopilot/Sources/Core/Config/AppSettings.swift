@@ -54,19 +54,4 @@ enum AppSettings {
         return stored > 0 ? stored : 6.0
     }
 
-    static func setUseVADEmitter(_ value: Bool) {
-        UserDefaults.standard.set(value, forKey: Key.useVADEmitter)
-    }
-
-    static func setVadThreshold(_ value: Float) {
-        UserDefaults.standard.set(Double(value), forKey: Key.vadThreshold)
-    }
-
-    static func setVadMinSilenceMs(_ value: Int) {
-        UserDefaults.standard.set(value, forKey: Key.vadMinSilenceMs)
-    }
-
-    static func setVadMaxUtteranceSec(_ value: Double) {
-        UserDefaults.standard.set(value, forKey: Key.vadMaxUtteranceSec)
-    }
 }
