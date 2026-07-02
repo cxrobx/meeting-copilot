@@ -91,8 +91,20 @@ function runPreflightChecks(whisperAvailable: boolean | null): PreflightCheck[] 
 export function createRoutes(ctx: RouteContext): Router {
   const router = Router();
 
-  // POST /transcribe - receive audio chunks via HTTP
+  // POST /transcribe - legacy HTTP audio ingress. The app streams audio over
+  // WebSocket; this path bypasses dedup + the transcript stitcher, so
+  // anything using it writes divergent (fragmented, un-deduped) transcript
+  // rows. Gated off unless explicitly re-enabled.
   router.post('/transcribe', async (req, res) => {
+    if (process.env.COPILOT_ENABLE_HTTP_TRANSCRIBE !== '1') {
+      res.status(410).json({
+        success: false,
+        error:
+          'HTTP /transcribe is disabled — audio arrives via WebSocket (audio_chunk). ' +
+          'Set COPILOT_ENABLE_HTTP_TRANSCRIBE=1 to re-enable this legacy path.',
+      });
+      return;
+    }
     try {
       const { store, active } = ctx.getSession();
       if (!active || !store) {

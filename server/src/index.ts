@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { unlinkSync, existsSync, mkdirSync, chmodSync, appendFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 
 // File-based debug logging
@@ -408,6 +409,13 @@ registry.register(new ReviewWorker());
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.raw({ type: 'audio/*', limit: '10mb' }));
+
+// Vendored dashboard assets (marked/DOMPurify/highlight.js/JetBrains Mono) —
+// served locally so /present works offline and stops leaking page loads to
+// CDNs. `../vendor` resolves to server/vendor from BOTH src/ (tsx dev) and
+// dist/ (packaged bundle) since dist mirrors src one level under server/.
+const VENDOR_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'vendor');
+app.use('/vendor', express.static(VENDOR_DIR, { maxAge: '7d' }));
 
 // Share/Present mode
 app.use(createPresentRouter(registry));

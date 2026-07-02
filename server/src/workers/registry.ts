@@ -9,7 +9,10 @@ import type {
 } from './types.js';
 
 const MAX_CONCURRENT_WORKERS = 3;
-const MAX_RETRY_COUNT = 2;
+// Transient failures get up to this many RETRIES after the first attempt
+// (the old duplicated retry blocks only ever retried once despite the
+// constant claiming 2).
+const MAX_RETRIES = 2;
 const BASE_RETRY_DELAY_MS = 1_000; // 1s, doubled each retry
 // Ceiling for how long onMeetingEnd lets in-flight workers finish before a
 // force-cancel. The auto-summary + auto-review fired at session.stop run on the
@@ -519,111 +522,65 @@ export class WorkerRegistry extends EventEmitter {
     this.emit('action.status', action);
 
     try {
-      // Timeout enforcement via Promise.race
-      const timeoutPromise = new Promise<WorkerResult>((_, reject) => {
-        setTimeout(() => {
-          action.cancelController.abort();
-          reject(new Error(`Worker timed out after ${action.timeoutMs}ms`));
-        }, action.timeoutMs);
-      });
-
-      const result = await Promise.race([
-        worker.execute(action.params, action.cancelController.signal),
-        timeoutPromise,
-      ]);
-
-      action.result = result;
-      action.state = result.success ? 'completed' : 'failed';
-      action.completedAt = Date.now();
-
-      // Auto-retry on transient failure with exponential backoff
-      if (!result.success && action.retryCount < MAX_RETRY_COUNT) {
-        const errorStr = result.error ?? result.summary;
-        if (isTransientError(new Error(errorStr))) {
-          action.retryCount++;
-          const delay = BASE_RETRY_DELAY_MS * Math.pow(2, action.retryCount - 1);
-          await new Promise((r) => setTimeout(r, delay));
-
-          action.state = 'running';
-          action.cancelController = new AbortController();
-          this.emit('action.status', action);
-
-          const retryTimeoutPromise = new Promise<WorkerResult>((_, reject) => {
-            setTimeout(() => {
-              action.cancelController.abort();
-              reject(new Error(`Worker timed out after ${action.timeoutMs}ms`));
-            }, action.timeoutMs);
-          });
-
-          const retryResult = await Promise.race([
-            worker.execute(action.params, action.cancelController.signal),
-            retryTimeoutPromise,
-          ]);
-
-          action.result = retryResult;
-          action.state = retryResult.success ? 'completed' : 'failed';
-          action.completedAt = Date.now();
-        }
-      }
-
-      this.emit('action.status', action);
-      if (action.state === 'completed') {
-        this.emit('action.completed', action);
-      }
-    } catch (error) {
-      // Retry on transient errors
-      if (
-        action.retryCount < MAX_RETRY_COUNT &&
-        isTransientError(error)
-      ) {
-        action.retryCount++;
-        const delay = BASE_RETRY_DELAY_MS * Math.pow(2, action.retryCount - 1);
-        await new Promise((r) => setTimeout(r, delay));
-
-        action.cancelController = new AbortController();
-        this.emit('action.status', action);
-
+      // Single attempt loop — collapses the previously duplicated result-path
+      // and throw-path retry blocks (which capped real retries at one).
+      // attempt 0 = first run; up to MAX_RETRIES more on transient failures.
+      for (let attempt = 0; ; attempt++) {
+        const canRetry = attempt < MAX_RETRIES;
+        let result: WorkerResult;
+        let timeoutHandle: NodeJS.Timeout | undefined;
         try {
-          const retryTimeoutPromise = new Promise<WorkerResult>((_, reject) => {
-            setTimeout(() => {
+          const timeoutPromise = new Promise<WorkerResult>((_, reject) => {
+            timeoutHandle = setTimeout(() => {
               action.cancelController.abort();
               reject(new Error(`Worker timed out after ${action.timeoutMs}ms`));
             }, action.timeoutMs);
           });
-
-          const retryResult = await Promise.race([
+          result = await Promise.race([
             worker.execute(action.params, action.cancelController.signal),
-            retryTimeoutPromise,
+            timeoutPromise,
           ]);
-
-          action.result = retryResult;
-          action.state = retryResult.success ? 'completed' : 'failed';
-          action.completedAt = Date.now();
-          this.emit('action.status', action);
-          if (action.state === 'completed') {
-            this.emit('action.completed', action);
+        } catch (error) {
+          if (canRetry && isTransientError(error)) {
+            action.retryCount = attempt + 1;
+            await new Promise((r) => setTimeout(r, BASE_RETRY_DELAY_MS * Math.pow(2, attempt)));
+            action.cancelController = new AbortController();
+            this.emit('action.status', action);
+            continue;
           }
-        } catch (retryError) {
           action.state = 'failed';
           action.completedAt = Date.now();
+          const message = error instanceof Error ? error.message : String(error);
           action.result = {
             success: false,
             data: null,
-            summary: `Worker failed after retry: ${retryError instanceof Error ? retryError.message : String(retryError)}`,
-            error: retryError instanceof Error ? retryError.message : String(retryError),
+            summary: `Worker failed${attempt > 0 ? ' after retry' : ''}: ${message}`,
+            error: message,
           };
           this.emit('action.status', action);
+          return;
+        } finally {
+          if (timeoutHandle) clearTimeout(timeoutHandle);
         }
-      } else {
-        action.state = 'failed';
+
+        // Worker resolved but reported failure — retry transient ones too.
+        if (!result.success && canRetry && isTransientError(new Error(result.error ?? result.summary))) {
+          action.retryCount = attempt + 1;
+          await new Promise((r) => setTimeout(r, BASE_RETRY_DELAY_MS * Math.pow(2, attempt)));
+          action.state = 'running';
+          action.cancelController = new AbortController();
+          this.emit('action.status', action);
+          continue;
+        }
+
+        action.result = result;
+        action.state = result.success ? 'completed' : 'failed';
         action.completedAt = Date.now();
-        action.result = {
-          success: false,
-          data: null,
-          summary: `Worker failed: ${error instanceof Error ? error.message : String(error)}`,
-          error: error instanceof Error ? error.message : String(error),
-        };
         this.emit('action.status', action);
+        if (action.state === 'completed') {
+          this.emit('action.completed', action);
+        }
+        return;
       }
     } finally {
       this.runningCount--;

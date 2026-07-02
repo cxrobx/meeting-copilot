@@ -19,27 +19,18 @@ paths:
 
 ```
 server/src/
-├── index.ts           # Main entry — Express + WebSocket server (~20KB)
-├── claude-cli.ts      # Claude CLI integration helper
-├── transcription/     # Transcription providers
-│   ├── whisper.ts     # Local whisper-server provider
-│   └── deepgram.ts    # Cloud Deepgram provider (optional)
-├── intelligence/      # AI eval pipeline
-│   ├── triage.ts      # Haiku triage (15s cadence)
-│   └── suggest.ts     # Sonnet suggestion generation
-├── workers/           # Task execution
-│   ├── research.ts    # Web research worker
-│   ├── summary.ts     # Meeting summary worker
-│   ├── analysis.ts    # Data analysis worker
-│   ├── mockup.ts      # UI mockup (stub)
-│   └── codegen.ts     # Code generation (stub)
-├── session/           # Per-meeting persistence
-│   ├── store.ts       # SQLite session store
-│   ├── events.ts      # JSONL event logger
-│   ├── shared.ts      # Shared transcript writer (presence + JSONL for notes4chris)
-│   └── cleanup.ts     # Session cleanup + stale presence detection
-└── debug/             # Debug/metrics
-    └── metrics.ts     # /debug endpoint
+├── index.ts           # Main entry — Express + WebSocket server
+├── claude-cli.ts      # CLI fallback chain (gemini→haiku→codex) + Gemini circuit breaker
+├── persistent-claude.ts # Warm `claude` session pool for tool-less calls
+├── settings.ts        # ~/.meeting-copilot/settings.json (cadence/TTL/monitors/retention)
+├── transcription/     # Transcription providers (whisper/parakeet, deepgram, dedup, stitcher)
+├── intelligence/      # Eval loop (triage→suggest), agenda, coach, factcheck, prompts
+├── workers/           # Research, FastResearch, Summary, Analysis, Mockup, CodeGen, Review
+├── present/           # /present dashboard (index.ts template + signals.ts)
+├── session/           # SQLite store, JSONL events, shared transcript, cleanup, reviews
+├── api/               # Direct-API paths (anthropic, openai) + paid-API killswitch
+└── debug/             # /debug endpoint
+server/vendor/         # Vendored dashboard assets (marked/DOMPurify/hljs/fonts) — scripts/vendor-assets.sh
 ```
 
 ## Server Commands
@@ -69,8 +60,12 @@ cd server && npm start        # Run compiled dist/index.js
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `ANTHROPIC_API_KEY` | Yes | - | Intelligence + workers |
 | `DEEPGRAM_API_KEY` | No | - | Cloud transcription |
-| `COPILOT_PORT` | No | 17890 | TCP port |
+| `COPILOT_PORT` | No | 17890 | TCP port (the Swift app honors it too via ServerConfig) |
 | `SHARE_TRANSCRIPT` | No | true | Set to `false` to disable shared transcript writing |
-| `SUGGESTION_TTL_MS` | No | 60000 | Milliseconds before an unactioned suggestion auto-expires |
+| `SUGGESTION_TTL_MS` | No | 60000 | Legacy default for suggestion TTL |
+| `GEMINI_TRIAGE_TIMEOUT_MS` | No | 12000 | Tier-1 triage timeout before Haiku fallback |
+| `COPILOT_DISABLE_PAID_API` | No | - | `1` = hard zero-API-spend (CLIs/subscription only) |
+| `COPILOT_ENABLE_HTTP_TRANSCRIBE` | No | - | `1` re-enables the legacy POST /transcribe path |
+
+> **Settings precedence**: `~/.meeting-copilot/settings.json` (written by the dashboard gear panel via `POST /settings`) **beats env vars**, which beat hardcoded defaults. Env vars remain as back-compat defaults only. NO `ANTHROPIC_API_KEY` is required — all AI calls ride CLIs on user subscriptions, and `claude` spawn sites strip the key from child env so it can never bill the API console.

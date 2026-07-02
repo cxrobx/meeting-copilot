@@ -109,6 +109,15 @@ fi
 cp -R "$PROJECT_DIR/server/dist/" "$APP_BUNDLE/Contents/Resources/server/dist/"
 cp "$PROJECT_DIR/server/package.json" "$APP_BUNDLE/Contents/Resources/server/"
 
+# Copy vendored dashboard assets (marked/DOMPurify/highlight.js/fonts) —
+# served at /vendor; index.ts resolves them at dist/../vendor.
+if [ ! -f "$PROJECT_DIR/server/vendor/js/marked.min.js" ]; then
+  echo "ERROR: server/vendor is missing — run ./scripts/vendor-assets.sh first."
+  exit 1
+fi
+cp -R "$PROJECT_DIR/server/vendor" "$APP_BUNDLE/Contents/Resources/server/vendor"
+echo "  Copied vendored dashboard assets"
+
 # Copy production node_modules
 cp -R "$PROD_STAGING/node_modules" "$APP_BUNDLE/Contents/Resources/server/"
 

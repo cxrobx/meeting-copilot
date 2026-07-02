@@ -136,6 +136,34 @@ describe('WorkerRegistry', () => {
     expect(a2.state).toBe('expired');
   });
 
+  it('retries transient failures up to 2 times (3 attempts total)', async () => {
+    let calls = 0;
+    const flaky: Worker = {
+      name: 'analysis',
+      capabilities: {
+        network: 'none',
+        filesystem: { read: [], write: [] },
+        subprocess: false,
+        maxDurationMs: 10_000,
+        maxMemoryMB: 256,
+      },
+      execute: vi.fn().mockImplementation(async () => {
+        calls++;
+        if (calls < 3) throw new Error('network hiccup: ECONNRESET');
+        return { success: true, data: null, summary: 'third time lucky' };
+      }),
+    };
+    registry.register(flaky);
+    const action = registry.suggest(
+      makeSuggestion({ type: 'analysis', title: 'Flaky analysis job', params: { q: 'flaky' } }),
+    )!;
+    registry.approve(action.id);
+
+    await vi.waitFor(() => expect(action.state).toBe('completed'), { timeout: 8_000 });
+    expect(calls).toBe(3);
+    expect(action.retryCount).toBe(2);
+  }, 10_000);
+
   describe('system actions', () => {
     /** Worker whose execute() blocks until the test resolves it. */
     function makeBlockingWorker(name: string) {

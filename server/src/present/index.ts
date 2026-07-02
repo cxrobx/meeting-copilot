@@ -9,6 +9,7 @@ import { ReviewWorker, buildReviewParams } from '../workers/review.js';
 import { isOpenAiApiAvailable, openaiFastResearchStream } from '../api/openai.js';
 import { isAnthropicApiAvailable, anthropicTriageJson } from '../api/anthropic.js';
 import { claudeSuggest } from '../claude-cli.js';
+import { buildSignalRegexSources, QUESTION_STARTS } from './signals.js';
 
 // ─── Highlight-to-ask prompts ───────────────────────────────────────────────
 const ASK_SYSTEM: Record<string, string> = {
@@ -445,12 +446,11 @@ const PRESENT_HTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light">
 <title>Meeting Copilot</title>
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"><\/script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"><\/script>
-<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"><\/script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/gruvbox-light.min.css">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<script src="/vendor/js/marked.min.js"><\/script>
+<script src="/vendor/js/purify.min.js"><\/script>
+<script src="/vendor/js/highlight.min.js"><\/script>
+<link rel="stylesheet" href="/vendor/css/gruvbox-light.min.css">
+<link rel="stylesheet" href="/vendor/css/fonts.css">
 <style>
   /* ─── CXMail palette (warm neutrals + iOS-blue accent) ───────
      Light-only by design. 'color-scheme: light' pins native UA
@@ -820,6 +820,22 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
   .transcript-feed::-webkit-scrollbar { width: 4px; }
   .transcript-feed::-webkit-scrollbar-thumb { background: var(--gb-overlay0); border-radius: 2px; }
+
+  .show-older-btn {
+    display: block;
+    width: 100%;
+    margin: 6px 0;
+    padding: 6px 10px;
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--gb-subtext0);
+    background: var(--gb-surface0);
+    border: 1px dashed var(--gb-overlay0);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .show-older-btn:hover { background: var(--gb-surface1); }
 
   /* "N new" pill — appears when the user scrolls away from the live edge */
   .new-seg-pill {
@@ -2194,7 +2210,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
   </nav>
 </div>
 
-<div class="toast-stack" id="toastStack"></div>
+<div class="toast-stack" id="toastStack" role="status" aria-live="polite"></div>
+<div id="srAnnouncer" aria-live="polite" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap"></div>
 
 <script>
 (function() {
@@ -2263,6 +2280,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   var currentFilter = 'all';
   var autoScroll = true;
   var actionCards = new Map();
+  var announcedSuggestions = new Set(); // screen-reader announcements, once per card
   // actionId -> generated HTML mockup string, for Open-in-tab / Download.
   var mockupHtml = new Map();
   var headingIdCounter = 0;
@@ -2626,18 +2644,23 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
 
   // ─── Signal Detection ──────────────────────────────────────
-  var actionMarkers = ['action item','follow up','next step','send','share','create','draft','schedule','update','write','review','prepare','need to',"let's",'we should',"i'll",'i will','can you','could you','own that','take that'];
-  var decisionMarkers = ['we decided','decision','agreed','approved',"we'll go with","let's do",'locking','move forward with','ship this','finalize'];
-  var blockerMarkers = ['blocker','blocked','risk','concern','issue','problem',"can't",'cannot','stuck','delay','slip','waiting on'];
-  var questionStarts = ['what','why','how','when','where','who','should','can','could','would','do we','are we'];
+  // Regex sources come from src/present/signals.ts (word-boundary anchored —
+  // 'risk' must not tag 'brisk', 'action' must not tag 'transaction').
+  var signalRegexSources = ${JSON.stringify(buildSignalRegexSources())};
+  var signalRegexes = {
+    action: new RegExp(signalRegexSources.action, 'i'),
+    decision: new RegExp(signalRegexSources.decision, 'i'),
+    risk: new RegExp(signalRegexSources.risk, 'i'),
+  };
+  var questionStarts = ${JSON.stringify(QUESTION_STARTS)};
 
   function detectSignals(text) {
-    var lower = text.toLowerCase();
     var signals = [];
-    for (var i = 0; i < actionMarkers.length; i++) { if (lower.includes(actionMarkers[i])) { signals.push('action'); break; } }
-    for (var i = 0; i < decisionMarkers.length; i++) { if (lower.includes(decisionMarkers[i])) { signals.push('decision'); break; } }
-    for (var i = 0; i < blockerMarkers.length; i++) { if (lower.includes(blockerMarkers[i])) { signals.push('risk'); break; } }
-    if (lower.includes('?')) {
+    if (signalRegexes.action.test(text)) signals.push('action');
+    if (signalRegexes.decision.test(text)) signals.push('decision');
+    if (signalRegexes.risk.test(text)) signals.push('risk');
+    if (text.includes('?')) {
+      var lower = text.toLowerCase();
       for (var i = 0; i < questionStarts.length; i++) { if (lower.startsWith(questionStarts[i]) || lower.includes(' ' + questionStarts[i] + ' ')) { signals.push('question'); break; } }
     }
     return signals;
@@ -3272,6 +3295,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     var closeBtn = document.createElement('button');
     closeBtn.className = 'toast-close';
     closeBtn.textContent = '\\u00d7';
+    closeBtn.setAttribute('aria-label', 'Dismiss notification');
     closeBtn.onclick = removeToast;
     t.appendChild(closeBtn);
 
@@ -3943,8 +3967,33 @@ const PRESENT_HTML = `<!DOCTYPE html>
     }, 150);
   });
 
+  // Keyboard access for the popup menus — the items are divs, not buttons,
+  // so give them menu semantics + Enter/Space/arrow-key handling.
+  function makeMenuAccessible(menuEl) {
+    if (!menuEl) return;
+    menuEl.setAttribute('role', 'menu');
+    menuEl.querySelectorAll('.askmenu-item').forEach(function(item) {
+      item.setAttribute('role', 'menuitem');
+      item.setAttribute('tabindex', '0');
+      item.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          item.click();
+        } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          var list = Array.prototype.slice.call(menuEl.querySelectorAll('.askmenu-item'));
+          var i = list.indexOf(item);
+          var next = e.key === 'ArrowDown' ? list[(i + 1) % list.length] : list[(i - 1 + list.length) % list.length];
+          if (next) next.focus();
+        }
+      });
+    });
+  }
+
   buildAskUi();
   buildCardMenu();
+  makeMenuAccessible(askMenuEl);
+  makeMenuAccessible(cardMenuEl);
   transcriptFeed.addEventListener('contextmenu', function(e) {
     var captured = captureTranscriptSelection();
     if (!captured) { hideAskMenu(); return; }
@@ -3978,11 +4027,36 @@ const PRESENT_HTML = `<!DOCTYPE html>
   });
   document.addEventListener('keydown', function(e) {
     if (e.key !== 'Escape') return;
+    // Modals sit on top of everything — close them first. Route through their
+    // Close buttons so modal-local cleanup (progress timers, focus restore) runs.
+    var modalClose = document.querySelector('#settingsModal #settingsClose, #reviewModal #reviewModalClose');
+    if (modalClose) { modalClose.click(); return; }
     if (selBarEl && selBarEl.style.display === 'flex') hideSelBar();
     else if (cardMenuEl && cardMenuEl.style.display === 'block') hideCardMenu();
     else if (askMenuEl && askMenuEl.style.display === 'block') hideAskMenu();
     else if (askPanelEl && askPanelEl.classList.contains('open')) closeAskPanel();
   });
+
+  // Focus handling for modal overlays: focus the close button on open, keep
+  // Tab inside the card, hand focus back where it was on close.
+  function wireModalFocus(modal, card, closeBtn) {
+    var prior = document.activeElement;
+    if (closeBtn) closeBtn.focus();
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.addEventListener('keydown', function(e) {
+      if (e.key !== 'Tab') return;
+      var focusables = card.querySelectorAll('button, input, [tabindex="0"], a[href], select, textarea');
+      if (!focusables.length) return;
+      var first = focusables[0];
+      var last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    });
+    return function restoreFocus() {
+      if (prior && typeof prior.focus === 'function') { try { prior.focus(); } catch (err) {} }
+    };
+  }
 
   // ─── Transcript ───────────────────────────────────────────
   // ─── Pausable auto-scroll ──────────────────────────────────
@@ -4079,9 +4153,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
     }
   }
 
-  function renderSegment(seg) {
-    if (!seg.text || seg.text.trim() === '') return null;
-
+  // Build a segment row element (no insertion — renderSegment and the
+  // show-older re-render both use this).
+  function buildSegmentEl(seg) {
     var srcClass = seg.source === 'mic' ? 'mic' : 'meeting';
     var srcLabel = seg.source === 'mic' ? 'You' : 'Meeting';
     var signals = detectSignals(seg.text);
@@ -4106,6 +4180,67 @@ const PRESENT_HTML = `<!DOCTYPE html>
     if (currentFilter !== 'all' && seg.source !== currentFilter) {
       el.style.display = 'none';
     }
+    return el;
+  }
+
+  // ─── Transcript DOM cap ────────────────────────────────────
+  // Long meetings accumulate thousands of rows; keep at most 400 in the DOM
+  // (data stays in segments[]). A "Show N older" button at the oldest edge
+  // re-renders everything on demand, and a text search does so automatically
+  // so search never silently misses trimmed rows.
+  var MAX_RENDERED_SEGMENTS = 400;
+  var showAllSegments = false;
+  var showOlderBtn = null;
+
+  function ensureShowOlderBtn() {
+    if (!showOlderBtn) {
+      showOlderBtn = document.createElement('button');
+      showOlderBtn.className = 'show-older-btn';
+      showOlderBtn.onclick = function() { renderAllSegments(); };
+    }
+    return showOlderBtn;
+  }
+
+  function enforceSegmentCap() {
+    if (showAllSegments) return;
+    var rows = transcriptFeed.querySelectorAll('.seg');
+    var overflow = rows.length - MAX_RENDERED_SEGMENTS;
+    if (overflow <= 0) return;
+    // Oldest rows sit at the bottom in live (newest-first) mode, at the top
+    // in replay (chronological) mode.
+    for (var i = 0; i < overflow; i++) {
+      var victim = isReplay ? rows[i] : rows[rows.length - 1 - i];
+      victim.remove();
+    }
+    var hidden = segments.length - MAX_RENDERED_SEGMENTS;
+    var btn = ensureShowOlderBtn();
+    btn.textContent = 'Show ' + hidden + ' older segment' + (hidden === 1 ? '' : 's');
+    if (isReplay) transcriptFeed.insertBefore(btn, transcriptFeed.firstChild);
+    else transcriptFeed.appendChild(btn);
+  }
+
+  function renderAllSegments() {
+    showAllSegments = true;
+    if (showOlderBtn) showOlderBtn.remove();
+    // Full rebuild from data — one-time cost on an explicit user ask.
+    transcriptFeed.innerHTML = '';
+    var ordered = isReplay ? segments : segments.slice().reverse();
+    ordered.forEach(function(seg) {
+      if (!seg.text || seg.text.trim() === '') return;
+      var el = buildSegmentEl(seg);
+      transcriptFeed.appendChild(el);
+      if (seg.id != null) {
+        var entry = segById.get(seg.id);
+        if (entry) entry.el = el;
+      }
+    });
+    filterTranscript();
+  }
+
+  function renderSegment(seg) {
+    if (!seg.text || seg.text.trim() === '') return null;
+
+    var el = buildSegmentEl(seg);
 
     if (isReplay) {
       // Replay reads top-down like a document — keep chronological order.
@@ -4121,6 +4256,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       if (autoScroll) transcriptFeed.scrollTop = 0;
       else { unseenSegments++; updateNewSegPill(); }
     }
+    enforceSegmentCap();
     return el;
   }
 
@@ -4133,6 +4269,11 @@ const PRESENT_HTML = `<!DOCTYPE html>
   window.filterTranscript = function() {
     var search = (document.getElementById('transcriptSearch') || {}).value || '';
     search = search.toLowerCase();
+    // Searching must cover DOM-trimmed rows too — render everything once.
+    if (search && !showAllSegments && segments.length > MAX_RENDERED_SEGMENTS) {
+      renderAllSegments(); // calls back into filterTranscript with all rows present
+      return;
+    }
     transcriptFeed.querySelectorAll('.seg').forEach(function(el) {
       var matchSource = currentFilter === 'all' || el.dataset.source === currentFilter;
       var matchSearch = !search || el.dataset.text.includes(search);
@@ -4568,7 +4709,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
       '<div id="settingsBody" style="padding:16px 20px;font-size:12px">Loading\\u2026</div>';
     modal.appendChild(card);
     document.body.appendChild(modal);
-    var close = function() { modal.remove(); };
+    var restoreFocus = wireModalFocus(modal, card, card.querySelector('#settingsClose'));
+    var close = function() { modal.remove(); restoreFocus(); };
     card.querySelector('#settingsClose').onclick = close;
     modal.addEventListener('click', function(e) { if (e.target === modal) close(); });
 
@@ -4651,7 +4793,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
     var progressTimer = null;
     function stopProgress() { if (progressTimer) { clearInterval(progressTimer); progressTimer = null; } }
 
-    var close = function() { stopProgress(); modal.remove(); };
+    var restoreFocus = wireModalFocus(modal, card, card.querySelector('#reviewModalClose'));
+    var close = function() { stopProgress(); modal.remove(); restoreFocus(); };
     card.querySelector('#reviewModalClose').onclick = close;
     modal.addEventListener('click', function(e) { if (e.target === modal) close(); });
 
@@ -4957,6 +5100,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
             autoScroll = true;
             unseenSegments = 0;
             updateNewSegPill();
+            showAllSegments = false;
             window.dismissCoach();
           }
           updateUI();
@@ -4969,6 +5113,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
         case 'action.suggested':
           if (msg.action) {
+            // Announce genuinely-new suggestions to screen readers (streaming
+            // updates re-fire this message with the same id — announce once).
+            if (!actionCards.has(msg.action.id) && !announcedSuggestions.has(msg.action.id)) {
+              announcedSuggestions.add(msg.action.id);
+              var srEl = document.getElementById('srAnnouncer');
+              if (srEl) srEl.textContent = 'New suggestion: ' + (msg.action.title || msg.action.type);
+            }
             var sa = {
               id: msg.action.id,
               type: msg.action.type,

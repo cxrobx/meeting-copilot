@@ -88,10 +88,12 @@ Audio → Transcription → Buffer (15s cadence)
 | Worker | Status | Purpose |
 |--------|--------|---------|
 | Research | Implemented | Web research on discussed topics |
+| Fast Research | Implemented | Streaming quick research (OpenAI-preferred, Haiku CLI fallback) |
 | Summary | Implemented | Running meeting summary |
 | Analysis | Implemented | Data/argument analysis |
-| Mockup | Stub | UI mockup generation |
-| CodeGen | Stub | Code generation from discussion |
+| Mockup | Implemented | ASCII wireframe + HTML mockup (two-phase, early ASCII emit) |
+| CodeGen | Implemented | Code generation from discussion |
+| Review | Implemented | Opus self-review scorecard + cross-meeting trends |
 
 ## Shared Transcript Protocol
 
