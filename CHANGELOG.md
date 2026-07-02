@@ -4,6 +4,10 @@ All notable changes to Meeting Copilot will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- 2026-07-02: Upcoming-meeting auto-fill — `server/src/calendar/cxmail.ts` reads cxmail's invite DB read-only (all mail accounts, `CXMAIL_DB_PATH` override), `GET /calendar/upcoming` dedupes by event UID with per-field fallback across RSVP replies; start form shows up to 3 "📅 Auto-fill" chips that prefill title/attendees and run the invite description through agenda extract. Degrades to hidden when cxmail/DB is absent. Coverage = invite-backed meetings only (self-created events with no invite email don't appear).
+- 2026-07-02: Menubar Toggle Panel fixed — panel gets `.moveToActiveSpace` + `.fullScreenAuxiliary`, toggle hides only when visible on the active Space (otherwise fronts + activates), popover dismisses first
+
 ### Finish-the-Migration UX Program (2026-07-02)
 
 Eleven-commit program closing out the unfinished native→web migration. Full audit + plan in the session that produced commits f169087…HEAD.

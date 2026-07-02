@@ -23,6 +23,7 @@ server/src/
 ├── claude-cli.ts      # CLI fallback chain (gemini→haiku→codex) + Gemini circuit breaker
 ├── persistent-claude.ts # Warm `claude` session pool for tool-less calls
 ├── settings.ts        # ~/.meeting-copilot/settings.json (cadence/TTL/monitors/retention)
+├── calendar/          # Upcoming meetings read-only from cxmail's invite DB (start-form auto-fill)
 ├── transcription/     # Transcription providers (whisper/parakeet, deepgram, dedup, stitcher)
 ├── intelligence/      # Eval loop (triage→suggest), agenda, coach, factcheck, prompts
 ├── workers/           # Research, FastResearch, Summary, Analysis, Mockup, CodeGen, Review
@@ -67,5 +68,6 @@ cd server && npm start        # Run compiled dist/index.js
 | `GEMINI_TRIAGE_TIMEOUT_MS` | No | 12000 | Tier-1 triage timeout before Haiku fallback |
 | `COPILOT_DISABLE_PAID_API` | No | - | `1` = hard zero-API-spend (CLIs/subscription only) |
 | `COPILOT_ENABLE_HTTP_TRANSCRIBE` | No | - | `1` re-enables the legacy POST /transcribe path |
+| `CXMAIL_DB_PATH` | No | `~/Library/Application Support/com.cxmail.app/cxmail.db` | cxmail DB for start-form meeting auto-fill (read-only) |
 
 > **Settings precedence**: `~/.meeting-copilot/settings.json` (written by the dashboard gear panel via `POST /settings`) **beats env vars**, which beat hardcoded defaults. Env vars remain as back-compat defaults only. NO `ANTHROPIC_API_KEY` is required — all AI calls ride CLIs on user subscriptions, and `claude` spawn sites strip the key from child env so it can never bill the API console.

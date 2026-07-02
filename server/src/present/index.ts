@@ -1315,6 +1315,49 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
   .consent-row input { margin-top: 1px; accent-color: var(--gb-green); }
 
+  /* Upcoming-meeting auto-fill chips (fed by cxmail invites) */
+  .cal-chips {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 10px 0 4px;
+    text-align: left;
+  }
+  .cal-chips-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--gb-subtext0);
+  }
+  .cal-chip {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 10px;
+    border: 1px solid var(--gb-surface1);
+    background: var(--gb-surface0);
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--gb-text);
+    text-align: left;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  .cal-chip:hover { border-color: var(--gb-green); }
+  .cal-chip.soon { border-color: var(--gb-green); box-shadow: 0 0 0 1px var(--gb-green); }
+  .cal-chip.applied { opacity: 0.55; cursor: default; }
+  .cal-chip-title {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+  .cal-chip-time { color: var(--gb-subtext0); font-size: 11px; white-space: nowrap; }
+  .cal-chip-fill { color: var(--gb-green); font-size: 11px; font-weight: 600; white-space: nowrap; }
+
   .idle-actions {
     display: flex;
     gap: 10px;
@@ -3029,6 +3072,86 @@ const PRESENT_HTML = `<!DOCTYPE html>
     dot.classList.add('flash');
   }
 
+  // ─── Upcoming-Meeting Auto-fill (cxmail invites) ──────────
+  // GET /calendar/upcoming reads cxmail's local invite DB. One click
+  // prefills the start form from the event; the invite description goes
+  // through the normal agenda-extract path (CLI/subscription, click-only).
+  var upcomingMeetings = [];
+  var appliedMeetingUid = null;
+
+  function refreshCalendarChips() {
+    var host = document.getElementById('calChips');
+    if (!host || isReplay) return;
+    fetch('/calendar/upcoming').then(function(r) {
+      return r.json();
+    }).then(function(data) {
+      upcomingMeetings = (data && data.meetings) || [];
+      renderCalendarChips();
+    }).catch(function() {
+      upcomingMeetings = [];
+      renderCalendarChips();
+    });
+  }
+
+  function formatMeetingTime(iso) {
+    var d = new Date(iso);
+    var now = new Date();
+    var time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    if (d.toDateString() === now.toDateString()) return 'Today ' + time;
+    if (d.toDateString() === new Date(now.getTime() + 86400000).toDateString()) return 'Tomorrow ' + time;
+    return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + time;
+  }
+
+  function renderCalendarChips() {
+    var host = document.getElementById('calChips');
+    if (!host) return;
+    if (!upcomingMeetings.length) { host.innerHTML = ''; return; }
+
+    var html = '<div class="cal-chips"><span class="cal-chips-label">Upcoming on your calendar</span>';
+    var count = Math.min(upcomingMeetings.length, 3);
+    for (var i = 0; i < count; i++) {
+      var m = upcomingMeetings[i];
+      var startMs = Date.parse(m.startsAt);
+      // "soon" = starts within 10 min (or already started, within lookback)
+      var soon = startMs - Date.now() < 10 * 60 * 1000;
+      var applied = appliedMeetingUid !== null && appliedMeetingUid === (m.eventUid || m.title);
+      var cls = 'cal-chip' + (soon ? ' soon' : '') + (applied ? ' applied' : '');
+      html += '<button type="button" class="' + cls + '" onclick="applyCalendarMeeting(' + i + ')">' +
+        '<span aria-hidden="true">\\uD83D\\uDCC5</span>' +
+        '<span class="cal-chip-title">' + escapeHtml(m.title) + '</span>' +
+        '<span class="cal-chip-time">' + escapeHtml(formatMeetingTime(m.startsAt)) + '</span>' +
+        '<span class="cal-chip-fill">' + (applied ? 'Filled' : 'Auto-fill') + '</span>' +
+      '</button>';
+    }
+    html += '</div>';
+    host.innerHTML = html;
+  }
+
+  window.applyCalendarMeeting = function(i) {
+    var m = upcomingMeetings[i];
+    if (!m) return;
+
+    var titleInput = document.getElementById('startTitle');
+    if (titleInput) titleInput.value = m.title;
+
+    var attendeesInput = document.getElementById('startAttendees');
+    if (attendeesInput && m.attendees && m.attendees.length) {
+      attendeesInput.value = m.attendees.map(function(a) { return a.name; }).join(', ');
+    }
+
+    // Invite description → agenda notes → the normal extract flow. Skip
+    // when empty (many invites are just a Meet link).
+    if (m.description && m.description.trim()) {
+      agendaRawSnapshot = m.description.trim();
+      setAgendaState({ kind: 'raw' });
+      window.extractAgendaFromNotes();
+    }
+
+    appliedMeetingUid = m.eventUid || m.title;
+    renderCalendarChips();
+    showToast('Prefilled from \\u201C' + m.title + '\\u201D');
+  };
+
   function showIdleState() {
     var wsConnected = ws && ws.readyState === WebSocket.OPEN;
     var btnDisabled = wsConnected ? '' : ' disabled';
@@ -3058,6 +3181,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     idleOverlay.innerHTML = '<div class="idle-overlay"><div class="idle-card" style="max-width:500px">' +
       '<h2>No Active Meeting</h2>' +
       '<p>Start a session to begin capturing and analyzing your meeting.</p>' +
+      '<div id="calChips"></div>' +
       '<div class="idle-form">' +
         '<label>Title</label><input id="startTitle" placeholder="Weekly sync, 1:1, etc.">' +
         '<label>Agenda <span style="font-weight:400;text-transform:none;letter-spacing:0">(tracked live)</span></label>' +
@@ -3082,6 +3206,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     // Populate context list and agenda editor after DOM is built
     renderContextList();
     renderAgendaEditor();
+    refreshCalendarChips();
   }
 
   function showQuickActions() {

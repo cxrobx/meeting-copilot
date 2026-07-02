@@ -22,6 +22,7 @@ import {
   getContextItemInfo,
 } from './context/index.js';
 import { extractAgendaItemsFromNotes } from './intelligence/agenda.js';
+import { getUpcomingMeetings } from './calendar/cxmail.js';
 import type { ContextItemConfig } from './context/index.js';
 
 interface RouteContext {
@@ -253,6 +254,16 @@ export function createRoutes(ctx: RouteContext): Router {
   router.get('/projects', (_req, res) => {
     const projects = scanProjects();
     res.json({ projects });
+  });
+
+  // Upcoming meetings from cxmail's invite database (read-only, local).
+  // Returns { meetings: [] } whenever cxmail or its DB is absent.
+  router.get('/calendar/upcoming', (_req, res) => {
+    try {
+      res.json({ meetings: getUpcomingMeetings() });
+    } catch (err) {
+      res.json({ meetings: [], error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   // Context sources (files + folders)
