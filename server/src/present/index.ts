@@ -1590,6 +1590,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
     flex-shrink: 0;
   }
   .toast-bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--gb-yellow); }
+  .toast-error { background: var(--gb-red, #cc241d); color: #fff; }
+  .toast-error .toast-close { color: rgba(255,255,255,0.7); }
+  .toast-error .toast-bar { background: rgba(255,255,255,0.5); }
   @keyframes drain { from { width: 100%; } to { width: 0%; } }
 
   /* ─── Monitor toggles (fact-check / coach) ─────────────────── */
@@ -2918,6 +2921,14 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   window.toggleSession = function() {
     if (sessionState === 'live' || sessionState === 'degraded') {
+      // Send FIRST (browser path) — if the socket is down the stop never
+      // reached the server, so flipping to "ending" would be a lie.
+      if (hasNativeBridge()) {
+        window.__copilotNativeBridge.stopSession();
+      } else if (!wsSend({ type: 'session.stop' })) {
+        showToast('Not connected \\u2014 could not end the session. Try again in a moment.', { error: true });
+        return;
+      }
       // Optimistic UI: the server may take several seconds to finish stopping
       // (auto-summary, action completion, etc.) before it broadcasts
       // session.state=archived. Flip to "ending" immediately so the user
@@ -2935,11 +2946,6 @@ const PRESENT_HTML = `<!DOCTYPE html>
       // over the moment the user clicks End.
       stopTimer();
       updateUI();
-      if (hasNativeBridge()) {
-        window.__copilotNativeBridge.stopSession();
-      } else {
-        wsSend({ type: 'session.stop' });
-      }
     } else {
       // Start with values from form if available, otherwise empty
       startSession();
@@ -2998,7 +3004,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     opts = opts || {};
     var duration = opts.duration || 4000;
     var t = document.createElement('div');
-    t.className = 'toast';
+    t.className = opts.error ? 'toast toast-error' : 'toast';
 
     var msgEl = document.createElement('span');
     msgEl.className = 'toast-msg';
@@ -3039,14 +3045,64 @@ const PRESENT_HTML = `<!DOCTYPE html>
   var ACTION_LABELS = { 'fast-research': 'Fast research', research: 'Research', summary: 'Summary', analysis: 'Analysis', review: 'Self-review' };
 
   window.triggerAction = function(type) {
-    var prompt = (document.getElementById('quickPrompt') || {}).value || '';
-    wsSend({ type: 'action.trigger', actionType: type, prompt: prompt || undefined });
-    var el = document.getElementById('quickPrompt');
-    if (el) el.value = '';
+    var promptEl = document.getElementById('quickPrompt');
+    var prompt = (promptEl || {}).value || '';
+    if (!wsSend({ type: 'action.trigger', actionType: type, prompt: prompt || undefined })) {
+      // Keep the prompt text so the user can retry without retyping.
+      showToast('Not connected \\u2014 could not queue ' + (ACTION_LABELS[type] || type) + '. Try again in a moment.', { error: true });
+      return;
+    }
+    if (promptEl) promptEl.value = '';
     showToast((ACTION_LABELS[type] || type) + ' queued');
   };
 
-  window.approveAction = function(id) { wsSend({ type: 'action.approve', actionId: id }); };
+  // ─── Optimistic card feedback ──────────────────────────────
+  // Approve/Cancel disable the card's buttons and show a busy label until the
+  // server echoes an action.status for that id. If no echo arrives (server
+  // silently dropped it, or the socket died right after send), revert and say
+  // so — never leave the user believing a click worked when it didn't.
+  var OPTIMISTIC_REVERT_MS = 6000;
+  var optimisticCards = new Map(); // actionId -> { timer }
+
+  function clearOptimistic(id) {
+    var entry = optimisticCards.get(id);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    optimisticCards.delete(id);
+    var card = actionCards.get(id);
+    if (card) delete card.dataset.optimistic;
+  }
+
+  function markOptimistic(id, kind, busySelector, busyLabel) {
+    var card = actionCards.get(id);
+    if (!card) return;
+    card.dataset.optimistic = kind;
+    var touched = [];
+    card.querySelectorAll('.card-actions .btn').forEach(function(b) {
+      touched.push({ btn: b, text: b.textContent });
+      b.disabled = true;
+    });
+    var busyBtn = card.querySelector('.card-actions ' + busySelector);
+    if (busyBtn) busyBtn.textContent = busyLabel;
+    var timer = setTimeout(function() {
+      optimisticCards.delete(id);
+      if (card.dataset.optimistic !== kind) return;
+      delete card.dataset.optimistic;
+      touched.forEach(function(t) { t.btn.disabled = false; t.btn.textContent = t.text; });
+      showToast('No response from server \\u2014 try again', { error: true });
+    }, OPTIMISTIC_REVERT_MS);
+    optimisticCards.set(id, { timer: timer });
+  }
+
+  window.approveAction = function(id) {
+    var card = actionCards.get(id);
+    if (card && card.dataset.optimistic) return; // click already in flight
+    if (!wsSend({ type: 'action.approve', actionId: id })) {
+      showToast('Not connected \\u2014 approve did not go through. Try again in a moment.', { error: true });
+      return;
+    }
+    markOptimistic(id, 'approve', '.btn-green', 'Approving\\u2026');
+  };
 
   // Dismissal is irreversible once the server hears about it, so hide the
   // card locally first and only send action.dismiss after the undo window.
@@ -3069,7 +3125,14 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
     var timer = setTimeout(function() {
       pendingDismissals.delete(id);
-      wsSend({ type: 'action.dismiss', actionId: id });
+      if (!wsSend({ type: 'action.dismiss', actionId: id })) {
+        // Server never heard the dismiss — restore the card instead of
+        // silently desyncing (it would reappear on reload anyway).
+        card.style.display = '';
+        card.classList.remove('fade-out');
+        showToast('Not connected \\u2014 dismiss did not go through; suggestion restored.', { error: true });
+        return;
+      }
       card.remove();
       actionCards.delete(id);
       rebuildToc();
@@ -3089,7 +3152,15 @@ const PRESENT_HTML = `<!DOCTYPE html>
     });
   };
 
-  window.cancelAction = function(id) { wsSend({ type: 'action.cancel', actionId: id }); };
+  window.cancelAction = function(id) {
+    var card = actionCards.get(id);
+    if (card && card.dataset.optimistic) return; // click already in flight
+    if (!wsSend({ type: 'action.cancel', actionId: id })) {
+      showToast('Not connected \\u2014 cancel did not go through. Try again in a moment.', { error: true });
+      return;
+    }
+    markOptimistic(id, 'cancel', '.btn-ghost-red', 'Cancelling\\u2026');
+  };
 
   // ─── Mockup ASCII/HTML toggle + open/download ──────────────
   // Escape a full HTML document for use inside an iframe srcdoc="" attribute.
@@ -4283,14 +4354,22 @@ const PRESENT_HTML = `<!DOCTYPE html>
   var wsRetries = 0;
   var maxRetries = 20;
 
+  // Returns true only when the message was actually handed to an OPEN socket —
+  // callers use this to give honest feedback instead of pretending it sent.
   function wsSend(msg) {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(msg));
-    } else {
-      console.warn('[WS] Not connected, cannot send:', msg.type);
-      // Try reconnecting
-      if (!ws || ws.readyState === WebSocket.CLOSED) connectWS();
+      try {
+        ws.send(JSON.stringify(msg));
+        return true;
+      } catch (e) {
+        console.warn('[WS] Send failed:', msg.type, e);
+        return false;
+      }
     }
+    console.warn('[WS] Not connected, cannot send:', msg.type);
+    // Try reconnecting
+    if (!ws || ws.readyState === WebSocket.CLOSED) connectWS();
+    return false;
   }
 
   function connectWS() {
@@ -4383,6 +4462,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
             segCountEl.textContent = '0';
             clearAgenda();
             resultsEl.innerHTML = '';
+            optimisticCards.forEach(function(entry) { clearTimeout(entry.timer); });
+            optimisticCards.clear();
             actionCards.clear();
             factFlagCards.clear();
             window.dismissCoach();
@@ -4438,6 +4519,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
           break;
 
         case 'action.status':
+          // Server echoed a state change — the optimistic click (if any) is
+          // reconciled; renderAction below repaints the card authoritatively.
+          clearOptimistic(msg.actionId);
           if (msg.state === 'expired') {
             // Server expired it — a pending local dismissal is now moot.
             var pendingExpired = pendingDismissals.get(msg.actionId);
