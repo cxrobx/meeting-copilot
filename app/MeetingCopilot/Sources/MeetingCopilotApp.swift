@@ -211,10 +211,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func togglePanel() {
-        if floatingPanelController.isVisible {
+        if floatingPanelController.hasPanel {
+            // toggle() hides when visible on the current Space, otherwise
+            // fronts + activates + pulls to this Space.
             floatingPanelController.toggle()
         } else {
             showPanel()
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 

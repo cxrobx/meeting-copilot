@@ -26,6 +26,10 @@ final class FloatingPanelController {
         panel?.isVisible ?? false
     }
 
+    var hasPanel: Bool {
+        panel != nil
+    }
+
     // MARK: - Show Panel
 
     func showPanel<Content: View>(contentView: Content) {
@@ -54,6 +58,11 @@ final class FloatingPanelController {
         panel.animationBehavior = .utilityWindow
         panel.isReleasedWhenClosed = false
         panel.appearance = NSAppearance(named: .darkAqua)
+        // Without .moveToActiveSpace, re-fronting a panel that lives on
+        // another Space happens invisibly over there — the menubar toggle
+        // looks dead. .fullScreenAuxiliary lets it join fullscreen Spaces
+        // (meetings often run fullscreen).
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
 
         // Use NSHostingView to embed SwiftUI content
         let hostingView = NSHostingView(rootView: contentView)
@@ -77,10 +86,15 @@ final class FloatingPanelController {
 
     func toggle() {
         guard let panel = panel else { return }
-        if panel.isVisible {
+        if panel.isVisible && panel.isOnActiveSpace {
             panel.orderOut(nil)
         } else {
+            // Hidden — or open on a different Space, which reads as hidden.
+            // An accessory app's window won't come forward (or pull to the
+            // current Space) without explicit activation.
+            clampToVisibleScreen(panel)
             panel.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 

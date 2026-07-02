@@ -124,7 +124,10 @@ struct MenuBarView: View {
                 }
 
                 // Show Panel
-                Button(action: onTogglePanel) {
+                Button(action: {
+                    dismiss() // close the popover so the panel can take key
+                    onTogglePanel()
+                }) {
                     HStack {
                         Image(systemName: "rectangle.on.rectangle")
                         Text("Toggle Panel")
