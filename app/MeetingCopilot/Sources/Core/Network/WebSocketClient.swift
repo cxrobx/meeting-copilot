@@ -3,7 +3,7 @@ import Foundation
 // MARK: - WebSocket Client
 
 /// Actor-based WebSocket client for communicating with the local Node.js server.
-/// Connects via `ws://localhost:17890` (TCP) or Unix domain socket when available.
+/// Connects via `ws://localhost:<ServerConfig.port>` (TCP) or Unix domain socket when available.
 actor WebSocketClient {
     // MARK: - Configuration
 
@@ -35,7 +35,7 @@ actor WebSocketClient {
     /// Initialize with a TCP URL (default) and an optional Unix socket path.
     /// When `socketPath` is provided and the file exists, the client will prefer it.
     init(
-        url: URL = URL(string: "ws://localhost:17890")!,
+        url: URL = ServerConfig.wsURL,
         socketPath: String? = NSString("~/.meeting-copilot/copilot.sock").expandingTildeInPath
     ) {
         self.serverURL = url

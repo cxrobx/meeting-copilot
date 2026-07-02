@@ -12,7 +12,7 @@ struct WebDashboardView: View {
     }
 }
 
-private let dashboardURL = URL(string: "http://localhost:17890/present")!
+private let dashboardURL = ServerConfig.url("/present")
 private let bridgeMessageName = "copilotBridge"
 
 private struct WebViewWrapper: NSViewRepresentable {
@@ -244,7 +244,7 @@ private struct WebViewWrapper: NSViewRepresentable {
         }
 
         private func checkHealth(completion: @escaping (Bool) -> Void) {
-            let healthURL = URL(string: "http://localhost:17890/health")!
+            let healthURL = ServerConfig.url("/health")
             let task = URLSession.shared.dataTask(with: healthURL) { data, response, error in
                 let ok = (response as? HTTPURLResponse)?.statusCode == 200
                 DispatchQueue.main.async { completion(ok) }

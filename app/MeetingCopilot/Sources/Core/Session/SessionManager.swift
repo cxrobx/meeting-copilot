@@ -77,7 +77,7 @@ final class SessionManager {
         guard !serverReady else { return }
         Task {
             for _ in 0..<30 { // up to 30 seconds
-                guard let url = URL(string: "http://localhost:17890/health") else { break }
+                let url = ServerConfig.url("/health")
                 if let (_, response) = try? await URLSession.shared.data(from: url),
                    (response as? HTTPURLResponse)?.statusCode == 200 {
                     serverReady = true
@@ -98,7 +98,7 @@ final class SessionManager {
     }
 
     private func runPreflightCheck() async {
-        guard let url = URL(string: "http://localhost:17890/preflight") else { return }
+        let url = ServerConfig.url("/preflight")
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],

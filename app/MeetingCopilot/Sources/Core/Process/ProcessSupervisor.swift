@@ -212,6 +212,9 @@ final class ProcessSupervisor {
         let prioritySet = Set(priorityPaths)
         let leftover = currentComponents.filter { !prioritySet.contains($0) }
         env["PATH"] = (priorityPaths + leftover).joined(separator: ":")
+        // The child server binds COPILOT_PORT — pass the app's resolved port
+        // so the two halves can never disagree about where the server lives.
+        env["COPILOT_PORT"] = String(ServerConfig.port)
         return env
     }
 
@@ -242,7 +245,7 @@ final class ProcessSupervisor {
     /// Whisper port (8078) is NOT killed — it may be shared with notes4chris.
     func cleanupOrphans() {
         // Only clean up the copilot server port — whisper may be shared
-        let port = "17890"
+        let port = String(ServerConfig.port)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/lsof")
         process.arguments = ["-ti", "tcp:\(port)"]
@@ -300,7 +303,7 @@ final class ProcessSupervisor {
         // Don't probe if we're not supposed to be running
         guard serverRunning else { return }
 
-        let healthURL = URL(string: "http://localhost:17890/health")!
+        let healthURL = ServerConfig.url("/health")
         var request = URLRequest(url: healthURL, timeoutInterval: 3.0)
         request.cachePolicy = .reloadIgnoringLocalCacheData
 
