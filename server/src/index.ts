@@ -171,6 +171,10 @@ type OutboundMessage =
       sessionId?: string;
       // Optional progress hint shown while state==='ending' (post-meeting workers).
       message?: string;
+      // Authoritative session start (epoch ms) + title so a reconnecting or
+      // refreshed client shows the real elapsed time instead of resetting.
+      startedAt?: number;
+      title?: string;
     }
   | {
       type: 'metrics';
@@ -445,10 +449,13 @@ function handleWsConnection(ws: WebSocket, label: string): void {
   // takes precedence so a reconnect during/after stop resolves to ending/archived
   // rather than falling back to live/idle and stranding the UI on "Ending…".
   const reportedState = postSessionState ?? (sessionActive ? 'live' : 'idle');
+  const sessionRecord = sessionStore?.getSession();
   const stateMsg: OutboundMessage = {
     type: 'session.state',
     state: reportedState,
     sessionId: sessionStore?.id ?? lastSessionId ?? undefined,
+    startedAt: sessionRecord?.startedAt,
+    title: sessionRecord?.title || undefined,
     ...(reportedState === 'ending'
       ? { message: 'Wrapping up — generating summary & self-review…' }
       : {}),
@@ -715,6 +722,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         type: 'session.state',
         state: 'live',
         sessionId: sessionStore.id,
+        startedAt: sessionStore.getSession()?.startedAt,
       });
 
       // Write shared presence for companion apps

@@ -821,6 +821,23 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .transcript-feed::-webkit-scrollbar { width: 4px; }
   .transcript-feed::-webkit-scrollbar-thumb { background: var(--gb-overlay0); border-radius: 2px; }
 
+  /* "N new" pill — appears when the user scrolls away from the live edge */
+  .new-seg-pill {
+    align-self: center;
+    margin: 4px auto 0;
+    padding: 3px 12px;
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--gb-base);
+    background: var(--gb-text);
+    border: none;
+    border-radius: 999px;
+    cursor: pointer;
+    box-shadow: 0 4px 12px -6px rgba(20,18,14,0.5);
+  }
+  .new-seg-pill:hover { opacity: 0.85; }
+
   .seg {
     padding: 5px 8px;
     border-left: 3px solid transparent;
@@ -1764,6 +1781,52 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
   .askmenu-input-row textarea:focus { border-color: var(--accent); }
 
+  /* Selection mini-toolbar — visible affordance for highlight-to-ask */
+  .selbar {
+    position: fixed;
+    z-index: 1200;
+    display: none;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px;
+    background: var(--gb-base);
+    border: 1px solid var(--gb-surface2);
+    border-radius: 8px;
+    box-shadow: 0 10px 28px -10px rgba(20,18,14,0.4);
+    padding: 3px;
+  }
+  .selbar-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 9px;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--gb-text);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .selbar-btn:hover { background: var(--gb-surface1); }
+  .selbar-input-row { display: none; padding: 2px; flex-basis: 100%; }
+  .selbar-input-row.open { display: flex; }
+  .selbar-input-row input {
+    flex: 1;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 5px 8px;
+    border: 1px solid var(--gb-surface2);
+    border-radius: 5px;
+    background: var(--gb-surface1);
+    color: var(--gb-text);
+    outline: none;
+    min-width: 220px;
+  }
+  .selbar-input-row input:focus { border-color: var(--accent); }
+
   .askpanel {
     position: fixed;
     z-index: 1100;
@@ -2059,6 +2122,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       </div>
       <input class="transcript-search" id="transcriptSearch" placeholder="Search transcript..." oninput="filterTranscript()">
     </div>
+    <button class="new-seg-pill" id="newSegPill" style="display:none"></button>
     <div class="transcript-feed" id="transcriptFeed"></div>
   </div>
 
@@ -3733,12 +3797,102 @@ const PRESENT_HTML = `<!DOCTYPE html>
     return { text: text.slice(0, 1500), context: ctx, rect: range.getBoundingClientRect() };
   }
 
+  // ─── Selection mini-toolbar ────────────────────────────────
+  // Highlight-to-ask used to be reachable ONLY via right-click — zero
+  // affordance. A floating toolbar now appears over any text selection in
+  // the transcript or result cards, offering the same startAsk actions.
+  // The right-click menus still work and take precedence when opened.
+  var selBarEl = null;
+  var selBarInputRow = null;
+  var selBarInput = null;
+  var selChangeTimer = null;
+
+  function buildSelBar() {
+    selBarEl = document.createElement('div');
+    selBarEl.className = 'selbar';
+
+    function mkBtn(label, ico, onClick) {
+      var b = document.createElement('button');
+      b.className = 'selbar-btn';
+      b.innerHTML = '<span class="askmenu-ico">' + ico + '</span>' + label;
+      // Keep the text selection alive while clicking the toolbar.
+      b.addEventListener('mousedown', function(e) { e.preventDefault(); e.stopPropagation(); });
+      b.addEventListener('click', function(e) { e.stopPropagation(); onClick(); });
+      selBarEl.appendChild(b);
+    }
+
+    mkBtn('Fact check', '\\u2713', function() { hideSelBar(); startAsk('factcheck', ''); });
+    mkBtn('Explain', '?', function() { hideSelBar(); startAsk('explain', ''); });
+    mkBtn('Ask\\u2026', '\\u270E', function() {
+      selBarInputRow.classList.add('open');
+      selBarInput.value = '';
+      selBarInput.focus();
+    });
+
+    selBarInputRow = document.createElement('div');
+    selBarInputRow.className = 'selbar-input-row';
+    selBarInput = document.createElement('input');
+    selBarInput.placeholder = 'Ask about the selection\\u2026';
+    selBarInput.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    selBarInput.addEventListener('keydown', function(e) {
+      e.stopPropagation();
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        var q = selBarInput.value.trim();
+        if (q) { hideSelBar(); startAsk('custom', q); }
+      } else if (e.key === 'Escape') {
+        hideSelBar();
+      }
+    });
+    selBarInputRow.appendChild(selBarInput);
+    selBarEl.appendChild(selBarInputRow);
+    document.body.appendChild(selBarEl);
+  }
+
+  function hideSelBar() {
+    if (selBarEl) {
+      selBarEl.style.display = 'none';
+      selBarInputRow.classList.remove('open');
+    }
+  }
+
+  function maybeShowSelBar() {
+    var captured = captureTranscriptSelection() || captureCardSelection();
+    if (!captured) { hideSelBar(); return; }
+    askSel = captured;
+    if (!selBarEl) buildSelBar();
+    selBarInputRow.classList.remove('open');
+    selBarEl.style.display = 'flex';
+    var w = selBarEl.offsetWidth || 240;
+    var h = selBarEl.offsetHeight || 34;
+    var left = captured.rect.left + captured.rect.width / 2 - w / 2;
+    selBarEl.style.left = Math.max(8, Math.min(left, window.innerWidth - w - 8)) + 'px';
+    var top = captured.rect.top - h - 8;
+    if (top < 8) top = captured.rect.bottom + 8;
+    selBarEl.style.top = Math.max(8, Math.min(top, window.innerHeight - h - 8)) + 'px';
+  }
+
+  document.addEventListener('mouseup', function(e) {
+    if (selBarEl && selBarEl.contains(e.target)) return;
+    // Defer one tick — the selection settles after mouseup.
+    setTimeout(maybeShowSelBar, 10);
+  });
+  // Covers keyboard selection + collapse; debounced so drags don't flicker.
+  document.addEventListener('selectionchange', function() {
+    clearTimeout(selChangeTimer);
+    selChangeTimer = setTimeout(function() {
+      var s = window.getSelection();
+      if (!s || s.isCollapsed) hideSelBar();
+    }, 150);
+  });
+
   buildAskUi();
   buildCardMenu();
   transcriptFeed.addEventListener('contextmenu', function(e) {
     var captured = captureTranscriptSelection();
     if (!captured) { hideAskMenu(); return; }
     askSel = captured;
+    hideSelBar(); // context menu takes precedence over the selection toolbar
     e.preventDefault();
     showAskMenu(e.clientX, e.clientY);
   });
@@ -3748,6 +3902,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     if (sel) {
       askSel = sel;
       hideCardMenu();
+      hideSelBar();
       e.preventDefault();
       showAskMenu(e.clientX, e.clientY);
       return;
@@ -3766,12 +3921,56 @@ const PRESENT_HTML = `<!DOCTYPE html>
   });
   document.addEventListener('keydown', function(e) {
     if (e.key !== 'Escape') return;
-    if (cardMenuEl && cardMenuEl.style.display === 'block') hideCardMenu();
+    if (selBarEl && selBarEl.style.display === 'flex') hideSelBar();
+    else if (cardMenuEl && cardMenuEl.style.display === 'block') hideCardMenu();
     else if (askMenuEl && askMenuEl.style.display === 'block') hideAskMenu();
     else if (askPanelEl && askPanelEl.classList.contains('open')) closeAskPanel();
   });
 
   // ─── Transcript ───────────────────────────────────────────
+  // ─── Pausable auto-scroll ──────────────────────────────────
+  // Live mode is newest-first (pinned edge = top); replay is chronological
+  // (pinned edge = bottom). Scrolling away suspends the auto-scroll so the
+  // feed stops yanking mid-read; new segments count into a pill instead.
+  var newSegPill = document.getElementById('newSegPill');
+  var unseenSegments = 0;
+
+  function atPinnedEdge() {
+    if (isReplay) {
+      return transcriptFeed.scrollHeight - transcriptFeed.scrollTop - transcriptFeed.clientHeight <= 8;
+    }
+    return transcriptFeed.scrollTop <= 8;
+  }
+
+  function updateNewSegPill() {
+    if (!newSegPill) return;
+    if (autoScroll || unseenSegments === 0) {
+      newSegPill.style.display = 'none';
+    } else {
+      newSegPill.style.display = '';
+      newSegPill.textContent = (isReplay ? '\\u2193 ' : '\\u2191 ') + unseenSegments + ' new';
+    }
+  }
+
+  transcriptFeed.addEventListener('scroll', function() {
+    hideSelBar(); // fixed-position toolbar would drift from its selection
+    var pinned = atPinnedEdge();
+    if (pinned && !autoScroll) {
+      autoScroll = true;
+      unseenSegments = 0;
+    } else if (!pinned && autoScroll) {
+      autoScroll = false;
+    }
+    updateNewSegPill();
+  }, { passive: true });
+
+  if (newSegPill) newSegPill.onclick = function() {
+    autoScroll = true;
+    unseenSegments = 0;
+    transcriptFeed.scrollTop = isReplay ? transcriptFeed.scrollHeight : 0;
+    updateNewSegPill();
+  };
+
   function addSegment(seg) {
     var wc = seg.wordCount || (seg.text ? seg.text.split(/\\s+/).filter(Boolean).length : 0);
     var prior = (seg.id != null && seg.replace) ? segById.get(seg.id) : null;
@@ -3855,6 +4054,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       // Replay reads top-down like a document — keep chronological order.
       transcriptFeed.appendChild(el);
       if (autoScroll) transcriptFeed.scrollTop = transcriptFeed.scrollHeight;
+      else { unseenSegments++; updateNewSegPill(); }
     } else {
       // Live: newest-first so the latest line is always visible without scrolling.
       var prevNewest = transcriptFeed.querySelector('.seg.newest');
@@ -3862,6 +4062,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       el.classList.add('newest');
       transcriptFeed.insertBefore(el, transcriptFeed.firstChild);
       if (autoScroll) transcriptFeed.scrollTop = 0;
+      else { unseenSegments++; updateNewSegPill(); }
     }
     return el;
   }
@@ -4160,19 +4361,26 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   // Scroll spy for TOC
   var scrollRaf = null;
-  window.addEventListener('scroll', function() {
+  // Scroll-spy listens on .main — the actual scroll container (the window
+  // never scrolls in this fixed-height layout, so a window listener was dead
+  // code and the TOC highlight never updated).
+  var mainColEl = document.querySelector('.main');
+  if (mainColEl) mainColEl.addEventListener('scroll', function() {
+    hideSelBar(); // fixed-position toolbar would drift from its selection
     if (scrollRaf) return;
     scrollRaf = requestAnimationFrame(function() {
       scrollRaf = null;
-      var scrollY = window.scrollY + 120;
+      // A heading/card is "active" when it has scrolled up to within 120px
+      // of the top of the visible main column.
+      var threshold = mainColEl.getBoundingClientRect().top + 120;
       var activeHeadingId = null;
       var activeCardId = null;
 
       resultsEl.querySelectorAll('.card-body h1[id], .card-body h2[id], .card-body h3[id]').forEach(function(h) {
-        if (h.getBoundingClientRect().top + window.scrollY <= scrollY) activeHeadingId = h.id;
+        if (h.getBoundingClientRect().top <= threshold) activeHeadingId = h.id;
       });
       resultsEl.querySelectorAll('.card').forEach(function(c) {
-        if (c.getBoundingClientRect().top + window.scrollY <= scrollY) activeCardId = c.id;
+        if (c.getBoundingClientRect().top <= threshold) activeCardId = c.id;
       });
 
       tocEntries.querySelectorAll('.toc-heading').forEach(function(l) {
@@ -4182,7 +4390,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
         l.classList.toggle('active', l.dataset.target === activeCardId);
       });
     });
-  });
+  }, { passive: true });
 
   // ─── Session History ──────────────────────────────────────
   var sessionManageMode = false;
@@ -4494,6 +4702,20 @@ const PRESENT_HTML = `<!DOCTYPE html>
     return false;
   }
 
+  // Fetch the server's current action set and (re)render — renderAction is
+  // idempotent by id, so this is safe on initial load AND on WS reconnect
+  // (cards suggested while the socket was down would otherwise be lost).
+  function refreshActions() {
+    fetch('/present/actions')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.actions && data.actions.length > 0) {
+          data.actions.forEach(renderAction);
+        }
+      })
+      .catch(function() {});
+  }
+
   function connectWS() {
     if (isReplay) return;
 
@@ -4507,12 +4729,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
       refreshStartButton();
       var connMsg = idleOverlay.querySelector('p[style*="red"]');
       if (connMsg) connMsg.remove();
-      // Check current session state
+      // Check current session state. The session.state snapshot the server
+      // sends on connect carries the authoritative startedAt — no client-side
+      // Date.now() guessing (a refresh used to reset the timer + skew Pace).
       fetch('/health').then(function(r) { return r.json(); }).then(function(d) {
         if (d.session) {
           sessionState = 'live';
           sessionId = d.session;
-          sessionStartTime = Date.now(); // approximate
           // Load existing transcript from server so refresh doesn't lose history
           fetch('/transcript').then(function(r) { return r.json(); }).then(function(t) {
             if (t.segments && t.segments.length > 0) {
@@ -4526,6 +4749,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
               setTimeout(function() { transcriptFeed.scrollTop = 0; }, 100);
             }
           }).catch(function() {});
+          // Re-fetch action cards — anything suggested/completed while the
+          // socket was down would otherwise be lost until a full reload.
+          refreshActions();
         }
         updateUI();
       }).catch(function() { updateUI(); });
@@ -4550,6 +4776,10 @@ const PRESENT_HTML = `<!DOCTYPE html>
         case 'session.state':
           sessionState = msg.state;
           sessionId = msg.sessionId || sessionId;
+          // Adopt the server's authoritative start time whenever it sends one.
+          if (typeof msg.startedAt === 'number' && msg.startedAt > 0) {
+            sessionStartTime = msg.startedAt;
+          }
           // Manage the wrap-up watchdog: arm it on 'ending', disarm on any
           // terminal/other state so it can't fire after the session resolves.
           if (msg.state === 'ending') {
@@ -4560,7 +4790,10 @@ const PRESENT_HTML = `<!DOCTYPE html>
             disarmEndingWatchdog();
           }
           if (msg.state === 'live' && !sessionStartTime) {
+            // Fallback for old servers that don't send startedAt.
             sessionStartTime = Date.now();
+          }
+          if (msg.state === 'live') {
             startTimer();
             if (pendingGoals) {
               wsSend({ type: 'meeting.goals', goals: pendingGoals });
@@ -4588,6 +4821,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
             optimisticCards.clear();
             actionCards.clear();
             factFlagCards.clear();
+            autoScroll = true;
+            unseenSegments = 0;
+            updateNewSegPill();
             window.dismissCoach();
           }
           updateUI();
@@ -4762,13 +4998,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     connectWS();
 
     // Also load any existing live actions
-    fetch('/present/actions')
-      .then(function(r) { return r.json(); })
-      .then(function(data) {
-        if (data.actions && data.actions.length > 0) {
-          data.actions.forEach(renderAction);
-        }
-      });
+    refreshActions();
   }
 })();
 <\/script>
