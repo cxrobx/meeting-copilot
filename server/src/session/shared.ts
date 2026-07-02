@@ -22,6 +22,10 @@ interface SharedPresence {
   transcriptFile: string;
 }
 
+export function isSharingEnabled(): boolean {
+  return sharingEnabled;
+}
+
 export function setSharingEnabled(enabled: boolean): void {
   sharingEnabled = enabled;
 }

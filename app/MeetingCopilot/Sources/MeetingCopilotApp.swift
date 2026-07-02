@@ -20,11 +20,8 @@ struct MeetingCopilotApp: App {
             MenuBarLabel(sessionManager: appDelegate.sessionManager)
         }
         .menuBarExtraStyle(.window)
-
-        // Settings window
-        Settings {
-            SettingsView()
-        }
+        // Settings live in the web dashboard (gear icon) — the native Settings
+        // scene was unreachable in an LSUIElement app (no app menu → no ⌘,).
     }
 }
 
@@ -105,9 +102,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Poll until server is ready
         sessionManager.waitForServer()
 
-        // Sync saved retention setting to server once it's ready
-        syncRetentionToServer()
-
         // Set up notifications — including routing banner Approve/Dismiss taps
         // back into the session, and suppressing banners while the panel is
         // already on screen.
@@ -167,30 +161,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Check if first launch - show permissions
         if !UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") {
             showPermissionsWindow()
-        }
-    }
-
-    /// Push the persisted retention value to the server so it survives server restarts.
-    private func syncRetentionToServer() {
-        let days = UserDefaults.standard.double(forKey: "sessionRetentionDays")
-        guard days >= 7 else { return } // Not yet configured or invalid
-        guard let url = URL(string: "http://localhost:17890/settings") else { return }
-
-        // Retry a few times — the server may still be starting up
-        Task.detached {
-            for attempt in 0..<5 {
-                if attempt > 0 {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000) // 2s between retries
-                }
-                var request = URLRequest(url: url)
-                request.httpMethod = "POST"
-                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.httpBody = try? JSONEncoder().encode(["retentionDays": Int(days)])
-                if let (_, response) = try? await URLSession.shared.data(for: request),
-                   (response as? HTTPURLResponse)?.statusCode == 200 {
-                    return // Success
-                }
-            }
         }
     }
 

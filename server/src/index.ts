@@ -48,6 +48,7 @@ import { isOpenAiApiAvailable } from './api/openai.js';
 import { paidApiDisabled } from './api/killswitch.js';
 import { disposeAllWarmSessions } from './persistent-claude.js';
 import { cliHealth } from './claude-cli.js';
+import { getSettings } from './settings.js';
 
 // Load environment — prefer ~/.meeting-copilot/.env so a packaged .app
 // user has a stable, user-writable location for API keys that survives
@@ -235,7 +236,7 @@ let rollingSummaryId: string | null = null;
 let rollingSummaryTimer: ReturnType<typeof setInterval> | null = null;
 let rollingSummaryWordCount = 0;
 const ROLLING_SUMMARY_INTERVAL_MS = 120_000; // 2 minutes
-let configuredRetentionDays = 90;
+let configuredRetentionDays = getSettings().retentionDays;
 let whisperAvailable: boolean | null = null;
 
 // ─── Initialize Core Services ──────────────────────────────────────────────
@@ -247,6 +248,11 @@ const intelligence = new IntelligenceEngine();
 const agendaTracker = new AgendaTracker();
 const registry = new WorkerRegistry();
 const debug = new DebugHandler(transcription, intelligence, registry);
+
+// Apply persisted settings to the live pipeline at boot (settings.json >
+// env > defaults; POST /settings re-applies at runtime).
+intelligence.setEvalCadence(getSettings().evalCadenceMs);
+registry.setSuggestionTtl(getSettings().suggestionTtlMs);
 
 // Snapshot of last broadcast agenda status — served to late-joining clients
 let lastAgendaStatus: AgendaStatus | null = null;
@@ -706,14 +712,17 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       intelligence.start();
       sessionActive = true;
 
-      // Monitors are opt-in per meeting — always start OFF so cost is never
-      // incurred silently. The dashboard toggles them via feature.toggle.
-      featureFlags.factcheck = false;
-      featureFlags.coach = false;
+      // Monitors are opt-in per meeting; the per-session starting state comes
+      // from the settings' monitorDefaults (still OFF unless the user opted
+      // in via the settings panel — cost is never incurred silently).
+      const monitorDefaults = getSettings().monitorDefaults;
+      featureFlags.factcheck = monitorDefaults.factcheck;
+      featureFlags.coach = monitorDefaults.coach;
       sessionFactFlags = [];
       lastCoachSuggestion = null;
       meetingGoals = '';
       lastAgendaMissingCount = 0;
+      applyFeatureFlags();
       broadcast({ type: 'feature.state', features: { ...featureFlags } });
 
       debugLog(`[Session] Started: ${sessionStore.id}`);

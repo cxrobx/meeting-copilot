@@ -195,12 +195,14 @@ private struct WebViewWrapper: NSViewRepresentable {
                     let attendees = (body["attendees"] as? String) ?? ""
                     let projectNames = (body["projectNames"] as? [String]) ?? []
                     let contextPaths = (body["contextPaths"] as? [String]) ?? []
+                    let consent = body["consent"] as? Bool
                     self.sessionManager.startSessionFromWeb(
                         title: title,
                         agenda: agenda,
                         attendees: attendees,
                         projectNames: projectNames,
-                        contextPaths: contextPaths
+                        contextPaths: contextPaths,
+                        consent: consent
                     )
                 case "stopSession":
                     self.sessionManager.stopSessionFromWeb()

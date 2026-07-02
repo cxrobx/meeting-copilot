@@ -48,7 +48,7 @@ cd app/MeetingCopilot && swift build
 - **Workers**: Research, Summary, Analysis, Mockup, CodeGen (all implemented)
 - **UI**: Web dashboard at `/present` (Gruvbox Light theme, JetBrains Mono) served in WKWebView
 - **Storage**: SQLite per session at `~/.meeting-copilot/sessions/<id>/`
-- **Privacy**: No raw audio stored. Consent prompt per session. Visible REC indicator.
+- **Privacy**: No raw audio stored. Consent affirmation checkbox on the start form per session. Visible REC indicator.
 
 ## Environment
 

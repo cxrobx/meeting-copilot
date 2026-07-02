@@ -1286,12 +1286,51 @@ const PRESENT_HTML = `<!DOCTYPE html>
     background: rgba(20,18,14,0.04);
   }
 
+  .consent-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 14px;
+    font-size: 11px;
+    color: var(--gb-subtext0);
+    text-align: left;
+    cursor: pointer;
+    line-height: 1.4;
+  }
+  .consent-row input { margin-top: 1px; accent-color: var(--gb-green); }
+
   .idle-actions {
     display: flex;
     gap: 10px;
     justify-content: center;
     margin-top: 16px;
   }
+
+  /* ─── Settings modal ───────────────────────────────────────── */
+  .settings-field { margin-bottom: 14px; }
+  .settings-field label {
+    display: block;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--gb-subtext0);
+    margin-bottom: 4px;
+  }
+  .settings-field input[type="number"] {
+    width: 110px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    padding: 6px 8px;
+    border: 1px solid var(--gb-surface2);
+    border-radius: 5px;
+    background: var(--gb-surface1);
+    color: var(--gb-text);
+    outline: none;
+  }
+  .settings-field .settings-hint { font-size: 10px; color: var(--gb-overlay1); margin-top: 3px; }
+  .settings-check { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--gb-text); cursor: pointer; }
+  .settings-check input { accent-color: var(--gb-green); }
 
   .sessions-link {
     color: var(--gb-blue);
@@ -2094,6 +2133,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     <span class="session-timer" id="sessionTimer"></span>
     <button class="btn btn-ghost" id="newMeetingBtn" style="display:none" onclick="newMeeting()">&larr; New Meeting</button>
     <button class="btn btn-green" id="startStopBtn" style="display:none" onclick="toggleSession()">Start</button>
+    <button class="btn btn-ghost btn-sm" id="settingsBtn" onclick="openSettings()" aria-label="Settings" title="Settings">&#9881;</button>
   </div>
 </div>
 
@@ -2259,8 +2299,12 @@ const PRESENT_HTML = `<!DOCTYPE html>
     var btn = document.getElementById('startBtn');
     if (!btn) return;
     var wsConnected = ws && ws.readyState === WebSocket.OPEN;
-    btn.disabled = !wsConnected || agendaState.kind === 'extracting';
+    var consent = document.getElementById('consentCheck');
+    var consentOk = !consent || consent.checked;
+    btn.disabled = !wsConnected || agendaState.kind === 'extracting' || !consentOk;
+    btn.title = consentOk ? '' : 'Confirm the consent checkbox to start';
   }
+  window.refreshStartButton = refreshStartButton;
 
   function currentTextareaValue() {
     var ta = document.getElementById('startAgenda');
@@ -3001,8 +3045,12 @@ const PRESENT_HTML = `<!DOCTYPE html>
         projectsHtml +
         contextHtml +
       '</div>' +
+      // Consent affirmation (architecture invariant #3: consent per session).
+      // Resets with every fresh form; Start stays disabled until checked.
+      '<label class="consent-row"><input type="checkbox" id="consentCheck" onchange="refreshStartButton()"> ' +
+        'I\\u2019ve informed participants this meeting uses an AI copilot</label>' +
       '<div class="idle-actions">' +
-        '<button class="btn btn-green" id="startBtn" onclick="startSession()"' + btnDisabled + '>Start Session</button>' +
+        '<button class="btn btn-green" id="startBtn" onclick="startSession()" disabled>Start Session</button>' +
       '</div>' +
       statusMsg +
       '<span class="sessions-link" onclick="showSessionHistory()">View Past Sessions</span>' +
@@ -3143,6 +3191,14 @@ const PRESENT_HTML = `<!DOCTYPE html>
     // race against an about-to-settle extract.
     if (agendaState.kind === 'extracting') return;
 
+    // Consent affirmation is required per session (invariant #3). The button
+    // should already be disabled, but guard the programmatic path too.
+    var consentEl = document.getElementById('consentCheck');
+    if (consentEl && !consentEl.checked) {
+      showToast('Confirm the consent checkbox to start the session.', { error: true });
+      return;
+    }
+
     var title = (document.getElementById('startTitle') || {}).value || '';
     var agenda = collectAgendaString();
     var attendees = (document.getElementById('startAttendees') || {}).value || '';
@@ -3169,6 +3225,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
         attendees: attendees,
         projectNames: selectedProjects,
         contextPaths: selectedContextPaths,
+        consent: consentEl ? consentEl.checked : true,
       });
       return;
     }
@@ -4488,6 +4545,82 @@ const PRESENT_HTML = `<!DOCTYPE html>
       updateBulkBar();
     });
   }
+
+  // ─── Settings ──────────────────────────────────────────────
+  // Gear in the header → modal backed by GET/POST /settings. The server
+  // persists to ~/.meeting-copilot/settings.json and applies changes live
+  // (eval cadence, suggestion TTL, retention, monitor defaults, summary
+  // auto-save).
+  window.openSettings = function() {
+    var existing = document.getElementById('settingsModal');
+    if (existing) { existing.remove(); return; }
+
+    var modal = document.createElement('div');
+    modal.id = 'settingsModal';
+    modal.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:24px';
+    var card = document.createElement('div');
+    card.style.cssText = 'background:var(--gb-base);color:var(--gb-text);max-width:460px;width:100%;max-height:85vh;overflow:auto;border:1px solid var(--gb-surface2);box-shadow:0 10px 40px rgba(0,0,0,.3)';
+    card.innerHTML =
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--gb-overlay0)">' +
+        '<strong style="font-size:14px">Settings</strong>' +
+        '<button class="btn btn-ghost btn-sm" id="settingsClose">Close</button>' +
+      '</div>' +
+      '<div id="settingsBody" style="padding:16px 20px;font-size:12px">Loading\\u2026</div>';
+    modal.appendChild(card);
+    document.body.appendChild(modal);
+    var close = function() { modal.remove(); };
+    card.querySelector('#settingsClose').onclick = close;
+    modal.addEventListener('click', function(e) { if (e.target === modal) close(); });
+
+    fetch('/settings').then(function(r) { return r.json(); }).then(function(d) {
+      var s = d.settings || {};
+      var body = document.getElementById('settingsBody');
+      if (!body) return;
+      body.innerHTML =
+        '<div class="settings-field"><label>Suggestion cadence (seconds)</label>' +
+          '<input type="number" id="setCadence" min="10" max="60" step="5" value="' + Math.round((s.evalCadenceMs || 15000) / 1000) + '">' +
+          '<div class="settings-hint">How often the transcript is evaluated for suggestions (10\\u201360s). Backoff doubles this when nothing is actionable.</div></div>' +
+        '<div class="settings-field"><label>Suggestion lifetime (seconds)</label>' +
+          '<input type="number" id="setTtl" min="30" max="300" step="15" value="' + Math.round((s.suggestionTtlMs || 60000) / 1000) + '">' +
+          '<div class="settings-hint">Unapproved suggestions expire after this long (30\\u2013300s).</div></div>' +
+        '<div class="settings-field"><label>Session retention (days)</label>' +
+          '<input type="number" id="setRetention" min="7" max="3650" value="' + (s.retentionDays || 90) + '">' +
+          '<div class="settings-hint">Sessions older than this are deleted at startup and on save.</div></div>' +
+        '<div class="settings-field"><label>Monitors on by default</label>' +
+          '<label class="settings-check"><input type="checkbox" id="setCoach"' + (s.monitorDefaults && s.monitorDefaults.coach ? ' checked' : '') + '> Coach (extra cost while on)</label>' +
+          '<label class="settings-check" style="margin-top:4px"><input type="checkbox" id="setFactcheck"' + (s.monitorDefaults && s.monitorDefaults.factcheck ? ' checked' : '') + '> Fact-check (extra cost while on)</label></div>' +
+        '<div class="settings-field"><label>Summaries</label>' +
+          '<label class="settings-check"><input type="checkbox" id="setAutoWrite"' + (s.summaryAutoWrite ? ' checked' : '') + '> Auto-save summaries to ~/Documents/CX/Meetings</label></div>' +
+        '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">' +
+          '<button class="btn btn-green" id="settingsSave">Save</button>' +
+        '</div>';
+      document.getElementById('settingsSave').onclick = function() {
+        var payload = {
+          evalCadenceMs: (parseInt(document.getElementById('setCadence').value, 10) || 15) * 1000,
+          suggestionTtlMs: (parseInt(document.getElementById('setTtl').value, 10) || 60) * 1000,
+          retentionDays: parseInt(document.getElementById('setRetention').value, 10) || 90,
+          monitorDefaults: {
+            coach: document.getElementById('setCoach').checked,
+            factcheck: document.getElementById('setFactcheck').checked,
+          },
+          summaryAutoWrite: document.getElementById('setAutoWrite').checked,
+        };
+        fetch('/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }).then(function(r) { return r.json(); }).then(function(res) {
+          if (res && res.success) { showToast('Settings saved'); close(); }
+          else { showToast('Could not save settings', { error: true }); }
+        }).catch(function() {
+          showToast('Could not save settings \\u2014 server unreachable', { error: true });
+        });
+      };
+    }).catch(function() {
+      var body = document.getElementById('settingsBody');
+      if (body) body.innerHTML = '<p style="color:var(--gb-red)">Could not load settings \\u2014 server unreachable.</p>';
+    });
+  };
 
   // Review a PAST (ended) meeting on demand — POSTs to /present/review, which
   // runs the ReviewWorker on that session's stored transcript and returns the

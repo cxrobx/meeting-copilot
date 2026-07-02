@@ -34,9 +34,10 @@ app/MeetingCopilot/
 ## UI Patterns
 
 - **Menubar app**: No dock icon, lives in system tray
-- **Floating panel**: NSPanel overlay for showing suggestions and approval flows
+- **Floating panel**: NSPanel hosting the web dashboard (`/present` in a WKWebView) — the app's only session UI; suggestions/approvals/results all live there
 - **REC indicator**: Always visible when recording is active (privacy requirement)
-- **Consent prompt**: Shown at session start before any capture begins
+- **Consent affirmation**: Required checkbox on the web start form, once per session; `SessionManager.startSessionFromWeb` refuses `consent == false` (native enforcement)
+- **Settings**: Web dashboard gear icon → `GET/POST /settings` (persisted server-side to `~/.meeting-copilot/settings.json`); there is no native Settings window
 
 ## ProcessSupervisor Path Resolution
 

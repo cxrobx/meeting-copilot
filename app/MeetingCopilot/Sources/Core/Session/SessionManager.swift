@@ -115,10 +115,12 @@ final class SessionManager {
     }
 
     /// Start a session initiated from the embedded web UI.
-    /// The web form already collected title/agenda/etc. and the user's click on
-    /// "Start Session" is treated as consent, so we skip the native consent sheet
-    /// and flow straight into the normal startSession() path which wires up audio.
-    func startSessionFromWeb(title: String, agenda: String, attendees: String, projectNames: [String], contextPaths: [String]) {
+    /// The web form collects title/agenda/context AND the per-session consent
+    /// affirmation (architecture invariant #3) — native enforces it here so a
+    /// stale/modified page can't start capture without it. `consent == nil`
+    /// (older dashboard without the checkbox) is allowed with a log during
+    /// the transition; tighten to refuse once no pre-checkbox pages remain.
+    func startSessionFromWeb(title: String, agenda: String, attendees: String, projectNames: [String], contextPaths: [String], consent: Bool?) {
         guard serverReady else {
             surfaceError("Server not ready yet.")
             return
@@ -126,6 +128,13 @@ final class SessionManager {
         guard state == .idle || state == .archived else {
             appLog("[Session] startSessionFromWeb ignored — state=\(state.rawValue)")
             return
+        }
+        if consent == false {
+            surfaceError("Confirm recording consent to start the session.")
+            return
+        }
+        if consent == nil {
+            appLog("[Session] startSessionFromWeb without consent field (pre-checkbox dashboard) — allowing")
         }
         meetingTitle = title
         meetingAgenda = agenda

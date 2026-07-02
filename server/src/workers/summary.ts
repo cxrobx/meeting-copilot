@@ -2,6 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { claudeSuggest } from '../claude-cli.js';
+import { getSettings } from '../settings.js';
 import type { Worker, WorkerCapabilities, WorkerResult } from './types.js';
 
 export class SummaryWorker implements Worker {
@@ -87,24 +88,31 @@ Be concise but thorough. Focus on substance, not filler.`;
         };
       }
 
-      // Write to file
       const dateStr = new Date().toISOString().slice(0, 10);
-      const sanitizedTitle = (title ?? 'meeting')
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '');
-      const filename = `${dateStr}-${sanitizedTitle}.md`;
 
-      const meetingsDir = join(homedir(), 'Documents', 'CX', 'Meetings');
-      await mkdir(meetingsDir, { recursive: true });
+      // Auto-write to ~/Documents/CX/Meetings only when enabled in settings —
+      // the artifact below is returned (and persisted with the session) either way.
+      let filePath: string | null = null;
+      if (getSettings().summaryAutoWrite) {
+        const sanitizedTitle = (title ?? 'meeting')
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-|-$/g, '');
+        const filename = `${dateStr}-${sanitizedTitle}.md`;
 
-      const filePath = join(meetingsDir, filename);
-      await writeFile(filePath, markdown, 'utf-8');
+        const meetingsDir = join(homedir(), 'Documents', 'CX', 'Meetings');
+        await mkdir(meetingsDir, { recursive: true });
+
+        filePath = join(meetingsDir, filename);
+        await writeFile(filePath, markdown, 'utf-8');
+      }
 
       return {
         success: true,
         data: { markdown, filePath },
-        summary: `Meeting notes saved to ${filePath}`,
+        summary: filePath
+          ? `Meeting notes saved to ${filePath}`
+          : 'Meeting notes generated (auto-save to Documents is off)',
         artifacts: [
           {
             type: 'markdown',

@@ -11,7 +11,8 @@ import type { SessionStore } from './session/store.js';
 import type { EventLogger } from './session/events.js';
 import { SessionStore as SessionStoreClass } from './session/store.js';
 import { cleanupOldSessions } from './session/cleanup.js';
-import { setSharingEnabled, appendTranscript } from './session/shared.js';
+import { setSharingEnabled, isSharingEnabled, appendTranscript } from './session/shared.js';
+import { getSettings, updateSettings } from './settings.js';
 import { scanProjects } from './project/index.js';
 import {
   loadContextConfig,
@@ -188,16 +189,36 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json({ ok: allOk, checks });
   });
 
-  // Settings
+  // Settings — persisted to ~/.meeting-copilot/settings.json and APPLIED to
+  // the live pipeline (previously intelligenceCadence/presentationMode were
+  // accepted and silently ignored).
+  router.get('/settings', (_req, res) => {
+    res.json({ settings: getSettings(), shareTranscript: isSharingEnabled() });
+  });
+
   router.post('/settings', (req, res) => {
     const body = req.body as Record<string, any>;
     const applied: Record<string, any> = {};
+    const ignored: string[] = [];
 
-    if (body.retentionDays !== undefined && body.retentionDays >= 7) {
-      ctx.setRetentionDays(body.retentionDays);
-      const result = cleanupOldSessions(body.retentionDays);
-      applied.retentionDays = body.retentionDays;
-      applied.cleaned = result.deleted.length;
+    const partial: Record<string, any> = {};
+    if (typeof body.evalCadenceMs === 'number') partial.evalCadenceMs = body.evalCadenceMs;
+    if (typeof body.suggestionTtlMs === 'number') partial.suggestionTtlMs = body.suggestionTtlMs;
+    if (body.monitorDefaults && typeof body.monitorDefaults === 'object') partial.monitorDefaults = body.monitorDefaults;
+    if (typeof body.retentionDays === 'number') partial.retentionDays = body.retentionDays;
+    if (typeof body.summaryAutoWrite === 'boolean') partial.summaryAutoWrite = body.summaryAutoWrite;
+
+    if (Object.keys(partial).length > 0) {
+      const next = updateSettings(partial);
+      // Apply live
+      ctx.intelligence.setEvalCadence(next.evalCadenceMs);
+      ctx.registry.setSuggestionTtl(next.suggestionTtlMs);
+      if (partial.retentionDays !== undefined) {
+        ctx.setRetentionDays(next.retentionDays);
+        const result = cleanupOldSessions(next.retentionDays);
+        applied.cleaned = result.deleted.length;
+      }
+      Object.assign(applied, next);
     }
 
     if (body.shareTranscript !== undefined) {
@@ -206,17 +227,14 @@ export function createRoutes(ctx: RouteContext): Router {
       console.log(`[Config] Transcript sharing ${body.shareTranscript ? 'enabled' : 'disabled'}`);
     }
 
-    if (body.intelligenceCadence !== undefined) {
-      applied.intelligenceCadence = body.intelligenceCadence;
-      console.log(`[Config] Intelligence cadence set to: ${body.intelligenceCadence}`);
+    // Honest response: unknown/no-op fields are reported, not silently acked.
+    for (const key of Object.keys(body)) {
+      if (!['evalCadenceMs', 'suggestionTtlMs', 'monitorDefaults', 'retentionDays', 'summaryAutoWrite', 'shareTranscript'].includes(key)) {
+        ignored.push(key);
+      }
     }
 
-    if (body.presentationMode !== undefined) {
-      applied.presentationMode = !!body.presentationMode;
-      console.log(`[Config] Presentation mode ${body.presentationMode ? 'enabled' : 'disabled'}`);
-    }
-
-    res.json({ success: true, applied });
+    res.json({ success: true, applied, ...(ignored.length ? { ignored } : {}) });
   });
 
   // Projects

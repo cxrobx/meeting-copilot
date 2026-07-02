@@ -19,8 +19,10 @@ const BASE_RETRY_DELAY_MS = 1_000; // 1s, doubled each retry
 // latency in the common case; it only raises the cap before a genuinely hung
 // worker is abandoned.
 const END_GRACE_MS = 240_000; // 4 min
-// Auto-expire unactioned suggestions after this long (override via SUGGESTION_TTL_MS env var)
-const SUGGESTION_TTL_MS = (() => {
+// Auto-expire unactioned suggestions after this long. Default respects the
+// legacy SUGGESTION_TTL_MS env var; the effective value is runtime-tunable
+// via setSuggestionTtl (wired to the settings system in index.ts).
+const DEFAULT_SUGGESTION_TTL_MS = (() => {
   const raw = Number(process.env.SUGGESTION_TTL_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 60_000;
 })();
@@ -49,6 +51,12 @@ export class WorkerRegistry extends EventEmitter {
   private approvedQueue: string[] = []; // Action IDs waiting to run
   private suggestionHashes = new Set<string>();
   private suggestionTimers = new Map<string, NodeJS.Timeout>();
+  private suggestionTtlMs = DEFAULT_SUGGESTION_TTL_MS;
+
+  /** Runtime-tunable suggestion TTL (applies to suggestions created after the change). */
+  setSuggestionTtl(ms: number): void {
+    if (Number.isFinite(ms) && ms > 0) this.suggestionTtlMs = ms;
+  }
 
   register(worker: Worker): void {
     this.workers.set(worker.name, worker);
@@ -154,7 +162,7 @@ export class WorkerRegistry extends EventEmitter {
       current.completedAt = Date.now();
       this.emit('action.status', current);
       this.actions.delete(actionId);
-    }, SUGGESTION_TTL_MS);
+    }, this.suggestionTtlMs);
     this.suggestionTimers.set(actionId, timer);
   }
 

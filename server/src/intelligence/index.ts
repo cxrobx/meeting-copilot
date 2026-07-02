@@ -20,8 +20,7 @@ import {
 } from './prompts/sonnet-suggest.v1.js';
 
 const WINDOW_DURATION_MS = 5 * 60 * 1000; // 5 minutes
-const BASE_EVAL_INTERVAL_MS = 15_000;
-const BACKOFF_EVAL_INTERVAL_MS = 30_000;
+const DEFAULT_BASE_EVAL_INTERVAL_MS = 15_000;
 const MAX_EVAL_IN_FLIGHT = 2;
 const EVAL_QUEUE_DEPTH = 5;
 const CONTEXT_COMPRESSION_INTERVAL_MS = 5 * 60 * 1000;
@@ -51,6 +50,9 @@ export class IntelligenceEngine extends EventEmitter {
     windowEnd: number;
     createdAt: number;
   }> = [];
+
+  // Runtime-tunable eval cadence (settings system); backoff = 2× base.
+  private baseEvalIntervalMs = DEFAULT_BASE_EVAL_INTERVAL_MS;
 
   // Project names to watch for - can be configured externally
   public projectNames: string[] = [];
@@ -245,6 +247,16 @@ export class IntelligenceEngine extends EventEmitter {
     return false;
   }
 
+  /**
+   * Runtime-tunable base eval cadence (settings system). Re-arms the timer
+   * immediately when the engine is running so the change applies live.
+   */
+  setEvalCadence(ms: number): void {
+    if (!Number.isFinite(ms) || ms <= 0) return;
+    this.baseEvalIntervalMs = ms;
+    if (this.running) this.resetEvalTimer();
+  }
+
   private resetEvalTimer(): void {
     if (this.evalTimer) {
       clearInterval(this.evalTimer);
@@ -252,8 +264,8 @@ export class IntelligenceEngine extends EventEmitter {
 
     const interval =
       this.consecutiveNonActionable >= 3
-        ? BACKOFF_EVAL_INTERVAL_MS
-        : BASE_EVAL_INTERVAL_MS;
+        ? this.baseEvalIntervalMs * 2
+        : this.baseEvalIntervalMs;
 
     this.evalTimer = setInterval(() => {
       this.scheduleEval();
