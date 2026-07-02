@@ -748,8 +748,21 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
                 triggerQuote: fullTranscript.slice(-100),
                 estimatedDurationSec: 15,
                 params: { transcript: fullTranscript, scope: 'full', title: session?.title, _rolling: true },
-              });
+              }, { force: true, system: true });
               if (action) {
+                // Persist the row BEFORE flipping to completed — the
+                // action.status emit below persists via updateAction, which
+                // needs an existing row or the card vanishes on reload.
+                sessionStore.addAction({
+                  id: action.id,
+                  type: action.type,
+                  title: action.title,
+                  description: action.description,
+                  triggerQuote: action.triggerQuote,
+                  state: action.state,
+                  params: action.params,
+                  createdAt: action.createdAt,
+                });
                 // Directly set to completed with the result (skip worker execution)
                 action.state = 'completed';
                 action.result = result;
@@ -856,7 +869,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
                 scope: 'full',
                 title: session?.title,
               },
-            });
+            }, { force: true, system: true });
             if (summaryAction) {
               sessionStore.addAction({
                 id: summaryAction.id,
@@ -906,7 +919,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
               triggerQuote: String(reviewParams.transcript).slice(-200),
               estimatedDurationSec: 30,
               params: reviewParams,
-            });
+            }, { force: true, system: true });
             if (reviewAction) {
               sessionStore.addAction({
                 id: reviewAction.id,
@@ -1375,6 +1388,56 @@ intelligence.onContextSummary((summary) => {
 
 // ─── Worker Events → WebSocket Bridge ──────────────────────────────────────
 
+/**
+ * Persist an action status that arrived AFTER the session's store was closed
+ * (stop `finally` nulls sessionStore, but a worker force-cancelled at the
+ * END_GRACE ceiling can still resolve later). Reopens the existing session DB,
+ * upserts the row, refreshes the manifest, and closes — so late results
+ * survive into replay instead of being broadcast once and lost.
+ */
+function persistActionPostSession(sessionId: string, action: ActionLifecycle): void {
+  const dbPath = join(homedir(), '.meeting-copilot', 'sessions', sessionId, 'session.db');
+  // Never create a ghost session dir for a bogus id — only reopen existing DBs.
+  if (!existsSync(dbPath)) return;
+  try {
+    const store = new SessionStore(sessionId);
+    try {
+      const changes = store.updateAction(action.id, {
+        state: action.state,
+        result: action.result,
+        approvedAt: action.approvedAt,
+        startedAt: action.startedAt,
+        completedAt: action.completedAt,
+      });
+      if (changes === 0) {
+        store.addAction({
+          id: action.id,
+          type: action.type,
+          title: action.title,
+          description: action.description,
+          triggerQuote: action.triggerQuote,
+          state: action.state,
+          params: action.params,
+          createdAt: action.createdAt,
+        });
+        store.updateAction(action.id, {
+          state: action.state,
+          result: action.result,
+          approvedAt: action.approvedAt,
+          startedAt: action.startedAt,
+          completedAt: action.completedAt,
+        });
+      }
+      store.writeManifest();
+    } finally {
+      store.close();
+    }
+    debugLog(`[Session] Persisted post-session action ${action.id} (${action.state}) into ${sessionId}`);
+  } catch (err) {
+    debugLog(`[Session] Post-session persist failed for ${action.id}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 registry.on('action.status', (action: ActionLifecycle) => {
   if (sessionStore) {
     sessionStore.updateAction(action.id, {
@@ -1384,6 +1447,8 @@ registry.on('action.status', (action: ActionLifecycle) => {
       startedAt: action.startedAt,
       completedAt: action.completedAt,
     });
+  } else if (lastSessionId) {
+    persistActionPostSession(lastSessionId, action);
   }
 
   eventLogger?.log('action.status', {

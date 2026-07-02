@@ -127,8 +127,9 @@ describe('AgendaTracker', () => {
     await Promise.resolve();
     expect(triage).toHaveBeenCalledTimes(1);
 
-    // Modest additional growth (<15 since last eval at 25) — skipped again
-    words = 35;
+    // Modest additional growth (<MIN_NEW_WORDS_BEFORE_EVAL=5 since last eval
+    // at 25) — skipped again
+    words = 27;
     await vi.advanceTimersByTimeAsync(15_000);
     await Promise.resolve();
     expect(triage).toHaveBeenCalledTimes(1);

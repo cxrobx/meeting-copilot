@@ -113,6 +113,36 @@ describe('SessionStore', () => {
     expect(actions[0]!.result).toContain('done');
   });
 
+  it('updateAction reports row count so callers can detect missing rows', () => {
+    store.createSession('Test');
+
+    // No row yet → 0 changes (this is how post-session persistence detects
+    // it must insert before updating)
+    expect(store.updateAction('ghost-action', { state: 'completed' })).toBe(0);
+
+    store.addAction({
+      id: 'action-upsert',
+      type: 'summary',
+      title: 'Late result',
+      description: '',
+      triggerQuote: '',
+      state: 'running',
+      params: {},
+      createdAt: Date.now(),
+    });
+
+    expect(
+      store.updateAction('action-upsert', {
+        state: 'completed',
+        result: { success: true, data: null, summary: 'late but saved' },
+        completedAt: Date.now(),
+      }),
+    ).toBe(1);
+
+    const actions = store.getActions();
+    expect(actions.find((a) => a.id === 'action-upsert')!.state).toBe('completed');
+  });
+
   it('stores context summaries', () => {
     store.createSession('Test');
     store.addContextSummary({

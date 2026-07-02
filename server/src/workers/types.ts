@@ -67,4 +67,11 @@ export interface ActionLifecycle {
   paramsReady?: boolean;
   /** User approved while still streaming + params not ready; dispatch on ready. */
   pendingApproval?: boolean;
+  /**
+   * Session-critical action fired by the server itself (auto-summary,
+   * auto-review, rolling summary). System actions bypass the concurrency cap
+   * and survive onMeetingEnd's expire/cancel sweep — they are exactly the
+   * work the user expects to exist after the meeting ends.
+   */
+  system?: boolean;
 }

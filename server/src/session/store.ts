@@ -214,6 +214,7 @@ export class SessionStore {
     );
   }
 
+  /** Returns the number of rows updated (0 = no such action row). */
   updateAction(
     actionId: string,
     updates: {
@@ -223,7 +224,7 @@ export class SessionStore {
       startedAt?: number;
       completedAt?: number;
     },
-  ): void {
+  ): number {
     const fields: string[] = [];
     const values: any[] = [];
 
@@ -248,13 +249,13 @@ export class SessionStore {
       values.push(updates.completedAt);
     }
 
-    if (fields.length === 0) return;
+    if (fields.length === 0) return 0;
 
     values.push(actionId);
     const stmt = this.db.prepare(
       `UPDATE action SET ${fields.join(', ')} WHERE id = ?`,
     );
-    stmt.run(...values);
+    return stmt.run(...values).changes;
   }
 
   getTranscript(): TranscriptRecord[] {

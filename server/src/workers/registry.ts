@@ -86,10 +86,12 @@ export class WorkerRegistry extends EventEmitter {
     this.emit('action.status', action);
   }
 
-  suggest(suggestion: ActionSuggestion, opts?: { force?: boolean }): ActionLifecycle | null {
+  suggest(suggestion: ActionSuggestion, opts?: { force?: boolean; system?: boolean }): ActionLifecycle | null {
     // `force` skips the dedup gate for deliberate user actions (e.g. a
     // right-click "Revise mock" or card-derived mockup) so an explicit click
     // never silently vanishes against a near-identical recent card.
+    // `system` marks server-fired session-critical actions (auto-summary,
+    // auto-review, rolling summary) — see ActionLifecycle.system.
     if (!opts?.force && this.isDuplicate(suggestion)) return null;
     this.addDedupHash(suggestion);
 
@@ -106,6 +108,7 @@ export class WorkerRegistry extends EventEmitter {
       timeoutMs: this.getTimeoutForType(suggestion.type),
       retryCount: 0,
       cancelController: new AbortController(),
+      system: opts?.system || undefined,
     };
 
     this.actions.set(action.id, action);
@@ -313,7 +316,11 @@ export class WorkerRegistry extends EventEmitter {
     action.approvedAt = Date.now();
     this.emit('action.status', action);
 
-    if (this.runningCount < MAX_CONCURRENT_WORKERS) {
+    // System actions (auto-summary/review at stop) bypass the cap — they fire
+    // exactly when 3 user workers may be draining, and queueing them would
+    // hand them to onMeetingEnd's cancel sweep. Momentary concurrency is
+    // bounded (2 system actions exist) and only occurs at meeting end.
+    if (action.system || this.runningCount < MAX_CONCURRENT_WORKERS) {
       this.executeAction(action);
     } else {
       action.state = 'queued';
@@ -358,28 +365,40 @@ export class WorkerRegistry extends EventEmitter {
     for (const t of this.suggestionTimers.values()) clearTimeout(t);
     this.suggestionTimers.clear();
 
-    // Expire all unapproved suggestions
+    // Expire all unapproved suggestions. System actions are exempt — the
+    // auto-summary/review fired at stop must survive the sweep.
     for (const action of this.actions.values()) {
-      if (action.state === 'suggested') {
+      if (action.state === 'suggested' && !action.system) {
         action.state = 'expired';
         this.emit('action.status', action);
       }
     }
 
-    // Cancel queued actions
+    // Cancel queued user actions. Queued system actions (shouldn't exist —
+    // startApproved bypasses the cap for them — but defense in depth) are
+    // launched immediately instead of cancelled.
+    const queuedSystem: string[] = [];
     for (const actionId of this.approvedQueue) {
       const action = this.actions.get(actionId);
-      if (action && action.state === 'queued') {
-        action.state = 'cancelled';
-        action.completedAt = Date.now();
-        this.emit('action.status', action);
+      if (!action || action.state !== 'queued') continue;
+      if (action.system) {
+        queuedSystem.push(actionId);
+        continue;
       }
+      action.state = 'cancelled';
+      action.completedAt = Date.now();
+      this.emit('action.status', action);
     }
     this.approvedQueue = [];
+    for (const actionId of queuedSystem) {
+      const action = this.actions.get(actionId);
+      if (action && action.state === 'queued') {
+        this.executeAction(action);
+      }
+    }
 
     // Give in-flight workers a grace period (see END_GRACE_MS) to finish.
-    const runningActions = this.getActionsByState('running');
-    if (runningActions.length > 0) {
+    if (this.getActionsByState('running').length > 0) {
       await new Promise<void>((resolve) => {
         const timeout = setTimeout(() => {
           // Force-cancel any still running

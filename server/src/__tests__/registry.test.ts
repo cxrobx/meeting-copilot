@@ -110,28 +110,124 @@ describe('WorkerRegistry', () => {
   });
 
   it('tracks actions by state', () => {
-    registry.suggest(makeSuggestion({ params: { q: '1' } }));
-    registry.suggest(makeSuggestion({ params: { q: '2' } }));
+    // Distinct titles — identical titles trip the fuzzy Jaccard dedup
+    registry.suggest(makeSuggestion({ title: 'Investigate rollout options', params: { q: '1' } }));
+    registry.suggest(makeSuggestion({ title: 'Compare pricing models', params: { q: '2' } }));
 
     expect(registry.getActionsByState('suggested')).toHaveLength(2);
     expect(registry.getActionsByState('running')).toHaveLength(0);
   });
 
   it('reports byState metrics', () => {
-    registry.suggest(makeSuggestion({ params: { q: '1' } }));
-    registry.suggest(makeSuggestion({ params: { q: '2' } }));
+    registry.suggest(makeSuggestion({ title: 'Investigate rollout options', params: { q: '1' } }));
+    registry.suggest(makeSuggestion({ title: 'Compare pricing models', params: { q: '2' } }));
 
     const counts = registry.byState;
     expect(counts.suggested).toBe(2);
   });
 
   it('expires suggestions on meeting end', async () => {
-    const a1 = registry.suggest(makeSuggestion({ params: { q: 'a' } }))!;
-    const a2 = registry.suggest(makeSuggestion({ params: { q: 'b' } }))!;
+    const a1 = registry.suggest(makeSuggestion({ title: 'Investigate rollout options', params: { q: 'a' } }))!;
+    const a2 = registry.suggest(makeSuggestion({ title: 'Compare pricing models', params: { q: 'b' } }))!;
 
     await registry.onMeetingEnd();
 
     expect(a1.state).toBe('expired');
     expect(a2.state).toBe('expired');
+  });
+
+  describe('system actions', () => {
+    /** Worker whose execute() blocks until the test resolves it. */
+    function makeBlockingWorker(name: string) {
+      const resolvers: Array<(r: WorkerResult) => void> = [];
+      const worker: Worker = {
+        name,
+        capabilities: {
+          network: 'none',
+          filesystem: { read: [], write: [] },
+          subprocess: false,
+          maxDurationMs: 10_000,
+          maxMemoryMB: 256,
+        },
+        execute: vi.fn().mockImplementation(
+          () => new Promise<WorkerResult>((resolve) => resolvers.push(resolve)),
+        ),
+      };
+      return {
+        worker,
+        resolveAll: () => {
+          for (const r of resolvers.splice(0)) {
+            r({ success: true, data: null, summary: 'done' });
+          }
+        },
+      };
+    }
+
+    function saturateSlots(blocking: { worker: Worker }) {
+      registry.register(blocking.worker);
+      // force: near-identical titles would otherwise trip the fuzzy dedup
+      const running = [1, 2, 3].map((i) => {
+        const a = registry.suggest(
+          makeSuggestion({ type: 'research', title: `Slow job ${i}`, params: { q: `slow-${i}` } }),
+          { force: true },
+        )!;
+        registry.approve(a.id);
+        return a;
+      });
+      return running;
+    }
+
+    it('executes a system action immediately even when all slots are busy', () => {
+      const blocking = makeBlockingWorker('research');
+      saturateSlots(blocking);
+
+      const userAction = registry.suggest(makeSuggestion({ title: 'User research four', params: { q: 'user-4' } }))!;
+      registry.approve(userAction.id);
+      expect(userAction.state).toBe('queued');
+
+      const systemAction = registry.suggest(
+        makeSuggestion({ type: 'summary', title: 'Meeting Summary: End', params: { transcript: 'x' } }),
+        { force: true, system: true },
+      )!;
+      registry.approve(systemAction.id);
+      expect(systemAction.state).not.toBe('queued');
+      expect(['running', 'completed']).toContain(systemAction.state);
+
+      blocking.resolveAll();
+    });
+
+    it('system action survives onMeetingEnd while user queue is cancelled', async () => {
+      const blocking = makeBlockingWorker('research');
+      saturateSlots(blocking);
+
+      const queuedUser = registry.suggest(makeSuggestion({ title: 'Queued user job', params: { q: 'queued' } }))!;
+      registry.approve(queuedUser.id);
+      expect(queuedUser.state).toBe('queued');
+
+      const systemAction = registry.suggest(
+        makeSuggestion({ type: 'summary', title: 'Meeting Summary: End', params: { transcript: 'x' } }),
+        { force: true, system: true },
+      )!;
+      registry.approve(systemAction.id);
+
+      const endPromise = registry.onMeetingEnd();
+      // Let the blocked user workers finish so the grace wait resolves.
+      blocking.resolveAll();
+      await endPromise;
+
+      expect(queuedUser.state).toBe('cancelled');
+      expect(systemAction.state).toBe('completed');
+    }, 15_000);
+
+    it('does not expire suggested system actions on meeting end', async () => {
+      const systemSuggested = registry.suggest(
+        makeSuggestion({ type: 'summary', title: 'System pending', params: { transcript: 'y' } }),
+        { force: true, system: true },
+      )!;
+
+      await registry.onMeetingEnd();
+
+      expect(systemSuggested.state).toBe('suggested');
+    });
   });
 });
