@@ -1537,6 +1537,44 @@ const PRESENT_HTML = `<!DOCTYPE html>
     background: var(--gb-yellow);
     animation: pulse 1.2s ease-in-out infinite;
   }
+  .intel-warn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: transparent;
+    border: 1px solid var(--gb-yellow);
+    color: var(--gb-yellow);
+    border-radius: 5px;
+    font-size: 10px;
+    font-family: inherit;
+    padding: 1px 7px;
+    cursor: pointer;
+    margin-left: 4px;
+  }
+  .intel-warn.degraded {
+    border-color: var(--gb-red, #cc241d);
+    color: var(--gb-red, #cc241d);
+  }
+  .intel-pop {
+    position: fixed;
+    z-index: 1001;
+    background: var(--gb-base, #fff);
+    border: 1px solid var(--gb-surface1, #ddd);
+    border-radius: 8px;
+    box-shadow: 0 10px 24px -12px rgba(20,18,14,0.4);
+    padding: 10px 12px;
+    font-size: 11px;
+    max-width: 380px;
+  }
+  .intel-pop .pop-row { margin: 4px 0; line-height: 1.4; }
+  .intel-pop .pop-src {
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 9px;
+    letter-spacing: 0.05em;
+    margin-right: 6px;
+    color: var(--gb-subtext0, #777);
+  }
 
   /* ─── Toasts ───────────────────────────────────────────────── */
   .toast-stack {
@@ -2031,6 +2069,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     <div class="intel-status" id="intelStatus" style="display:none">
       <span class="intel-dot"></span>
       <span id="intelStatusText">Listening</span>
+      <button class="intel-warn" id="intelWarn" style="display:none" aria-label="Recent intelligence errors" title="Recent intelligence errors">&#9888; <span id="intelWarnCount"></span></button>
     </div>
     <div id="coachSlot"></div>
     <div id="results"></div>
@@ -2678,6 +2717,89 @@ const PRESENT_HTML = `<!DOCTYPE html>
     intelStatusEl.className = 'intel-status ' + phase;
     intelStatusTextEl.textContent = INTEL_PHASE_TEXT[phase];
   }
+
+  // ─── Intelligence error badge ──────────────────────────────
+  // Realtime failures (triage/suggest/agenda/coach/factcheck/CLI tier) used
+  // to vanish into server.log; now they count into a small ⚠ badge next to
+  // the status row. A degraded tier pins the badge until recovery.
+  var intelErrors = [];
+  var intelDegraded = false;
+  var intelWarnEl = document.getElementById('intelWarn');
+  var intelWarnCountEl = document.getElementById('intelWarnCount');
+  var intelPopEl = null;
+  var INTEL_ERR_WINDOW_MS = 5 * 60 * 1000;
+
+  function recentIntelErrors() {
+    var cutoff = Date.now() - INTEL_ERR_WINDOW_MS;
+    return intelErrors.filter(function(e) { return e.at >= cutoff; });
+  }
+
+  function refreshIntelWarn() {
+    if (!intelWarnEl) return;
+    var recent = recentIntelErrors();
+    if (intelDegraded || recent.length > 0) {
+      intelWarnEl.style.display = '';
+      intelWarnEl.className = intelDegraded ? 'intel-warn degraded' : 'intel-warn';
+      intelWarnCountEl.textContent = intelDegraded ? 'degraded' : String(recent.length);
+    } else {
+      intelWarnEl.style.display = 'none';
+      hideIntelPop();
+    }
+  }
+  setInterval(refreshIntelWarn, 30000); // decay old errors off the badge
+
+  function noteIntelError(msg) {
+    if (msg.recovered) {
+      intelDegraded = false;
+    } else {
+      intelErrors.push({ source: msg.source || 'triage', message: msg.message || 'error', at: msg.at || Date.now() });
+      if (intelErrors.length > 20) intelErrors.shift();
+      if (msg.degraded) intelDegraded = true;
+    }
+    refreshIntelWarn();
+  }
+
+  function hideIntelPop() {
+    if (intelPopEl) { intelPopEl.remove(); intelPopEl = null; }
+  }
+
+  if (intelWarnEl) intelWarnEl.onclick = function(e) {
+    e.stopPropagation();
+    if (intelPopEl) { hideIntelPop(); return; }
+    var recent = recentIntelErrors().slice(-5).reverse();
+    intelPopEl = document.createElement('div');
+    intelPopEl.className = 'intel-pop';
+    if (recent.length === 0) {
+      intelPopEl.textContent = intelDegraded
+        ? 'A triage tier is degraded \\u2014 suggestions still flow via the fallback model.'
+        : 'No recent errors.';
+    } else {
+      recent.forEach(function(err) {
+        var row = document.createElement('div');
+        row.className = 'pop-row';
+        var src = document.createElement('span');
+        src.className = 'pop-src';
+        src.textContent = err.source;
+        var ago = Math.max(0, Math.round((Date.now() - err.at) / 1000));
+        var txt = document.createElement('span');
+        txt.textContent = err.message + ' (' + (ago < 60 ? ago + 's' : Math.round(ago / 60) + 'm') + ' ago)';
+        row.appendChild(src);
+        row.appendChild(txt);
+        intelPopEl.appendChild(row);
+      });
+    }
+    var rect = intelWarnEl.getBoundingClientRect();
+    intelPopEl.style.left = Math.max(8, rect.left - 40) + 'px';
+    intelPopEl.style.top = (rect.bottom + 6) + 'px';
+    document.body.appendChild(intelPopEl);
+    var onDocDown = function(ev) {
+      if (intelPopEl && !intelPopEl.contains(ev.target) && ev.target !== intelWarnEl) {
+        hideIntelPop();
+        document.removeEventListener('mousedown', onDocDown);
+      }
+    };
+    document.addEventListener('mousedown', onDocDown);
+  };
 
   // ─── UI State Transitions ─────────────────────────────────
   function updateUI() {
@@ -4516,6 +4638,10 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
         case 'coach.suggestion':
           if (msg.suggestion) renderCoachSuggestion(msg.suggestion);
+          break;
+
+        case 'intelligence.error':
+          noteIntelError(msg);
           break;
 
         case 'action.status':

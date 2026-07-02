@@ -47,6 +47,7 @@ import { isAnthropicApiAvailable } from './api/anthropic.js';
 import { isOpenAiApiAvailable } from './api/openai.js';
 import { paidApiDisabled } from './api/killswitch.js';
 import { disposeAllWarmSessions } from './persistent-claude.js';
+import { cliHealth } from './claude-cli.js';
 
 // Load environment — prefer ~/.meeting-copilot/.env so a packaged .app
 // user has a stable, user-writable location for API keys that survives
@@ -194,6 +195,19 @@ type OutboundMessage =
   | {
       type: 'coach.suggestion';
       suggestion: CoachSuggestion;
+    }
+  | {
+      // Realtime intelligence failure — surfaced so tier degradation and
+      // silent monitor errors are visible in the dashboard instead of only
+      // in server.log.
+      type: 'intelligence.error';
+      source: 'triage' | 'suggest' | 'compression' | 'agenda' | 'factcheck' | 'coach' | 'cli';
+      message: string;
+      at: number; // epoch ms
+      /** True when a whole tier/monitor is being skipped, not just one failure. */
+      degraded?: boolean;
+      /** True when a previously degraded source recovered. */
+      recovered?: boolean;
     };
 
 // ─── App State ─────────────────────────────────────────────────────────────
@@ -251,6 +265,7 @@ agendaTracker.on('status', (status: AgendaStatus) => {
 
 agendaTracker.on('error', (msg: string) => {
   debugLog(`[Agenda] error: ${msg}`);
+  broadcast({ type: 'intelligence.error', source: 'agenda', message: msg, at: Date.now() });
 });
 
 agendaTracker.on('eval', (info: Record<string, unknown>) => {
@@ -289,7 +304,10 @@ factCheck.on('eval', (info: Record<string, unknown>) => {
   debugLog(`[FactCheck] ${JSON.stringify(info)}`);
   eventLogger?.log('factcheck.eval', info);
 });
-factCheck.on('error', (msg: string) => debugLog(`[FactCheck] error: ${msg}`));
+factCheck.on('error', (msg: string) => {
+  debugLog(`[FactCheck] error: ${msg}`);
+  broadcast({ type: 'intelligence.error', source: 'factcheck', message: msg, at: Date.now() });
+});
 
 coach.on('suggestion', (suggestion: CoachSuggestion) => {
   lastCoachSuggestion = suggestion;
@@ -304,7 +322,10 @@ coach.on('eval', (info: Record<string, unknown>) => {
   debugLog(`[Coach] ${JSON.stringify(info)}`);
   eventLogger?.log('coach.eval', info);
 });
-coach.on('error', (msg: string) => debugLog(`[Coach] error: ${msg}`));
+coach.on('error', (msg: string) => {
+  debugLog(`[Coach] error: ${msg}`);
+  broadcast({ type: 'intelligence.error', source: 'coach', message: msg, at: Date.now() });
+});
 
 function monitorTranscriptProvider(): string {
   if (!sessionStore) return '';
@@ -1554,6 +1575,22 @@ intelligence.on('intelligence.error', (data) => {
   } catch {
     debugLog(`[intelligence.error] (unserializable payload)`);
   }
+  const message = typeof data?.error === 'string' ? data.error : 'Intelligence eval failed';
+  broadcast({
+    type: 'intelligence.error',
+    source: message.startsWith('Context compression') ? 'compression' : 'triage',
+    message,
+    at: Date.now(),
+  });
+});
+
+// CLI-tier health: the Gemini triage circuit breaker opening/closing. Degraded
+// pins the dashboard badge until recovery.
+cliHealth.on('degraded', (data: { message: string }) => {
+  broadcast({ type: 'intelligence.error', source: 'cli', message: data.message, at: Date.now(), degraded: true });
+});
+cliHealth.on('recovered', () => {
+  broadcast({ type: 'intelligence.error', source: 'cli', message: 'Gemini triage recovered', at: Date.now(), recovered: true });
 });
 
 // ─── Startup ───────────────────────────────────────────────────────────────

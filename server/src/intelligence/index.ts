@@ -211,6 +211,16 @@ export class IntelligenceEngine extends EventEmitter {
     if (this.meetingContext.attendees) {
       contextParts.push(`Attendees: ${this.meetingContext.attendees}`);
     }
+    // Re-inject compressed history — compression summarizes >5-min-old
+    // segments before dropping them; without this the summary was written to
+    // SQLite and never read, so the eval window simply forgot the meeting's
+    // first half. Last 2 summaries ≈ the previous ~10 minutes.
+    const recentSummaries = this.contextSummaries.slice(-2);
+    if (recentSummaries.length > 0) {
+      contextParts.push(
+        `Earlier discussion (compressed):\n${recentSummaries.map((s) => s.summary).join('\n---\n')}`,
+      );
+    }
     if (contextParts.length > 0) {
       return `[Meeting Context]\n${contextParts.join('\n')}\n\n[Transcript]\n${transcript}`;
     }
@@ -498,6 +508,11 @@ export class IntelligenceEngine extends EventEmitter {
         };
 
         this.contextSummaries.push(summaryRecord);
+        // Bound prompt growth on multi-hour meetings — only the last 2 are
+        // re-injected into the eval window; older ones live in SQLite.
+        if (this.contextSummaries.length > 10) {
+          this.contextSummaries.splice(0, this.contextSummaries.length - 10);
+        }
 
         if (this.contextSummaryCallback) {
           this.contextSummaryCallback(summaryRecord);

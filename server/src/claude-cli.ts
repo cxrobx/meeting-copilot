@@ -1,9 +1,55 @@
 import { execFile, spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { promisify } from 'node:util';
 import { createInterface } from 'node:readline';
 import { runWarm } from './persistent-claude.js';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Health signals from the CLI fallback layer. index.ts forwards these to the
+ * dashboard as `intelligence.error` so tier degradation is visible instead of
+ * silently eating latency.
+ * Events: 'degraded' { source: 'cli', message, until } · 'recovered' { source: 'cli' }
+ */
+export const cliHealth = new EventEmitter();
+
+// ─── Gemini circuit breaker ─────────────────────────────────────────────────
+// Gemini is tier 1 of the triage chain but is a cold spawn — a hung binary
+// used to stall every 15s eval cycle for up to 30s before Haiku got a chance.
+// Two consecutive failures open the breaker for 5 minutes (Haiku serves
+// directly); the next success closes it.
+const GEMINI_TRIAGE_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.GEMINI_TRIAGE_TIMEOUT_MS);
+  // Default 12s: must fail comfortably inside one 15s eval cadence.
+  return Number.isFinite(raw) && raw > 0 ? raw : 12_000;
+})();
+const GEMINI_BREAKER_FAILURES = 2;
+const GEMINI_BREAKER_COOLDOWN_MS = 5 * 60_000;
+let geminiConsecutiveFailures = 0;
+let geminiDisabledUntil = 0;
+let geminiBreakerOpen = false;
+
+function noteGeminiFailure(err: unknown): void {
+  geminiConsecutiveFailures++;
+  if (geminiConsecutiveFailures >= GEMINI_BREAKER_FAILURES && !geminiBreakerOpen) {
+    geminiBreakerOpen = true;
+    geminiDisabledUntil = Date.now() + GEMINI_BREAKER_COOLDOWN_MS;
+    const message = `Gemini triage circuit open after ${geminiConsecutiveFailures} failures (${err instanceof Error ? err.message : String(err)}) — using Haiku for ${Math.round(GEMINI_BREAKER_COOLDOWN_MS / 60_000)} min`;
+    console.warn(`[CLI] ${message}`);
+    cliHealth.emit('degraded', { source: 'cli', message, until: geminiDisabledUntil });
+  }
+}
+
+function noteGeminiSuccess(): void {
+  geminiConsecutiveFailures = 0;
+  if (geminiBreakerOpen) {
+    geminiBreakerOpen = false;
+    geminiDisabledUntil = 0;
+    console.log('[CLI] Gemini triage recovered — circuit closed');
+    cliHealth.emit('recovered', { source: 'cli' });
+  }
+}
 
 /**
  * Calls `claude` CLI in headless mode (--print) to use the user's
@@ -132,10 +178,19 @@ export async function claudeTriage(
   systemPrompt: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  // 1. Try Gemini Flash
-  try {
-    return await geminiTriage(prompt, systemPrompt, signal);
-  } catch { /* fall through */ }
+  // 1. Try Gemini Flash — unless the breaker is open (recent hang/failures).
+  if (Date.now() >= geminiDisabledUntil) {
+    try {
+      const out = await geminiTriage(prompt, systemPrompt, signal);
+      noteGeminiSuccess();
+      return out;
+    } catch (err) {
+      // An external abort is the caller's doing, not a Gemini fault.
+      if (signal?.aborted) throw new Error('Aborted');
+      noteGeminiFailure(err);
+      /* fall through */
+    }
+  }
 
   // 2. Try Haiku
   try {
@@ -172,7 +227,7 @@ async function geminiTriage(
     '-o', 'json',
   ], {
     maxBuffer: 5 * 1024 * 1024,
-    timeout: 30_000,
+    timeout: GEMINI_TRIAGE_TIMEOUT_MS,
     signal: controller.signal,
     env: { ...process.env },
   });

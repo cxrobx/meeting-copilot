@@ -50,6 +50,23 @@ describe('IntelligenceEngine', () => {
     expect(window).not.toContain('old message');
   });
 
+  it('re-injects the last 2 compressed context summaries into the eval window', () => {
+    (engine as any).contextSummaries.push(
+      { summary: 'Discussed the Q3 launch plan', windowStart: 0, windowEnd: 1, createdAt: Date.now() },
+      { summary: 'Agreed to hire two engineers', windowStart: 1, windowEnd: 2, createdAt: Date.now() },
+      { summary: 'Budget review parked for Friday', windowStart: 2, windowEnd: 3, createdAt: Date.now() },
+    );
+    engine.addTranscript(makeSegment('recent message'));
+
+    const window = engine.getTranscriptWindow();
+    expect(window).toContain('Earlier discussion (compressed)');
+    // Only the LAST 2 summaries ride along — older history stays in SQLite.
+    expect(window).not.toContain('Q3 launch plan');
+    expect(window).toContain('hire two engineers');
+    expect(window).toContain('Budget review parked');
+    expect(window).toContain('recent message');
+  });
+
   it('returns full transcript including old segments', () => {
     const oldTs = Date.now() - 6 * 60 * 1000;
     engine.addTranscript(makeSegment('old message', oldTs));
