@@ -3,6 +3,8 @@ import { EventEmitter } from 'node:events';
 import { promisify } from 'node:util';
 import { createInterface } from 'node:readline';
 import { runWarm } from './persistent-claude.js';
+import { MODEL_CONFIG } from './model-config.js';
+import { safeErrorMessage } from './logging.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -35,7 +37,7 @@ function noteGeminiFailure(err: unknown): void {
   if (geminiConsecutiveFailures >= GEMINI_BREAKER_FAILURES && !geminiBreakerOpen) {
     geminiBreakerOpen = true;
     geminiDisabledUntil = Date.now() + GEMINI_BREAKER_COOLDOWN_MS;
-    const message = `Gemini triage circuit open after ${geminiConsecutiveFailures} failures (${err instanceof Error ? err.message : String(err)}) — using Haiku for ${Math.round(GEMINI_BREAKER_COOLDOWN_MS / 60_000)} min`;
+    const message = `Gemini triage circuit open after ${geminiConsecutiveFailures} failures (${safeErrorMessage(err)}) — using Haiku for ${Math.round(GEMINI_BREAKER_COOLDOWN_MS / 60_000)} min`;
     console.warn(`[CLI] ${message}`);
     cliHealth.emit('degraded', { source: 'cli', message, until: geminiDisabledUntil });
   }
@@ -169,9 +171,8 @@ export async function claudeChat(
 
 /**
  * Triage call with fallback chain:
- *   1. Gemini CLI (gemini-3-flash-preview) — fast + smart
+ *   1. Gemini CLI — fast + smart
  *   2. Claude Haiku — reliable fallback
- *   3. Codex CLI (gpt-5.4-mini) — last resort
  */
 export async function claudeTriage(
   prompt: string,
@@ -196,17 +197,16 @@ export async function claudeTriage(
   try {
     return await claudeChat(prompt, {
       systemPrompt,
-      model: 'claude-haiku-4-5-20251001',
+      model: MODEL_CONFIG.haiku,
       signal,
     });
   } catch { /* fall through */ }
 
-  // 3. Try Codex
-  return codexTriage(prompt, systemPrompt, signal);
+  throw new Error('Triage providers unavailable');
 }
 
 /**
- * Triage via Gemini CLI (gemini-3-flash-preview).
+ * Triage via Gemini CLI.
  */
 async function geminiTriage(
   prompt: string,
@@ -222,7 +222,7 @@ async function geminiTriage(
   }
 
   const { stdout } = await execFileAsync('gemini', [
-    '-m', 'gemini-3-flash-preview',
+    '-m', MODEL_CONFIG.geminiTriage,
     '-p', combinedPrompt,
     '-o', 'json',
   ], {
@@ -253,7 +253,7 @@ async function geminiTriage(
 }
 
 /**
- * Triage via Codex CLI (gpt-5.4-mini).
+ * Triage via Codex CLI using the configured OpenAI triage model.
  */
 async function codexTriage(
   prompt: string,
@@ -270,7 +270,7 @@ async function codexTriage(
 
   const { stdout } = await execFileAsync('codex', [
     'exec',
-    '-m', 'gpt-5.4-mini',
+    '-m', MODEL_CONFIG.triage,
     '--ephemeral',
     '--skip-git-repo-check',
     '--json',
@@ -314,7 +314,7 @@ export async function claudeSuggest(
   allowedTools?: string[],
   options?: { onDelta?: (text: string) => void; model?: string },
 ): Promise<string> {
-  const model = options?.model ?? 'claude-sonnet-4-6';
+  const model = options?.model ?? MODEL_CONFIG.worker;
 
   // Warm fast-path: tool-less suggestions reuse a persistent session (deltas are
   // forwarded as they stream). Tool-using calls (research/analysis) skip this
@@ -466,8 +466,7 @@ export async function claudeSuggest(
     child.on('close', (code) => {
       if (settled) return;
       if (code !== 0) {
-        const msg = stderr.trim() || `claude CLI exited with code ${code}`;
-        done(new Error(msg));
+        done(new Error(`claude CLI exited with code ${code}${stderr.trim() ? ' (see server log)' : ''}`));
         return;
       }
       // Prefer the CLI's authoritative result; fall back to accumulated deltas.

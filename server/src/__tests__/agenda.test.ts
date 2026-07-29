@@ -110,19 +110,19 @@ describe('AgendaTracker', () => {
     });
 
     // Empty transcript — first-eval gate not met (<15 total)
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(triage).not.toHaveBeenCalled();
 
     // Total < first-eval threshold (15) — still skipped
     words = 10;
     transcript = 'short bit of content';
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(triage).not.toHaveBeenCalled();
 
     // Total crosses first-eval threshold — should run once
     words = 25;
     transcript = 'this is now a long enough transcript to actually evaluate against the agenda items';
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     await Promise.resolve();
     await Promise.resolve();
     expect(triage).toHaveBeenCalledTimes(1);
@@ -130,13 +130,13 @@ describe('AgendaTracker', () => {
     // Modest additional growth (<MIN_NEW_WORDS_BEFORE_EVAL=5 since last eval
     // at 25) — skipped again
     words = 27;
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     await Promise.resolve();
     expect(triage).toHaveBeenCalledTimes(1);
 
     // Clear the growth threshold — runs once more
     words = 60;
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     await Promise.resolve();
     await Promise.resolve();
     expect(triage).toHaveBeenCalledTimes(2);
@@ -290,6 +290,79 @@ describe('AgendaTracker', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(errors).toHaveLength(0);
+  });
+
+  it('uses the immediate delta lane for an agenda-matching finalized turn', async () => {
+    const triage = vi.fn<TriageFn>().mockResolvedValue(agendaResponse([
+      { id: 'a1', state: 'partial', evidence: 'The pricing is the main concern' },
+      { id: 'a2', state: 'pending' },
+    ]));
+    const tracker = make(triage);
+    tracker.start({
+      agenda: 'Review budget\nConfirm launch date',
+      transcriptProvider: () => '[Meeting] HISTORICAL TRANSCRIPT SHOULD NOT BE IN THE DELTA',
+      wordCountProvider: () => 9,
+    });
+
+    tracker.noteSegment('The pricing is the main concern.', 'meeting');
+    await vi.advanceTimersByTimeAsync(300);
+    await Promise.resolve();
+
+    expect(triage).toHaveBeenCalledTimes(1);
+    expect(triage.mock.calls[0]![0]).toContain('New transcript turns only');
+    expect(triage.mock.calls[0]![0]).not.toContain('HISTORICAL TRANSCRIPT');
+    expect(tracker.getStatus().items[0]).toMatchObject({
+      state: 'partial',
+      evidence: 'The pricing is the main concern',
+    });
+  });
+
+  it('requires full reconciliation before a pending item becomes covered', async () => {
+    const triage = vi.fn<TriageFn>().mockResolvedValue(agendaResponse([
+      { id: 'a1', state: 'covered', evidence: 'Budget is approved' },
+    ]));
+    const tracker = make(triage);
+    tracker.start({
+      agenda: 'Approve budget',
+      transcriptProvider: () => '',
+      wordCountProvider: () => 20,
+    });
+
+    tracker.noteSegment('The budget is approved.', 'meeting');
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(tracker.getStatus().items[0]).toMatchObject({
+      state: 'partial',
+      evidence: 'Budget is approved',
+    });
+  });
+
+  it('does not let a delta erase earlier covered evidence', async () => {
+    const triage = vi.fn<TriageFn>()
+      .mockResolvedValueOnce(agendaResponse([
+        { id: 'a1', state: 'covered', evidence: 'Budget is approved' },
+        { id: 'a2', state: 'pending' },
+      ]))
+      .mockResolvedValueOnce(agendaResponse([
+        { id: 'a1', state: 'pending' },
+        { id: 'a2', state: 'partial', evidence: 'Timeline starts next week' },
+      ]));
+    const tracker = make(triage);
+    tracker.start({
+      agenda: 'Approve budget\nReview timeline',
+      transcriptProvider: () => '[Meeting] The budget is approved.',
+      wordCountProvider: () => 20,
+    });
+
+    await tracker.evaluateNow();
+    tracker.noteSegment('The timeline starts next week.', 'meeting');
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(tracker.getStatus().items[0]).toMatchObject({
+      state: 'covered',
+      evidence: 'Budget is approved',
+    });
+    expect(tracker.getStatus().items[1]).toMatchObject({ state: 'partial' });
   });
 });
 

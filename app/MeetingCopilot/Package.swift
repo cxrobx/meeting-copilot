@@ -63,6 +63,11 @@ let package = Package(
                     "-Xlinker", "\(whisperLibexec)/lib",
                 ]),
             ]
+        ),
+        .testTarget(
+            name: "MeetingCopilotTests",
+            dependencies: ["MeetingCopilot"],
+            path: "Tests"
         )
     ]
 )

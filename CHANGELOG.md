@@ -4,6 +4,23 @@ All notable changes to Meeting Copilot will be documented in this file.
 
 ## [Unreleased]
 
+### Reliability and latency overhaul (2026-07-28)
+
+- Fixed child-process EOF CPU spinning, stale restart races, WebSocket receive/reconnect task leaks, and WKWebView key-monitor leaks.
+- Removed Parakeet temporary WAV files; audio is validated and decoded entirely in memory.
+- Enabled the VAD emitter by default with an O(1) circular pre-roll buffer and retained `MC_USE_VAD_EMIT=0` rollback.
+- Added chunk correlation IDs, provider/queue/end-to-end percentile metrics, explicit ASR capabilities, serialized MLX inference, and provider-neutral health metadata.
+- Upgraded Deepgram to Nova-3 with keyterms and made all cloud audio fail closed unless `COPILOT_ALLOW_CLOUD_AUDIO=true`.
+- Added event-driven latest-wins intelligence, direct API hot paths, circuit breakers, cancellation, prompt caching, and per-session request/token/spend ceilings.
+- Centralized model routing: GPT-5.6 Luna triage, Claude Sonnet 5 suggestions/workers, and Claude Opus 5 post-meeting review, all with environment rollbacks.
+- Added buffered rotating global logs, child-error sanitization, a Swift test target, and reproducible Node 20-compatible test tooling.
+- Added opt-in, read-only real-audio VAD and local transcription evaluators; fixed a whisper.cpp 1.8.3 Metal/CPU graph abort on pre-M5 Apple Silicon by running the sub-1 MB Silero VAD model on CPU.
+- Validated a consented eight-minute, dual-track real meeting replay end to end: 318 audio chunks, zero errors, ASR p50/p95 183/253 ms, all 3 agenda items covered with evidence, and one relevant coach intervention.
+- Calibrated the live coach for priority-5 recovery moments only, narrowed directed-pressure/question detection, and kept the production Terra recovery benchmark at 10/10.
+- Made agenda deltas monotonic and conservative: incremental evidence may advance pending to partial, while only full reconciliation confirms covered.
+- Added meeting-scoped action-card dedup, recent-card triage context, and a stricter interruption gate so explanatory or already-answered discussion does not invoke the slower suggestion tier.
+- Extended real-audio replay with bounded `--minutes` and explicit `--agenda` controls plus agenda, coach, error, and latency reporting.
+
 ### Added
 - 2026-07-02: Upcoming-meeting auto-fill — `server/src/calendar/cxmail.ts` reads cxmail's invite DB read-only (all mail accounts, `CXMAIL_DB_PATH` override), `GET /calendar/upcoming` dedupes by event UID with per-field fallback across RSVP replies; start form shows up to 3 "📅 Auto-fill" chips that prefill title/attendees and run the invite description through agenda extract. Degrades to hidden when cxmail/DB is absent. Coverage = invite-backed meetings only (self-created events with no invite email don't appear).
 - 2026-07-02: Menubar Toggle Panel fixed — panel gets `.moveToActiveSpace` + `.fullScreenAuxiliary`, toggle hides only when visible on the active Space (otherwise fronts + activates), popover dismisses first

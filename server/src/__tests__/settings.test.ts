@@ -25,7 +25,7 @@ describe('settings', () => {
     const s = getSettings();
     expect(s.evalCadenceMs).toBe(15_000);
     expect(s.suggestionTtlMs).toBe(60_000);
-    expect(s.monitorDefaults).toEqual({ coach: false, factcheck: false });
+    expect(s.monitorDefaults).toEqual({ coach: true, factcheck: false });
     expect(s.summaryAutoWrite).toBe(true);
   });
 

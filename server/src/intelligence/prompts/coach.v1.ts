@@ -1,34 +1,56 @@
-// "Say next" coach prompts, v1.
-// One cheap JSON call per window: is there ONE high-priority thing the user
-// should mention, ask, or address right now? Silence is the default.
+// Realtime recovery-coach prompt. The output is intentionally tiny: one
+// intervention the user can say immediately, or silence.
 
 export type CoachKind = 'mention' | 'ask' | 'address';
+export type CoachIncidentType =
+  | 'none'
+  | 'pressure'
+  | 'objection'
+  | 'bad_answer'
+  | 'overcommitment'
+  | 'confusion'
+  | 'contradiction'
+  | 'agenda_risk'
+  | 'decision'
+  | 'commitment'
+  | 'question';
 
 export interface CoachSuggestionResult {
   hasSuggestion: boolean;
   kind: CoachKind;
+  incidentType: CoachIncidentType;
   priority: number; // 1-5
+  confidence: number; // 0-1
   headline: string;
   phrasing: string;
   why: string;
   triggerQuote: string;
+  expiresInMs: number;
 }
 
-export const COACH_SYSTEM = `You are a silent meeting coach for the user ("You" in the transcript). Watch the conversation and surface AT MOST ONE high-priority thing the user should say next.
+export const COACH_SYSTEM = `Role: You are a discreet, real-time meeting recovery coach for the user ("You" in the transcript).
 
-Kinds:
-- "mention": a fact, constraint, agenda item, or risk the user knows about that the conversation needs and nobody has raised.
-- "ask": a question the user should ask — an unstated assumption, a missing commitment (owner/date), an ambiguity that will bite later.
-- "address": something said that the user should respond to before the moment passes — a concern aimed at them, a misunderstanding of their position, a decision drifting against their stated goals.
+Goal: Decide whether the user needs one high-value sentence to say immediately. Catch client pressure, objections, confusion, weak or evasive answers, unsupported commitments, contradictions, and agenda items about to slip.
 
-Rules:
-- Suggest ONLY when it genuinely matters (priority 4-5). The right output for most windows is hasSuggestion=false. You are not a chat partner; you are a tap on the shoulder.
-- When the user's private goals are provided, suggestions that advance or protect those goals OUTRANK generic meeting hygiene. A goal slipping away — a deferred decision, a drifting commitment, an unanswered ask — is exactly the moment to speak.
-- Never suggest something already said or already on a suggestion you made before (the prompt lists recent ones).
-- "phrasing" is one natural sentence the user could say out loud, in plain spoken English.
-- "why" is one short clause explaining the stakes.
+Success criteria:
+- Intervene only for priority 5 moments where silence would materially harm the user's position or leave a serious mistake unrecovered.
+- Priority 4 means "useful in a post-meeting review", not "interrupt now"; return hasSuggestion=false for priority 4 or below.
+- "phrasing" is one natural spoken sentence, normally under 28 words.
+- For a weak answer, provide a graceful reset or clarification. Never shame, scold, or label the user as stupid.
+- For pressure or an objection, help the user acknowledge the concern without conceding an unsupported fact, price, scope, or deadline.
+- Private goals and active agenda risks outrank generic meeting etiquette.
 
-Respond with JSON only.`;
+Stop rules:
+- Silence is correct for ordinary conversation, harmless filler, style preferences, or when the user has already recovered.
+- Silence is correct for ordinary informational questions, optional follow-ups, topic transitions, agenda facilitation, and advice that merely makes an already-adequate answer more polished.
+- A pending agenda item is not itself a risk. Intervene only when an explicit missing warning says it is about to slip.
+- Do not repeat something already said or a recent suggestion.
+- Do not invent facts, dates, authority, or commitments.
+- Return exactly the structured JSON contract. No prose or chain-of-thought.
+
+JSON fields:
+{"hasSuggestion":boolean,"kind":"mention"|"ask"|"address","incidentType":"none"|"pressure"|"objection"|"bad_answer"|"overcommitment"|"confusion"|"contradiction"|"agenda_risk"|"decision"|"commitment"|"question","priority":1-5,"confidence":0-1,"headline":string,"phrasing":string,"why":string,"triggerQuote":string,"expiresInMs":integer}
+When hasSuggestion=false, use empty strings for text fields, incidentType="none", and conservative numeric values.`;
 
 export function buildCoachPrompt(params: {
   transcriptWindow: string;
@@ -39,6 +61,8 @@ export function buildCoachPrompt(params: {
   userGoals?: string;
   speakerBalance?: string;
   momentHint?: string;
+  triggerSource?: 'mic' | 'meeting' | 'system';
+  triggerText?: string;
 }): string {
   const parts: string[] = [];
   if (params.meetingTitle) parts.push(`Meeting: ${params.meetingTitle}`);
@@ -47,10 +71,13 @@ export function buildCoachPrompt(params: {
   if (params.agendaSummary) parts.push(`Agenda state:\n${params.agendaSummary}`);
   if (params.speakerBalance) parts.push(`Speaking balance: ${params.speakerBalance}`);
   if (params.momentHint) parts.push(`Why you are being consulted right now: ${params.momentHint}`);
+  if (params.triggerText) {
+    parts.push(`Immediate trigger (${params.triggerSource ?? 'system'}):\n${params.triggerText}`);
+  }
   if (params.recentSuggestions.length > 0) {
     parts.push(`Recent suggestions already shown (do not repeat):\n${params.recentSuggestions.map((s) => `- ${s}`).join('\n')}`);
   }
-  parts.push(`Latest transcript window ("You" = the user's mic):\n\n${params.transcriptWindow}`);
+  parts.push(`Latest ordered turns ("You" = the user's mic):\n<transcript>\n${params.transcriptWindow}\n</transcript>`);
   return parts.join('\n\n');
 }
 
@@ -59,15 +86,47 @@ export const COACH_SCHEMA = {
   schema: {
     type: 'object',
     additionalProperties: false,
-    required: ['hasSuggestion', 'kind', 'priority', 'headline', 'phrasing', 'why', 'triggerQuote'],
+    required: [
+      'hasSuggestion',
+      'kind',
+      'incidentType',
+      'priority',
+      'confidence',
+      'headline',
+      'phrasing',
+      'why',
+      'triggerQuote',
+      'expiresInMs',
+    ],
     properties: {
       hasSuggestion: { type: 'boolean' },
       kind: { type: 'string', enum: ['mention', 'ask', 'address'] },
+      incidentType: {
+        type: 'string',
+        enum: [
+          'none',
+          'pressure',
+          'objection',
+          'bad_answer',
+          'overcommitment',
+          'confusion',
+          'contradiction',
+          'agenda_risk',
+          'decision',
+          'commitment',
+          'question',
+        ],
+      },
       priority: { type: 'number', description: '1-5; only 4-5 are worth interrupting for' },
+      confidence: { type: 'number', description: '0-1 confidence that intervening is helpful now' },
       headline: { type: 'string', description: 'Few-word label, e.g. "Pin down the owner"' },
       phrasing: { type: 'string', description: 'One sentence the user could say out loud' },
-      why: { type: 'string', description: 'One short clause on the stakes' },
+      why: { type: 'string', description: 'One short, non-judgmental clause on the stakes' },
       triggerQuote: { type: 'string', description: 'Short verbatim quote that prompted this' },
+      expiresInMs: {
+        type: 'integer',
+        description: 'How long this advice remains useful, usually 8000-30000 milliseconds',
+      },
     },
   },
 } as const;

@@ -13,7 +13,9 @@ const SCORES_MARKER = '<!--SCORES-->';
 // The self-review is the highest-value, lowest-frequency intelligence call, so it
 // runs on the most capable model (Opus) rather than the realtime Sonnet default.
 // Override via COPILOT_REVIEW_MODEL if a different id is needed.
-const REVIEW_MODEL = process.env.COPILOT_REVIEW_MODEL || 'claude-opus-4-8';
+import { MODEL_CONFIG } from '../model-config.js';
+
+const REVIEW_MODEL = MODEL_CONFIG.review;
 
 const REVIEW_SYSTEM = `You are a candid but constructive executive coach. You review how ONE person — "You" / "[You]" in the transcript — performed in a meeting they just finished. The other participants are "[Meeting]". Assess the user only; do not critique the others.
 

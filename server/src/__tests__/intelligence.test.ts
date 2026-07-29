@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { IntelligenceEngine } from '../intelligence/index.js';
+import { buildHaikuTriagePrompt } from '../intelligence/prompts/haiku-triage.v1.js';
 import type { TranscriptSegment } from '../transcription/types.js';
 
 function makeSegment(text: string, timestamp?: number): TranscriptSegment {
@@ -32,6 +33,26 @@ describe('IntelligenceEngine', () => {
     expect(engine.isRunning).toBe(true);
     engine.stop();
     expect(engine.isRunning).toBe(false);
+  });
+
+  it('starts each meeting with isolated transcript, dedup, and metric state', () => {
+    engine.addTranscript(makeSegment('transcript from the prior meeting'));
+    (engine as any).recentWindowHashes.push('old-window');
+    (engine as any).recentActionSuggestions.push({
+      title: 'Old suggestion',
+      triggerQuote: 'A prior meeting asked for a concrete research brief.',
+    });
+    engine.evalsRun = 9;
+    engine.sonnetCallCount = 4;
+
+    engine.start();
+
+    expect(engine.getFullTranscript()).toBe('');
+    expect((engine as any).recentWindowHashes).toEqual([]);
+    expect((engine as any).recentActionSuggestions).toEqual([]);
+    expect(engine.evalsRun).toBe(0);
+    expect(engine.sonnetCallCount).toBe(0);
+    engine.stop();
   });
 
   it('accepts transcript segments', () => {
@@ -109,5 +130,35 @@ describe('IntelligenceEngine', () => {
     engine.start();
     engine.stop();
     expect(engine.getProjectContext()).toHaveLength(0);
+  });
+
+  it('recognizes repeated actionable quotes before the slow suggestion tier', () => {
+    (engine as any).recentActionSuggestions.push({
+      title: 'Research autonomous agent permissions',
+      triggerQuote: 'What permissions do I need to set up in order for this to flow freely?',
+    });
+
+    expect((engine as any).isRepeatedActionableMoment(
+      'What permissions do I need to set up in order for this to flow freely?',
+    )).toBe(true);
+    expect((engine as any).isRepeatedActionableMoment(
+      'Can someone compare PostgreSQL and SQLite for this deployment?',
+    )).toBe(false);
+  });
+
+  it('shows recent cards to triage and warns against explanatory-summary cards', () => {
+    const prompt = buildHaikuTriagePrompt(
+      '[Meeting] Here is how our orchestration workflow works.',
+      undefined,
+      undefined,
+      [{
+        title: 'Research autonomous agent permissions',
+        triggerQuote: 'What permissions do I need to set up?',
+      }],
+    );
+
+    expect(prompt).toContain('<recent_suggestions>');
+    expect(prompt).toContain('Research autonomous agent permissions');
+    expect(prompt).toContain('Do NOT create cards merely to summarize');
   });
 });

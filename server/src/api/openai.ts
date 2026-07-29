@@ -1,19 +1,25 @@
 import OpenAI from 'openai';
-import { appendFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { paidApiDisabled } from './killswitch.js';
+import { log } from '../logging.js';
+import { MODEL_CONFIG } from '../model-config.js';
+import { beginLlmRequest, recordLlmUsage } from './budget.js';
 
-const TRIAGE_MODEL = 'gpt-5.4-mini';
-const FAST_RESEARCH_MODEL = 'gpt-5.4-mini';
-
-const LOG_FILE = join(homedir(), '.meeting-copilot', 'server.log');
-function log(msg: string): void {
-  const line = `[${new Date().toISOString()}] ${msg}\n`;
-  try { appendFileSync(LOG_FILE, line); } catch {}
-}
+const TRIAGE_MODEL = MODEL_CONFIG.triage;
+const FAST_RESEARCH_MODEL = MODEL_CONFIG.fastResearch;
 
 let cachedClient: OpenAI | null = null;
+
+// The installed SDK's public union predates GPT-5.6's `max` effort. Live
+// meeting routes intentionally use `none`, so keep the local type aligned
+// with the SDK until a dependency upgrade is separately evaluated.
+type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
+
+function tokenPrices(model: string): { input: number; output: number } {
+  if (model.includes('gpt-5.6-luna')) return { input: 1, output: 6 };
+  if (model.includes('gpt-5.6-terra')) return { input: 2.5, output: 15 };
+  if (model.includes('gpt-5.6-sol') || model === 'gpt-5.6') return { input: 5, output: 30 };
+  return { input: 2, output: 10 };
+}
 
 function getClient(): OpenAI {
   if (!cachedClient) cachedClient = new OpenAI();
@@ -26,26 +32,35 @@ export function isOpenAiApiAvailable(): boolean {
 }
 
 /**
- * Fast JSON-only triage call via GPT-5.4 Mini. Uses the Responses API with
+ * Fast JSON-only triage call via the configured GPT-5.6 role model. Uses the Responses API with
  * a strict JSON schema so the response is guaranteed to parse.
  *
  * `schema` follows JSON Schema. `name` identifies the schema for OpenAI.
  */
-export async function openaiTriageJson(
+export async function openaiStructuredJson(
   prompt: string,
   systemPrompt: string,
   schema: {
     name: string;
     schema: Record<string, unknown>;
   },
-  options: { signal?: AbortSignal; timeoutMs?: number; label?: string } = {},
+  options: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    label?: string;
+    model?: string;
+    reasoningEffort?: ReasoningEffort;
+    maxOutputTokens?: number;
+  } = {},
 ): Promise<string> {
   const client = getClient();
+  beginLlmRequest();
   const tag = options.label ?? 'triage';
+  const model = options.model ?? TRIAGE_MODEL;
   const started = Date.now();
   const res = await client.responses.create(
     {
-      model: TRIAGE_MODEL,
+      model,
       input: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: prompt },
@@ -58,6 +73,10 @@ export async function openaiTriageJson(
           schema: schema.schema,
         },
       },
+      reasoning: { effort: options.reasoningEffort ?? 'none' },
+      ...(options.maxOutputTokens
+        ? { max_output_tokens: options.maxOutputTokens }
+        : {}),
     },
     {
       timeout: options.timeoutMs ?? 10_000,
@@ -67,10 +86,36 @@ export async function openaiTriageJson(
   );
   const elapsed = Date.now() - started;
   const u: any = res.usage;
+  const prices = tokenPrices(model);
+  recordLlmUsage({
+    inputTokens: u?.input_tokens ?? 0,
+    outputTokens: u?.output_tokens ?? 0,
+    inputDollarsPerMillion: Number(process.env.COPILOT_OPENAI_INPUT_PER_MILLION || prices.input),
+    outputDollarsPerMillion: Number(process.env.COPILOT_OPENAI_OUTPUT_PER_MILLION || prices.output),
+  });
   const cached = u?.input_tokens_details?.cached_tokens ?? 0;
-  log(`[api/openai] ${tag} latencyMs=${elapsed} in=${u?.input_tokens ?? 0} out=${u?.output_tokens ?? 0} cached=${cached}`);
+  log('api/openai', `${tag} model=${model} latencyMs=${elapsed} in=${u?.input_tokens ?? 0} out=${u?.output_tokens ?? 0} cached=${cached}`);
 
   return res.output_text;
+}
+
+export async function openaiTriageJson(
+  prompt: string,
+  systemPrompt: string,
+  schema: {
+    name: string;
+    schema: Record<string, unknown>;
+  },
+  options: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    label?: string;
+    model?: string;
+    reasoningEffort?: ReasoningEffort;
+    maxOutputTokens?: number;
+  } = {},
+): Promise<string> {
+  return openaiStructuredJson(prompt, systemPrompt, schema, options);
 }
 
 export interface FastResearchSource {
@@ -84,7 +129,7 @@ export interface FastResearchResult {
 }
 
 /**
- * Streaming fast research via GPT-5.4 Mini + the built-in web_search tool.
+ * Streaming fast research via GPT-5.6 Luna + the built-in web_search tool.
  * Deltas are delivered via the onDelta callback; the final text and source
  * citations are returned.
  */
@@ -96,6 +141,7 @@ export async function openaiFastResearchStream(params: {
   label?: string;
 }): Promise<FastResearchResult> {
   const client = getClient();
+  beginLlmRequest();
   const tag = params.label ?? 'fast-research';
   const started = Date.now();
   let firstTokenAt = 0;
@@ -109,6 +155,7 @@ export async function openaiFastResearchStream(params: {
         { role: 'user', content: params.userContent },
       ],
       stream: true,
+      reasoning: { effort: 'low' },
     },
     { signal: params.signal, maxRetries: 0 },
   );
@@ -149,6 +196,6 @@ export async function openaiFastResearchStream(params: {
 
   const elapsed = Date.now() - started;
   const ttft = firstTokenAt > 0 ? firstTokenAt - started : -1;
-  log(`[api/openai] ${tag} ttftMs=${ttft} totalMs=${elapsed} sources=${sources.length} chars=${accumulated.length}`);
+  log('api/openai', `${tag} model=${FAST_RESEARCH_MODEL} ttftMs=${ttft} totalMs=${elapsed} sources=${sources.length} chars=${accumulated.length}`);
   return { text: accumulated, sources };
 }

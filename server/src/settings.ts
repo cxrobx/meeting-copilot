@@ -14,7 +14,7 @@ export interface CopilotSettings {
   evalCadenceMs: number;
   /** How long an unactioned suggestion lives before auto-expiring. */
   suggestionTtlMs: number;
-  /** Whether the opt-in monitors start enabled on each new session. */
+  /** Whether live monitors start enabled on each new session. */
   monitorDefaults: { coach: boolean; factcheck: boolean };
   /** Session retention window in days. */
   retentionDays: number;
@@ -49,7 +49,9 @@ function defaults(): CopilotSettings {
   return {
     evalCadenceMs: envNumber('EVAL_CADENCE_MS') ?? 15_000,
     suggestionTtlMs: envNumber('SUGGESTION_TTL_MS') ?? 60_000,
-    monitorDefaults: { coach: false, factcheck: false },
+    // Coach is the primary in-meeting product loop. Fact-check remains opt-in
+    // because it can invoke web verification and is materially more expensive.
+    monitorDefaults: { coach: true, factcheck: false },
     retentionDays: envNumber('RETENTION_DAYS') ?? 90,
     summaryAutoWrite: true,
   };

@@ -88,7 +88,7 @@ private struct WebViewWrapper: NSViewRepresentable {
         }
 
         // Enable Cmd+/- browser-style zoom via CSS font-size scaling
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        context.coordinator.keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             guard event.modifierFlags.contains(.command) else { return event }
             let coord = context.coordinator
             switch event.charactersIgnoringModifiers {
@@ -114,6 +114,17 @@ private struct WebViewWrapper: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {}
 
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        coordinator.disposed = true
+        if let monitor = coordinator.keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            coordinator.keyMonitor = nil
+        }
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: bridgeMessageName)
+        webView.navigationDelegate = nil
+        webView.stopLoading()
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator(sessionManager: sessionManager)
     }
@@ -122,6 +133,8 @@ private struct WebViewWrapper: NSViewRepresentable {
         let sessionManager: SessionManager
         weak var webView: WKWebView?
         var zoomLevel: Int = 100
+        var keyMonitor: Any?
+        var disposed = false
         private var retryCount = 0
 
         init(sessionManager: SessionManager) {
@@ -226,7 +239,9 @@ private struct WebViewWrapper: NSViewRepresentable {
 
         /// Poll the health endpoint before loading the page. Never gives up.
         func loadWhenReady(webView: WKWebView) {
+            guard !disposed else { return }
             checkHealth { ready in
+                guard !self.disposed else { return }
                 if ready {
                     self.retryCount = 0
                     print("[WebDashboard] Server ready, loading dashboard")

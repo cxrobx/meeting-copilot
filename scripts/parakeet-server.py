@@ -29,19 +29,25 @@ Model is loaded once at startup; each request transcribes one chunk. The first
 inference pays a one-time Metal compile cost (the app's health polling covers it).
 """
 import argparse
+import asyncio
+import io
 import os
 import sys
-import tempfile
+import wave
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
+import mlx.core as mx
+import numpy as np
 import uvicorn
 
 DEFAULT_MODEL = os.environ.get("PARAKEET_MODEL", "mlx-community/parakeet-tdt-0.6b-v3")
+MAX_WAV_BYTES = 20 * 1024 * 1024
 
 app = FastAPI()
 _model = None
 _model_name = DEFAULT_MODEL
+_inference_lock = asyncio.Lock()
 
 
 def _log(msg: str) -> None:
@@ -61,28 +67,60 @@ def get_model():
 @app.get("/")
 def health():
     # whisper-server answers GET / with a page; the app only checks reachability.
-    return JSONResponse({"status": "ok", "model": _model_name, "engine": "parakeet-mlx"})
+    return JSONResponse({
+        "status": "ok",
+        "model": _model_name,
+        "engine": "parakeet-mlx",
+        "audioStorage": "memory-only",
+        "supportsPrompt": False,
+    })
+
+
+def _decode_wav(data: bytes) -> mx.array:
+    """Decode the app's required 16 kHz mono PCM WAV without touching disk."""
+    with wave.open(io.BytesIO(data), "rb") as wav:
+        if wav.getnchannels() != 1:
+            raise ValueError("expected mono audio")
+        if wav.getsampwidth() != 2:
+            raise ValueError("expected 16-bit PCM audio")
+        if wav.getframerate() != 16_000:
+            raise ValueError("expected 16 kHz audio")
+        frames = wav.readframes(wav.getnframes())
+    samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    # Match parakeet_mlx.audio.load_audio(), which returns float32 (its dtype
+    # argument is currently unused). get_logmel views the complex STFT using
+    # this dtype, so bfloat16 would double the frequency dimension.
+    return mx.array(samples, dtype=mx.float32)
+
+
+def _transcribe_bytes(data: bytes) -> str:
+    from parakeet_mlx.audio import get_logmel
+
+    model = get_model()
+    audio = _decode_wav(data)
+    if audio.size < model.preprocessor_config.hop_length:
+        return ""
+    mel = get_logmel(audio, model.preprocessor_config)
+    result = model.generate(mel)[0]
+    return (getattr(result, "text", "") or "").strip()
 
 
 @app.post("/inference")
 async def inference(file: UploadFile = File(...), prompt: str = Form(default="")):
-    data = await file.read()
-    # parakeet-mlx loads audio from a path; write the chunk to a temp WAV.
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp.write(data)
-        tmp_path = tmp.name
+    data = await file.read(MAX_WAV_BYTES + 1)
+    await file.close()
+    if len(data) > MAX_WAV_BYTES:
+        return JSONResponse({"error": "audio payload too large", "text": ""}, status_code=413)
     try:
-        result = get_model().transcribe(tmp_path)
-        text = getattr(result, "text", "") or ""
-        return JSONResponse({"text": text.strip()})
+        # MLX inference is serialized deliberately; concurrent calls otherwise
+        # contend for the same model and increase tail latency. Keep inference
+        # on the model-loading thread: MLX stream state is thread-local.
+        async with _inference_lock:
+            text = _transcribe_bytes(data)
+        return JSONResponse({"text": text})
     except Exception as e:  # noqa: BLE001 — return the error like whisper-server would
         _log(f"inference error: {e}")
         return JSONResponse({"error": str(e), "text": ""}, status_code=500)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
 
 
 def main() -> None:

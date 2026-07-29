@@ -60,7 +60,9 @@ final class VADEmitter {
 
     // Bounded pre-roll ring (Float32). Always kept full with the most recent
     // 100ms so the start of an utterance isn't clipped by VAD's detection lag.
-    private var preRoll: [Float] = []
+    private var preRoll = [Float](repeating: 0, count: Config.preRollSamples)
+    private var preRollWriteIndex = 0
+    private var preRollCount = 0
 
     // Active utterance samples (Float32, grown while speaking). Converted to
     // Int16 PCM + WAV on emit.
@@ -104,7 +106,6 @@ final class VADEmitter {
         self.emitCallback = onEmit
 
         // Reserve capacity so we don't churn allocations per frame.
-        self.preRoll.reserveCapacity(Config.preRollSamples + 2048)
         self.utterance.reserveCapacity(maxUtteranceSamples + 2048)
         self.probeWindow.reserveCapacity(Config.probeWindowSamples)
     }
@@ -169,7 +170,8 @@ final class VADEmitter {
     func reset() {
         queue.sync { [weak self] in
             guard let self = self else { return }
-            self.preRoll.removeAll(keepingCapacity: true)
+            self.preRollWriteIndex = 0
+            self.preRollCount = 0
             self.utterance.removeAll(keepingCapacity: true)
             self.probeWindow.removeAll(keepingCapacity: true)
             self.state = .idle
@@ -201,10 +203,18 @@ final class VADEmitter {
     }
 
     private func appendToPreRoll(_ sample: Float) {
-        if preRoll.count >= Config.preRollSamples {
-            preRoll.removeFirst()
+        preRoll[preRollWriteIndex] = sample
+        preRollWriteIndex = (preRollWriteIndex + 1) % Config.preRollSamples
+        preRollCount = min(preRollCount + 1, Config.preRollSamples)
+    }
+
+    private func preRollSnapshot() -> [Float] {
+        guard preRollCount > 0 else { return [] }
+        if preRollCount < Config.preRollSamples {
+            return Array(preRoll.prefix(preRollCount))
         }
-        preRoll.append(sample)
+        return Array(preRoll[preRollWriteIndex...])
+            + Array(preRoll[..<preRollWriteIndex])
     }
 
     private func evaluateWindow() {
@@ -224,7 +234,7 @@ final class VADEmitter {
                 // windowCopy separately here would double the onset
                 // frame and inflate the emitted chunk's duration by
                 // 30ms. Just pre-roll is enough.
-                utterance.append(contentsOf: preRoll)
+                utterance.append(contentsOf: preRollSnapshot())
                 utteranceStartTime = Date()
                     .addingTimeInterval(-Double(utterance.count) / Double(Config.sampleRate))
                 state = .speaking

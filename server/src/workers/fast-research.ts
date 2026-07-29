@@ -5,12 +5,13 @@ import {
   type FastResearchSource,
 } from '../api/openai.js';
 import type { Worker, WorkerCapabilities, WorkerResult } from './types.js';
+import { MODEL_CONFIG } from '../model-config.js';
 
 /**
  * Fast research: low-latency factual answer during a live meeting.
  *
- * Preferred path: GPT-5.4 Mini via OpenAI Responses API + native web_search
- * tool. No CLI spawn overhead; first token typically lands in 2–4s.
+ * Preferred path: GPT-5.6 Luna via OpenAI Responses API + native web_search
+ * tool. No CLI spawn overhead.
  * Falls back to Claude Haiku CLI when OPENAI_API_KEY isn't configured.
  */
 export class FastResearchWorker implements Worker {
@@ -94,7 +95,7 @@ export class FastResearchWorker implements Worker {
             systemPrompt,
             signal,
             ['WebSearch', 'WebFetch'],
-            { onDelta, model: 'claude-haiku-4-5-20251001' },
+            { onDelta, model: MODEL_CONFIG.haiku },
           );
           text = `_(OpenAI unavailable — fell back to Claude: ${msg})_\n\n${text}`;
         }
@@ -104,7 +105,7 @@ export class FastResearchWorker implements Worker {
           systemPrompt,
           signal,
           ['WebSearch', 'WebFetch'],
-          { onDelta, model: 'claude-haiku-4-5-20251001' },
+          { onDelta, model: MODEL_CONFIG.haiku },
         );
       }
 

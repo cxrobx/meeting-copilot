@@ -20,6 +20,7 @@ import ObjCExceptionBridge
 /// dedup runs only on continuation chunks so legitimate repeated
 /// phrases across non-adjacent utterances aren't mis-trimmed.
 struct AudioChunkMeta: Sendable {
+    let chunkId: String = UUID().uuidString
     let audioDurationSec: Double
     let captureStartedAt: Date
     let captureEndedAt: Date
@@ -290,16 +291,22 @@ final class AudioCaptureManager: NSObject {
         routeObserver = nil
 
         // Clear buffers
+        clearBuffers()
+
+        onAudioChunk = nil
+        onDeviceChangeError = nil
+    }
+
+    /// Keep NSLock acquisition out of the async stop function; Swift 6 warns
+    /// because a suspension while holding a lock would be unsafe.
+    private func clearBuffers() {
         bufferLock.lock()
+        defer { bufferLock.unlock() }
         micPCMBuffer = Data()
         meetingPCMBuffer = Data()
         micBufferAudioStart = nil
         meetingBufferAudioStart = nil
         degradedBuffer = []
-        bufferLock.unlock()
-
-        onAudioChunk = nil
-        onDeviceChangeError = nil
     }
 
     // MARK: - Degraded Mode

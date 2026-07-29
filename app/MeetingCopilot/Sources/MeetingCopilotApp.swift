@@ -106,6 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let sessionManager = SessionManager()
     private let floatingPanelController = FloatingPanelController()
     private var hasShownPermissions = false
+    private var terminationInProgress = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Set as accessory app (no Dock icon)
@@ -191,14 +192,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        // Graceful shutdown
-        Task {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !terminationInProgress else { return .terminateLater }
+        terminationInProgress = true
+        // Keep the application alive until its async child cleanup completes.
+        // A Task launched from applicationWillTerminate is abandoned as soon as
+        // AppKit exits the process, which was leaving Node/Parakeet orphaned.
+        Task { @MainActor in
             if sessionManager.state == .live || sessionManager.state == .degraded {
                 sessionManager.stopSession()
+                try? await Task.sleep(nanoseconds: 250_000_000)
             }
             await sessionManager.processSupervisor.stopAll()
+            sender.reply(toApplicationShouldTerminate: true)
         }
+        return .terminateLater
     }
 
     // MARK: - Panel Management

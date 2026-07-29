@@ -2,7 +2,8 @@
 /**
  * Replay recorded WAV audio through the full meeting-copilot pipeline.
  *
- * Usage: npx tsx src/replay-audio.ts <recording-dir> [--speed <multiplier>] [--port <port>]
+ * Usage: npx tsx src/replay-audio.ts <recording-dir> [--speed <multiplier>]
+ *   [--minutes <n>] [--agenda <items>] [--port <port>]
  *
  * Reads system.wav and mic.wav from a Notes4Chris recording directory,
  * chunks them into 10-second segments (with proper WAV headers), and streams
@@ -40,6 +41,8 @@ function parseArgs() {
   let speed = 1;
   let port = 17890;
   let autoApprove = false;
+  let minutes: number | undefined;
+  let agenda: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--speed' && args[i + 1]) {
@@ -47,6 +50,12 @@ function parseArgs() {
       i++;
     } else if (args[i] === '--port' && args[i + 1]) {
       port = parseInt(args[i + 1]!, 10);
+      i++;
+    } else if (args[i] === '--minutes' && args[i + 1]) {
+      minutes = parseFloat(args[i + 1]!);
+      i++;
+    } else if (args[i] === '--agenda' && args[i + 1]) {
+      agenda = args[i + 1]!;
       i++;
     } else if (args[i] === '--auto-approve') {
       autoApprove = true;
@@ -56,10 +65,12 @@ function parseArgs() {
   }
 
   if (!recordingDir) {
-    console.error('Usage: npx tsx src/replay-audio.ts <recording-dir> [--speed <multiplier>] [--port <port>] [--auto-approve]');
+    console.error('Usage: npx tsx src/replay-audio.ts <recording-dir> [--speed <multiplier>] [--minutes <n>] [--agenda <items>] [--port <port>] [--auto-approve]');
     console.error('');
     console.error('Options:');
     console.error('  --speed <n>      Playback speed multiplier (default: 1, use 4 for 4x faster)');
+    console.error('  --minutes <n>    Replay only the first n minutes');
+    console.error('  --agenda <items> Override manifest agenda (semicolon-separated is supported)');
     console.error('  --port <n>       Server port (default: 17890)');
     console.error('  --auto-approve   Automatically approve suggestions so workers execute');
     console.error('');
@@ -68,7 +79,14 @@ function parseArgs() {
     process.exit(1);
   }
 
-  return { recordingDir, speed, port, autoApprove };
+  if (!Number.isFinite(speed) || speed <= 0) {
+    throw new Error('--speed must be a positive number');
+  }
+  if (minutes !== undefined && (!Number.isFinite(minutes) || minutes <= 0)) {
+    throw new Error('--minutes must be a positive number');
+  }
+
+  return { recordingDir, speed, port, autoApprove, minutes, agenda };
 }
 
 // ─── WAV Utilities ──────────────────────────────────────────────────────────
@@ -167,14 +185,30 @@ interface Stats {
   chunksSent: number;
   transcriptsReceived: number;
   suggestionsReceived: number;
+  agendaUpdates: number;
+  coachSuggestions: number;
   actionsCompleted: number;
   errors: number;
+  intelligenceErrors: number;
+  lastAgendaStatus?: {
+    items?: Array<{ id?: string; text?: string; state?: string; evidence?: string }>;
+    missing?: string[];
+    fullyCovered?: boolean;
+  };
+  coachTips: Array<{
+    kind?: string;
+    incidentType?: string;
+    headline?: string;
+    phrasing?: string;
+    latencyMs?: number;
+  }>;
+  debugSnapshot?: any;
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const { recordingDir, speed, port, autoApprove } = parseArgs();
+  const { recordingDir, speed, port, autoApprove, minutes, agenda } = parseArgs();
 
   // Load manifest
   const manifest = loadManifest(recordingDir);
@@ -184,7 +218,9 @@ async function main(): Promise<void> {
   console.log(`  Recording:  ${basename(recordingDir)}`);
   console.log(`  Title:      ${manifest.meetingContext?.title ?? 'Untitled'}`);
   console.log(`  Attendees:  ${manifest.meetingContext?.participants ?? 'Unknown'}`);
-  console.log(`  Agenda:     ${manifest.meetingContext?.agenda ?? 'None'}`);
+  const effectiveAgenda = agenda ?? manifest.meetingContext?.agenda;
+  console.log(`  Agenda:     ${effectiveAgenda || 'None'}`);
+  console.log(`  Duration:   ${minutes ? `first ${minutes} min` : 'full recording'}`);
   console.log(`  Speed:      ${speed}x`);
   console.log(`  Auto-approve: ${autoApprove ? 'YES' : 'no'}`);
   console.log(`  Server:     ws://localhost:${port}`);
@@ -195,7 +231,16 @@ async function main(): Promise<void> {
 
   if (manifest.tracks.system?.file) {
     const systemPath = join(recordingDir, manifest.tracks.system.file);
-    const pcm = readWavPcm(systemPath);
+    const fullPcm = readWavPcm(systemPath);
+    const pcm = minutes
+      ? fullPcm.subarray(
+          0,
+          Math.min(
+            fullPcm.length,
+            Math.floor(minutes * 60 * SAMPLE_RATE * BYTES_PER_SAMPLE * CHANNELS),
+          ),
+        )
+      : fullPcm;
     const chunks = chunkWithHeaders(pcm, BYTES_PER_CHUNK, OVERLAP_BYTES);
     tracks.push({ source: 'meeting', chunks });
     const durationSec = pcm.length / (SAMPLE_RATE * BYTES_PER_SAMPLE);
@@ -204,7 +249,16 @@ async function main(): Promise<void> {
 
   if (manifest.tracks.mic?.file) {
     const micPath = join(recordingDir, manifest.tracks.mic.file);
-    const pcm = readWavPcm(micPath);
+    const fullPcm = readWavPcm(micPath);
+    const pcm = minutes
+      ? fullPcm.subarray(
+          0,
+          Math.min(
+            fullPcm.length,
+            Math.floor(minutes * 60 * SAMPLE_RATE * BYTES_PER_SAMPLE * CHANNELS),
+          ),
+        )
+      : fullPcm;
     const chunks = chunkWithHeaders(pcm, BYTES_PER_CHUNK, OVERLAP_BYTES);
     tracks.push({ source: 'mic', chunks });
     const durationSec = pcm.length / (SAMPLE_RATE * BYTES_PER_SAMPLE);
@@ -231,9 +285,15 @@ async function main(): Promise<void> {
     chunksSent: 0,
     transcriptsReceived: 0,
     suggestionsReceived: 0,
+    agendaUpdates: 0,
+    coachSuggestions: 0,
     actionsCompleted: 0,
     errors: 0,
+    intelligenceErrors: 0,
+    coachTips: [],
   };
+  const seenSuggestionIds = new Set<string>();
+  const reportedSuggestionIds = new Set<string>();
 
   await new Promise<void>((resolve, reject) => {
     ws.on('open', resolve);
@@ -270,7 +330,16 @@ async function main(): Promise<void> {
           break;
 
         case 'action.suggested':
-          stats.suggestionsReceived++;
+          if (!seenSuggestionIds.has(msg.action?.id)) {
+            seenSuggestionIds.add(msg.action?.id);
+            stats.suggestionsReceived++;
+          }
+          // Streaming cards are broadcast repeatedly as their JSON fields
+          // arrive. Count the stable id once and print only the finalized card.
+          if (msg.action?.streaming === true || reportedSuggestionIds.has(msg.action?.id)) {
+            break;
+          }
+          reportedSuggestionIds.add(msg.action?.id);
           console.log(`\n  \x1b[32m>>> SUGGESTION: [${msg.action.type}] ${msg.action.title}\x1b[0m`);
           console.log(`      ${msg.action.description}`);
           console.log(`      Trigger: "${msg.action.triggerQuote.slice(0, 80)}..."`);
@@ -279,6 +348,37 @@ async function main(): Promise<void> {
             ws.send(JSON.stringify({ type: 'action.approve', actionId: msg.action.id }));
           }
           console.log('');
+          break;
+
+        case 'agenda.status':
+          stats.agendaUpdates++;
+          stats.lastAgendaStatus = msg.status;
+          console.log(`\n  \x1b[35m>>> AGENDA UPDATE\x1b[0m`);
+          for (const item of msg.status?.items ?? []) {
+            console.log(`      [${item.state ?? 'unknown'}] ${item.text ?? item.id}`);
+            if (item.evidence) console.log(`        Evidence: "${item.evidence}"`);
+          }
+          if (msg.status?.missing?.length) {
+            console.log(`      Missing: ${msg.status.missing.join('; ')}`);
+          }
+          console.log('');
+          break;
+
+        case 'coach.suggestion':
+          stats.coachSuggestions++;
+          stats.coachTips.push(msg.suggestion ?? {});
+          console.log(`\n  \x1b[35m>>> COACH: ${msg.suggestion?.headline ?? 'Live guidance'}\x1b[0m`);
+          if (msg.suggestion?.phrasing) console.log(`      Say: "${msg.suggestion.phrasing}"`);
+          if (msg.suggestion?.why) console.log(`      Why: ${msg.suggestion.why}`);
+          if (Number.isFinite(msg.suggestion?.latencyMs)) {
+            console.log(`      Latency: ${msg.suggestion.latencyMs}ms`);
+          }
+          console.log('');
+          break;
+
+        case 'intelligence.error':
+          stats.intelligenceErrors++;
+          console.log(`  \x1b[31m  > INTELLIGENCE ERROR [${msg.source}]: ${msg.message}\x1b[0m`);
           break;
 
         case 'action.started':
@@ -323,7 +423,7 @@ async function main(): Promise<void> {
   ws.send(JSON.stringify({
     type: 'session.start',
     title: manifest.meetingContext?.title ?? `Replay: ${basename(recordingDir)}`,
-    agenda: manifest.meetingContext?.agenda,
+    agenda: effectiveAgenda,
     attendees: manifest.meetingContext?.participants,
   }));
 
@@ -394,6 +494,13 @@ async function main(): Promise<void> {
   console.log('  Waiting 25s for in-flight transcriptions and intelligence eval...');
   await sleep(25000);
 
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/debug`);
+    if (response.ok) stats.debugSnapshot = await response.json();
+  } catch {
+    // Summary remains useful from WebSocket events when debug is unavailable.
+  }
+
   // Stop session
   console.log('\n─── Stopping Session ───────────────────────────────────────────\n');
   if (connected) {
@@ -415,8 +522,54 @@ function printSummary(stats: Stats): void {
   console.log(`  Audio chunks sent:     ${stats.chunksSent}`);
   console.log(`  Transcripts received:  ${stats.transcriptsReceived}`);
   console.log(`  Suggestions generated: ${stats.suggestionsReceived}`);
+  console.log(`  Agenda updates:        ${stats.agendaUpdates}`);
+  console.log(`  Coach tips:            ${stats.coachSuggestions}`);
   console.log(`  Actions completed:     ${stats.actionsCompleted}`);
   console.log(`  Errors:                ${stats.errors}`);
+  console.log(`  Intelligence errors:   ${stats.intelligenceErrors}`);
+  if (stats.lastAgendaStatus?.items?.length) {
+    console.log('');
+    console.log('  Final agenda:');
+    for (const item of stats.lastAgendaStatus.items) {
+      console.log(`    [${item.state ?? 'unknown'}] ${item.text ?? item.id}`);
+    }
+  }
+  if (stats.coachTips.length > 0) {
+    console.log('');
+    console.log('  Coach guidance:');
+    for (const tip of stats.coachTips) {
+      console.log(
+        `    [${tip.incidentType ?? tip.kind ?? 'tip'}] ${tip.headline ?? 'Live guidance'}` +
+          `${Number.isFinite(tip.latencyMs) ? ` (${tip.latencyMs}ms)` : ''}`,
+      );
+      if (tip.phrasing) console.log(`      "${tip.phrasing}"`);
+    }
+  }
+  const realtime = stats.debugSnapshot?.intelligence?.realtime;
+  const transcription = stats.debugSnapshot?.transcription;
+  if (realtime || transcription) {
+    console.log('');
+    console.log('  Live metrics:');
+    if (transcription) {
+      console.log(
+        `    ASR p50/p95: ${transcription.providerLatencyP50Ms ?? 'n/a'}/` +
+          `${transcription.providerLatencyP95Ms ?? 'n/a'}ms, errors ` +
+          `${Math.round((transcription.errorRate ?? 0) * 1000) / 10}%`,
+      );
+    }
+    if (realtime?.agenda) {
+      console.log(
+        `    Agenda evals: ${realtime.agenda.completedEvals}, avg ` +
+          `${realtime.agenda.avgLatencyMs}ms, stale ${realtime.agenda.staleResults}`,
+      );
+    }
+    if (realtime?.coach) {
+      console.log(
+        `    Coach evals: ${realtime.coach.evalsRun}, avg ` +
+          `${realtime.coach.avgLatencyMs}ms, stale ${realtime.coach.staleResults}`,
+      );
+    }
+  }
   console.log('');
 
   if (stats.transcriptsReceived === 0) {

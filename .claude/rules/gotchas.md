@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 13 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 14 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -24,6 +24,7 @@ Organized by category. 13 items + recovery playbook, condensed format. Original 
 | 16 | Silero VAD model required for silence handling + latency; whisper-cpp version gate | Environment |
 | 17 | TranscriptSegment.duration is deprecated — use audioDurationSec / transcriptionLatencyMs | Backend |
 | 18 | AVAudioEngine input device-change crashes — installTap NSException → SIGABRT | Frontend |
+| 19 | Silero VAD Metal graph aborts on pre-M5 Apple Silicon | Frontend |
 | — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
@@ -143,6 +144,22 @@ HALPropertyListener::Call
   5. Failed restarts retry up to 3× with exponential backoff (200/400/800ms). If all retries fail, `onDeviceChangeError?()` surfaces a notification but the meeting keeps going (SCK / meeting audio is independent).
 **Verification**: After applying, manually unplug/replug the input device (or AirPods reconnect) mid-session and confirm `[AudioCapture] mic restarted successfully after device change` appears in `~/.meeting-copilot/app.log`.
 **Pattern**: `app/MeetingCopilot/Sources/Core/Audio/AudioCaptureManager.swift` (the entire mic path); `app/MeetingCopilot/ObjCExceptionBridge/` (bridge target); `app/MeetingCopilot/Package.swift` (target wiring).
+
+### 19. Silero VAD Metal Graph Aborts on Pre-M5 Apple Silicon
+**Symptom**: Starting real VAD processing aborts the entire Swift process in
+`ggml_backend_sched_buffer_supported` with a message about a tensor allocated in
+a Metal buffer that cannot run the operation. Because whisper.cpp aborts instead
+of returning an error, Swift cannot recover or fall back.
+**Cause**: whisper.cpp 1.8.3 can build an invalid mixed Metal/CPU graph for the
+Silero VAD on Apple Silicon without the newer tensor API (confirmed on M2 Max).
+The VAD model is only about 0.88 MB, so GPU setup provides no useful latency
+benefit.
+**Solution**: `VADProbe` defaults `useGPU` to `false`. Keep it on CPU unless a
+new whisper.cpp release is explicitly soak-tested on every supported Mac tier.
+Run the opt-in `RealAudioVADTests` against a private recording before changing
+this default.
+**Pattern**: `app/MeetingCopilot/Sources/Core/Audio/VADProbe.swift`,
+`app/MeetingCopilot/Tests/RealAudioVADTests.swift`.
 
 ### 11. WKWebView Needs Health Polling Before Loading Localhost
 **Symptom**: Blank white panel on app launch

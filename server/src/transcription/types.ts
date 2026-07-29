@@ -1,5 +1,7 @@
 export interface TranscriptSegment {
   id: string;
+  /** Stable client-generated id for tracing capture → decode → broadcast. */
+  chunkId?: string;
   text: string;
   source: 'mic' | 'meeting';
   label: string; // '[You]' or '[Meeting]'
@@ -8,6 +10,11 @@ export interface TranscriptSegment {
   audioDurationSec: number;
   /** Whisper / provider processing latency in milliseconds. */
   transcriptionLatencyMs: number;
+  /** Time spent waiting for a provider slot. */
+  queueLatencyMs?: number;
+  /** Total latency from chunk enqueue through provider completion. */
+  endToEndLatencyMs?: number;
+  provider?: string;
   /** When the Swift app started capturing this chunk's audio (ISO-8601). */
   captureStartedAt?: string;
   /** When the Swift app finished capturing this chunk's audio (ISO-8601). */
@@ -35,4 +42,17 @@ export interface TranscriptionProvider {
     options?: TranscribeOptions,
   ): Promise<{ text: string }>;
   isAvailable(): Promise<boolean>;
+  getInfo(): TranscriptionProviderInfo;
+}
+
+export interface TranscriptionProviderInfo {
+  mode: 'whisper-server' | 'parakeet' | 'deepgram';
+  model?: string;
+  endpoint?: string;
+  supportsPrompt: boolean;
+  supportsKeyterms: boolean;
+  supportsPartials: boolean;
+  streaming: boolean;
+  supportsDiarization: boolean;
+  audioStorage: 'memory-only' | 'remote-ephemeral';
 }

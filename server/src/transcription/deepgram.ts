@@ -1,4 +1,4 @@
-import type { TranscribeOptions, TranscriptionProvider } from './types.js';
+import type { TranscribeOptions, TranscriptionProvider, TranscriptionProviderInfo } from './types.js';
 
 const API_BASE = 'https://api.deepgram.com/v1';
 const LISTEN_PATH = '/listen';
@@ -18,7 +18,7 @@ interface DeepgramResponse {
 /**
  * DeepgramProvider — transcribes WAV buffers via the Deepgram REST API.
  *
- * Uses the nova-2 model with smart formatting. Requires DEEPGRAM_API_KEY.
+ * Uses the Nova-3 model with smart formatting. Requires DEEPGRAM_API_KEY.
  * No SDK dependency — uses plain fetch against the REST endpoint.
  */
 export class DeepgramProvider implements TranscriptionProvider {
@@ -54,13 +54,22 @@ export class DeepgramProvider implements TranscriptionProvider {
     }
   }
 
-  getInfo(): { mode: 'deepgram'; model: 'nova-2' } {
-    return { mode: 'deepgram', model: 'nova-2' };
+  getInfo(): TranscriptionProviderInfo {
+    return {
+      mode: 'deepgram',
+      model: 'nova-3',
+      supportsPrompt: true,
+      supportsKeyterms: true,
+      supportsPartials: false,
+      streaming: false,
+      supportsDiarization: false,
+      audioStorage: 'remote-ephemeral',
+    };
   }
 
   async transcribe(
     wavBuffer: Buffer,
-    _options?: TranscribeOptions,
+    options?: TranscribeOptions,
   ): Promise<{ text: string }> {
     // Deepgram exposes its own `keywords` param rather than whisper's
     // initial_prompt; intentionally ignored for MVP.
@@ -69,10 +78,14 @@ export class DeepgramProvider implements TranscriptionProvider {
     }
 
     const params = new URLSearchParams({
-      model: 'nova-2',
+      model: 'nova-3',
       smart_format: 'true',
       language: 'en',
     });
+    // Nova-3 keyterms are the closest equivalent to Whisper initial_prompt.
+    for (const term of (options?.prompt ?? '').split(/[,;\n]/).map((s) => s.trim()).filter(Boolean).slice(0, 50)) {
+      params.append('keyterm', term.slice(0, 100));
+    }
 
     let response: Response;
     try {

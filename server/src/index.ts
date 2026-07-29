@@ -1,15 +1,13 @@
 import { createServer } from 'node:http';
-import { unlinkSync, existsSync, mkdirSync, chmodSync, appendFileSync, statSync } from 'node:fs';
+import { unlinkSync, existsSync, mkdirSync, chmodSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 
-// File-based debug logging
-const LOG_FILE = join(homedir(), '.meeting-copilot', 'server.log');
+import { log, safeErrorMessage } from './logging.js';
+
 function debugLog(msg: string): void {
-  const ts = new Date().toISOString();
-  const line = `[${ts}] ${msg}\n`;
-  try { appendFileSync(LOG_FILE, line); } catch {}
+  log('server', msg);
   console.log(msg);
 }
 import express from 'express';
@@ -50,6 +48,7 @@ import { paidApiDisabled } from './api/killswitch.js';
 import { disposeAllWarmSessions } from './persistent-claude.js';
 import { cliHealth } from './claude-cli.js';
 import { getSettings } from './settings.js';
+import { LLM_CONFIG, MODEL_CONFIG } from './model-config.js';
 
 // Load environment — prefer ~/.meeting-copilot/.env so a packaged .app
 // user has a stable, user-writable location for API keys that survives
@@ -87,6 +86,7 @@ type InboundMessage =
       type: 'audio_chunk';
       data: string; // base64 WAV
       source: 'mic' | 'meeting';
+      chunkId?: string;
       audioDurationSec?: number;
       captureStartedAt?: string;
       captureEndedAt?: string;
@@ -286,13 +286,17 @@ agendaTracker.on('eval', (info: Record<string, unknown>) => {
   eventLogger?.log('agenda.eval', info);
 });
 
-// ─── Opt-in Monitors: Fact-check + Coach ───────────────────────────────────
-// Both are fully inert (no timers, no API calls) until toggled on, so the
-// extra per-meeting cost is strictly opt-in.
+// ─── Live Monitors: Fact-check + Recovery Coach ────────────────────────────
+// Fact-check remains opt-in. Coach is the primary live product loop and starts
+// on by default for new installs, while still respecting the persisted toggle.
 
 const factCheck = new FactCheckMonitor();
 const coach = new CoachMonitor();
 const featureFlags = { factcheck: false, coach: false };
+debug.setRealtimeMetricsProvider(() => ({
+  agenda: agendaTracker.getMetrics(),
+  coach: coach.getMetrics(),
+}));
 // Flags raised this session — replayed to late-joining clients (page reload).
 let sessionFactFlags: FactFlag[] = [];
 let lastCoachSuggestion: CoachSuggestion | null = null;
@@ -324,8 +328,11 @@ coach.on('suggestion', (suggestion: CoachSuggestion) => {
   lastCoachSuggestion = suggestion;
   eventLogger?.log('coach.suggestion', {
     kind: suggestion.kind,
+    incidentType: suggestion.incidentType,
     priority: suggestion.priority,
+    confidence: suggestion.confidence,
     headline: suggestion.headline,
+    latencyMs: suggestion.latencyMs,
   });
   broadcast({ type: 'coach.suggestion', suggestion });
 });
@@ -489,7 +496,7 @@ function handleWsConnection(ws: WebSocket, label: string): void {
     for (const flag of sessionFactFlags) {
       ws.send(JSON.stringify({ type: 'factcheck.flag', flag }));
     }
-    if (lastCoachSuggestion) {
+    if (lastCoachSuggestion && lastCoachSuggestion.expiresAt > Date.now()) {
       ws.send(JSON.stringify({ type: 'coach.suggestion', suggestion: lastCoachSuggestion }));
     }
   }
@@ -499,11 +506,9 @@ function handleWsConnection(ws: WebSocket, label: string): void {
       const message = JSON.parse(raw.toString()) as InboundMessage;
       await handleInboundMessage(message);
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      const stack = error instanceof Error && error.stack ? `\n${error.stack}` : '';
       // Use debugLog (writes to server.log) so handler failures are diagnosable
       // without needing to capture the child process's stderr pipe.
-      debugLog(`[${label}] Handler error: ${msg}${stack}`);
+      debugLog(`[${label}] Handler error: ${safeErrorMessage(error)}`);
     }
   });
 
@@ -547,6 +552,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
           wavBuffer,
           message.source,
           {
+            chunkId: message.chunkId,
             audioDurationSec: message.audioDurationSec,
             captureStartedAt: message.captureStartedAt,
             captureEndedAt: message.captureEndedAt,
@@ -578,11 +584,11 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
             isContinuation,
           );
           if (!dedupedText) {
-            debugLog(`[Dedup] Dropped duplicate segment from ${segment.source}: "${segment.text.slice(0, 60)}"`);
+            debugLog(`[Dedup] Dropped duplicate segment from ${segment.source}`);
             break;
           }
           if (dedupedText !== segment.text) {
-            debugLog(`[Dedup] Trimmed ${segment.source}: "${segment.text}" → "${dedupedText}"`);
+            debugLog(`[Dedup] Trimmed overlap from ${segment.source}`);
             segment.text = dedupedText;
             segment.wordCount = dedupedText.split(/\s+/).filter(Boolean).length;
           }
@@ -720,9 +726,8 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       intelligence.start();
       sessionActive = true;
 
-      // Monitors are opt-in per meeting; the per-session starting state comes
-      // from the settings' monitorDefaults (still OFF unless the user opted
-      // in via the settings panel — cost is never incurred silently).
+      // Per-session starting state comes from persisted settings. Recovery
+      // coach defaults on for new installs; fact-check remains off by default.
       const monitorDefaults = getSettings().monitorDefaults;
       featureFlags.factcheck = monitorDefaults.factcheck;
       featureFlags.coach = monitorDefaults.coach;
@@ -1535,12 +1540,23 @@ transcriptStitcher.on(
   ({ segment, final }: { segment: TranscriptSegment; final: boolean }) => {
     if (!sessionActive || !sessionStore) return;
 
+    // Coach sees stable open-segment updates as well as the final cohesive
+    // turn. This lets meeting-side pressure/questions start inference before
+    // the stitcher's silence timeout, while mic answer review waits for final.
+    if (coach.isRunning()) {
+      coach.noteSegment(segment.text, segment.source, {
+        final,
+        segmentId: segment.id,
+        timestamp: segment.timestamp,
+      });
+    }
+
     if (final) {
       sessionStore.addTranscript(segment);
       intelligence.addTranscript(segment);
       // Event-driven monitor triggers fire on the cleaned, cohesive segment.
       if (factCheck.isRunning()) factCheck.noteSegment(segment.text);
-      if (coach.isRunning()) coach.noteSegment(segment.text, segment.source);
+      agendaTracker.noteSegment(segment.text, segment.source);
       debug.recordTranscriptWords(segment.wordCount);
       debug.recordTranscriptSegment(segment);
       eventLogger?.log('transcript.segment', {
@@ -1646,27 +1662,27 @@ async function start(): Promise<void> {
     console.warn('[Cleanup] Errors:', cleanupResult.errors);
   }
 
-  // Check whisper availability
-  const whisperOk = await transcription.isProviderAvailable();
-  whisperAvailable = whisperOk;
-  const whisperInfo = (transcription as any).provider?.getInfo?.() ?? {};
-  console.log(`[Whisper] Available: ${whisperOk}`);
-  if (whisperOk) {
-    if (whisperInfo.endpoint) {
-      console.log(`[Whisper] Endpoint: ${whisperInfo.endpoint}`);
+  // Check selected transcription provider availability.
+  const transcriptionOk = await transcription.isProviderAvailable();
+  whisperAvailable = transcriptionOk;
+  const transcriptionInfo = transcription.providerInfo;
+  console.log(`[Transcription] ${transcriptionInfo.mode} available: ${transcriptionOk}`);
+  if (transcriptionOk) {
+    if (transcriptionInfo.endpoint) {
+      console.log(`[Transcription] Endpoint: ${transcriptionInfo.endpoint}`);
     }
   }
 
-  // All realtime intelligence (triage, suggestions, agenda, coach, fact-check)
-  // and every worker now run on the headless CLIs (the subscription). The
-  // OpenAI/Anthropic keys power ONLY the ⚡ Fast button and highlight-to-ask.
   const openaiOk = isOpenAiApiAvailable();
   const anthropicOk = isAnthropicApiAvailable();
   if (paidApiDisabled()) {
     debugLog('[LLM] COPILOT_DISABLE_PAID_API set — ALL inference forced to the CLIs. Zero OpenAI/Anthropic spend this run (Fast + highlight-to-ask fall back to CLI).');
   } else {
-    debugLog('[LLM] triage/suggest/agenda/coach/factcheck=cli (subscription) · workers=cli');
-    debugLog(`[LLM] Fast button=${openaiOk ? 'openai:gpt-5.4-mini+web_search' : 'cli:haiku+WebSearch (no OPENAI_API_KEY)'} · highlight-to-ask=${openaiOk ? 'openai' : anthropicOk ? 'anthropic' : 'cli'}`);
+    const liveProviders = LLM_CONFIG.liveTransport === 'cli'
+      ? 'cli'
+      : [openaiOk ? 'openai' : '', anthropicOk ? 'anthropic' : ''].filter(Boolean).join('+') || 'cli-fallback';
+    debugLog(`[LLM] live=${liveProviders} agenda=${MODEL_CONFIG.agenda}/${MODEL_CONFIG.agendaReconcile} coach=${MODEL_CONFIG.coach} · workers=${LLM_CONFIG.workerTransport}`);
+    debugLog(`[LLM] Fast button=${openaiOk ? 'openai:configured+web_search' : 'cli:haiku+WebSearch (no OPENAI_API_KEY)'} · highlight-to-ask=${openaiOk ? 'openai' : anthropicOk ? 'anthropic' : 'cli'}`);
   }
 
   // Start listening on Unix domain socket

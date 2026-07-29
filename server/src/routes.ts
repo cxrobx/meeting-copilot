@@ -44,13 +44,13 @@ interface PreflightCheck {
   detail?: string;
 }
 
-function runPreflightChecks(whisperAvailable: boolean | null): PreflightCheck[] {
+function runPreflightChecks(transcriptionAvailable: boolean | null, providerName = 'transcription provider'): PreflightCheck[] {
   const checks: PreflightCheck[] = [];
 
   checks.push({
-    name: 'whisper',
-    ok: whisperAvailable === true,
-    detail: whisperAvailable === true ? 'Whisper transcription available' : 'Whisper not reachable — transcription will fail',
+    name: 'transcription',
+    ok: transcriptionAvailable === true,
+    detail: transcriptionAvailable === true ? `${providerName} available` : `${providerName} not reachable — transcription will fail`,
   });
 
   let claudeOk = false;
@@ -64,13 +64,15 @@ function runPreflightChecks(whisperAvailable: boolean | null): PreflightCheck[] 
     detail: claudeOk ? 'Claude CLI available' : 'claude CLI not found — intelligence and workers will fail',
   });
 
-  const modelPath = join(homedir(), '.meeting-copilot', 'models', 'ggml-base.en.bin');
-  const modelExists = existsSync(modelPath);
-  checks.push({
-    name: 'whisper-model',
-    ok: modelExists,
-    detail: modelExists ? 'Whisper model present' : `Model not found at ${modelPath}`,
-  });
+  if (providerName === 'whisper-server') {
+    const modelPath = join(homedir(), '.meeting-copilot', 'models', 'ggml-base.en.bin');
+    const modelExists = existsSync(modelPath);
+    checks.push({
+      name: 'whisper-model',
+      ok: modelExists,
+      detail: modelExists ? 'Whisper model present' : `Model not found at ${modelPath}`,
+    });
+  }
 
   const sessionsDir = join(homedir(), '.meeting-copilot', 'sessions');
   let sessionsWritable = false;
@@ -158,16 +160,17 @@ export function createRoutes(ctx: RouteContext): Router {
   // GET /debug
   router.get('/debug', ctx.debug.handler());
 
-  // Health check — re-probes whisper so the response reflects the current
+  // Health check — re-probes the selected ASR provider so the response reflects the current
   // subprocess state, not just the boot-time snapshot. The probe has a 1s
   // timeout in WhisperProvider.isAvailable() so this stays cheap.
   router.get('/health', async (_req, res) => {
     const { store, active } = ctx.getSession();
-    const whisperAvailable = await ctx.probeWhisperAvailable();
+    const transcriptionAvailable = await ctx.probeWhisperAvailable();
     res.json({
       status: 'ok',
       session: active ? store?.id : null,
-      whisperAvailable,
+      transcriptionAvailable,
+      transcription: ctx.transcription.providerInfo,
     });
   });
 
@@ -197,7 +200,7 @@ export function createRoutes(ctx: RouteContext): Router {
   // Preflight check — re-probes whisper to reflect current state
   router.get('/preflight', async (_req, res) => {
     const whisperOk = await ctx.probeWhisperAvailable();
-    const checks = runPreflightChecks(whisperOk);
+    const checks = runPreflightChecks(whisperOk, ctx.transcription.providerInfo.mode);
     const allOk = checks.every((c) => c.ok);
     res.json({ ok: allOk, checks });
   });

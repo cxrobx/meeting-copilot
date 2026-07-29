@@ -22,15 +22,18 @@ function makeWorker(name: string, result?: Partial<WorkerResult>): Worker {
 }
 
 function makeSuggestion(overrides?: Partial<ActionSuggestion>): ActionSuggestion {
-  return {
+  const suggestion: ActionSuggestion = {
     type: 'research',
     title: 'Test suggestion',
     description: 'Test description',
-    triggerQuote: 'someone said something',
+    triggerQuote: '',
     estimatedDurationSec: 10,
     params: { query: 'test' },
     ...overrides,
   };
+  suggestion.triggerQuote = overrides?.triggerQuote
+    ?? `${suggestion.title} came up as a distinct actionable moment in the meeting.`;
+  return suggestion;
 }
 
 describe('WorkerRegistry', () => {
@@ -62,6 +65,61 @@ describe('WorkerRegistry', () => {
     const second = registry.suggest(s);
     expect(first).not.toBeNull();
     expect(second).toBeNull();
+  });
+
+  it('remembers a trigger after its card is dismissed', () => {
+    const first = registry.suggest(makeSuggestion({
+      title: 'Research autonomous agent permissions',
+      triggerQuote: 'What permissions do I need to set up in order for this to flow freely?',
+      params: { query: 'agent permissions' },
+    }))!;
+    registry.dismiss(first.id);
+
+    const repeatedMoment = registry.suggest(makeSuggestion({
+      type: 'codegen',
+      title: 'Generate an agent permission settings file',
+      triggerQuote: 'What permissions do I need to set up in order for this to flow freely?',
+      params: { task: 'write settings' },
+    }));
+    expect(repeatedMoment).toBeNull();
+  });
+
+  it('deduplicates same-type title paraphrases across different transcript quotes', () => {
+    registry.suggest(makeSuggestion({
+      type: 'summary',
+      title: 'Document Fable Codex agent orchestration workflow',
+      triggerQuote: 'Fable builds the plan and Codex implements the tickets.',
+      params: { focus: 'workflow' },
+    }));
+
+    const paraphrase = registry.suggest(makeSuggestion({
+      type: 'summary',
+      title: 'Summarize Fable Codex orchestration workflow',
+      triggerQuote: 'We add verification gates at the end.',
+      params: { focus: 'gates' },
+    }));
+    expect(paraphrase).toBeNull();
+  });
+
+  it('deduplicates a finalized streaming card against prior meeting history', () => {
+    registry.suggest(makeSuggestion({
+      title: 'Research autonomous agent permissions',
+      triggerQuote: 'What permissions do I need to set up in order for this to flow freely?',
+      params: { query: 'agent permissions' },
+    }));
+    registry.suggestStreaming('stream-duplicate', {
+      type: 'codegen',
+      title: 'Generate permission settings',
+    });
+
+    const finalized = registry.finalizeStreaming('stream-duplicate', makeSuggestion({
+      type: 'codegen',
+      title: 'Generate permission settings',
+      triggerQuote: 'What permissions do I need to set up in order for this to flow freely?',
+      params: { task: 'write settings' },
+    }));
+    expect(finalized).toBeNull();
+    expect(registry.getAction('stream-duplicate')).toBeUndefined();
   });
 
   it('allows different suggestions', () => {
@@ -134,6 +192,24 @@ describe('WorkerRegistry', () => {
 
     expect(a1.state).toBe('expired');
     expect(a2.state).toBe('expired');
+  });
+
+  it('clears meeting-scoped dedup history when the meeting ends', async () => {
+    registry.suggest(makeSuggestion({
+      title: 'Research autonomous agent permissions',
+      triggerQuote: 'What permissions do I need to set up in order for this to flow freely?',
+      params: { query: 'agent permissions' },
+    }));
+
+    await registry.onMeetingEnd();
+
+    const nextMeeting = registry.suggest(makeSuggestion({
+      type: 'codegen',
+      title: 'Generate permission settings',
+      triggerQuote: 'What permissions do I need to set up in order for this to flow freely?',
+      params: { task: 'write settings' },
+    }));
+    expect(nextMeeting).not.toBeNull();
   });
 
   it('retries transient failures up to 2 times (3 attempts total)', async () => {

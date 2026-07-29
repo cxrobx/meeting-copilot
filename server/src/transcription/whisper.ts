@@ -1,4 +1,4 @@
-import type { TranscribeOptions, TranscriptionProvider } from './types.js';
+import type { TranscribeOptions, TranscriptionProvider, TranscriptionProviderInfo } from './types.js';
 
 const DEFAULT_SERVER_URL = 'http://127.0.0.1:8078';
 const INFERENCE_PATH = '/inference';
@@ -12,9 +12,24 @@ const TRANSCRIPTION_TIMEOUT_MS = 30_000;
  */
 export class WhisperProvider implements TranscriptionProvider {
   private serverUrl: string;
+  private info: TranscriptionProviderInfo;
 
-  constructor(serverUrl: string = DEFAULT_SERVER_URL) {
+  constructor(
+    serverUrl: string = DEFAULT_SERVER_URL,
+    info: Partial<TranscriptionProviderInfo> = {},
+  ) {
     this.serverUrl = serverUrl.replace(/\/$/, '');
+    this.info = {
+      mode: info.mode ?? 'whisper-server',
+      model: info.model,
+      endpoint: `${this.serverUrl}${INFERENCE_PATH}`,
+      supportsPrompt: info.supportsPrompt ?? true,
+      supportsKeyterms: info.supportsKeyterms ?? false,
+      supportsPartials: false,
+      streaming: false,
+      supportsDiarization: false,
+      audioStorage: 'memory-only',
+    };
   }
 
   async isAvailable(): Promise<boolean> {
@@ -28,8 +43,8 @@ export class WhisperProvider implements TranscriptionProvider {
     }
   }
 
-  getInfo(): { mode: 'whisper-server'; endpoint: string } {
-    return { mode: 'whisper-server', endpoint: `${this.serverUrl}${INFERENCE_PATH}` };
+  getInfo(): TranscriptionProviderInfo {
+    return this.info;
   }
 
   async transcribe(
@@ -42,7 +57,7 @@ export class WhisperProvider implements TranscriptionProvider {
       new Blob([wavBuffer], { type: 'audio/wav' }),
       'chunk.wav',
     );
-    if (options?.prompt) {
+    if (options?.prompt && this.info.supportsPrompt) {
       // whisper-server's /inference endpoint accepts `prompt` as a form
       // field. Matches the CLI's --prompt flag. Capped at ~1500 chars
       // upstream to stay within whisper's 448-token context budget.

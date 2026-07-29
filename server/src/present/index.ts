@@ -1803,6 +1803,10 @@ const PRESENT_HTML = `<!DOCTYPE html>
     flex-shrink: 0;
     margin-top: 2px;
   }
+  .coach-kind.pressure, .coach-kind.objection { background: var(--gb-red); }
+  .coach-kind.bad_answer, .coach-kind.confusion, .coach-kind.contradiction { background: var(--gb-blue); }
+  .coach-kind.overcommitment, .coach-kind.agenda_risk { background: var(--gb-peach); }
+  .coach-kind.decision, .coach-kind.commitment, .coach-kind.question { background: var(--gb-green); }
   .coach-body { flex: 1; min-width: 0; }
   .coach-phrasing { font-size: 13px; font-weight: 600; color: var(--gb-text); line-height: 1.45; }
   .coach-why { font-size: 11px; color: var(--gb-subtext0); margin-top: 2px; }
@@ -2076,22 +2080,28 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .agenda-panel.hidden { display: none; }
   .agenda-header {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
+    gap: 8px;
     margin-bottom: 8px;
     padding: 0 4px;
   }
   .agenda-title {
+    flex: 0 0 auto;
     font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--gb-overlay2);
+    white-space: nowrap;
   }
   .agenda-progress {
+    min-width: 0;
     font-size: 10px;
     color: var(--gb-subtext0);
     font-weight: 600;
+    line-height: 1.4;
+    text-align: right;
   }
   .agenda-progress.all-covered { color: var(--gb-green); }
   .agenda-item {
@@ -3215,7 +3225,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
         '<div class="quick-actions-title">Quick Actions</div>' +
         '<div class="monitor-toggles">' +
           '<button class="monitor-toggle' + (featureState.factcheck ? ' on' : '') + '" onclick="toggleFeature(\\'factcheck\\')" title="Live fact-checking of claims \u2014 extra API cost while on">Fact-check: ' + (featureState.factcheck ? 'On' : 'Off') + '</button>' +
-          '<button class="monitor-toggle' + (featureState.coach ? ' on' : '') + '" onclick="toggleFeature(\\'coach\\')" title="Suggests high-priority things to say \u2014 extra API cost while on">Coach: ' + (featureState.coach ? 'On' : 'Off') + '</button>' +
+          '<button class="monitor-toggle' + (featureState.coach ? ' on' : '') + '" onclick="toggleFeature(\\'coach\\')" title="Real-time recovery advice for pressure, objections, and weak answers">Coach: ' + (featureState.coach ? 'On' : 'Off') + '</button>' +
         '</div>' +
       '</div>' +
       '<input class="quick-actions-input" id="quickPrompt" placeholder="Topic or prompt (optional)...">' +
@@ -4612,15 +4622,35 @@ const PRESENT_HTML = `<!DOCTYPE html>
   // ─── Coach Strip ("say next") ─────────────────────────────
   function renderCoachSuggestion(s) {
     if (coachExpireTimer) { clearTimeout(coachExpireTimer); coachExpireTimer = null; }
+    var expiresAt = Number(s.expiresAt || 0);
+    var remainingMs = expiresAt ? expiresAt - Date.now() : 15000;
+    if (remainingMs <= 0) {
+      window.dismissCoach();
+      return;
+    }
+    var incident = s.incidentType || s.kind || 'address';
+    var labels = {
+      pressure: 'Pressure',
+      objection: 'Objection',
+      bad_answer: 'Recover',
+      overcommitment: 'Qualify',
+      confusion: 'Clarify',
+      contradiction: 'Correct',
+      agenda_risk: 'Agenda',
+      decision: 'Decision',
+      commitment: 'Commitment',
+      question: 'Answer',
+    };
+    var label = labels[incident] || 'Coach';
     coachSlot.innerHTML = '<div class="coach-strip">' +
-      '<span class="coach-kind">' + escapeHtml(s.kind) + '</span>' +
+      '<span class="coach-kind ' + escapeHtml(incident) + '">' + escapeHtml(label) + '</span>' +
       '<div class="coach-body">' +
         '<div class="coach-phrasing">' + escapeHtml(s.phrasing) + '</div>' +
         '<div class="coach-why">' + escapeHtml(s.headline) + (s.why ? ' \\u2014 ' + escapeHtml(s.why) : '') + '</div>' +
       '</div>' +
       '<button class="coach-close" onclick="dismissCoach()" title="Dismiss">\\u00d7</button>' +
     '</div>';
-    coachExpireTimer = setTimeout(function() { window.dismissCoach(); }, 90000);
+    coachExpireTimer = setTimeout(function() { window.dismissCoach(); }, Math.min(30000, remainingMs));
   }
 
   window.dismissCoach = function() {
@@ -4853,8 +4883,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
         '<div class="settings-field"><label>Session retention (days)</label>' +
           '<input type="number" id="setRetention" min="7" max="3650" value="' + (s.retentionDays || 90) + '">' +
           '<div class="settings-hint">Sessions older than this are deleted at startup and on save.</div></div>' +
-        '<div class="settings-field"><label>Monitors on by default</label>' +
-          '<label class="settings-check"><input type="checkbox" id="setCoach"' + (s.monitorDefaults && s.monitorDefaults.coach ? ' checked' : '') + '> Coach (extra cost while on)</label>' +
+        '<div class="settings-field"><label>Live assistance on by default</label>' +
+          '<label class="settings-check"><input type="checkbox" id="setCoach"' + (s.monitorDefaults && s.monitorDefaults.coach ? ' checked' : '') + '> Recovery coach (recommended)</label>' +
           '<label class="settings-check" style="margin-top:4px"><input type="checkbox" id="setFactcheck"' + (s.monitorDefaults && s.monitorDefaults.factcheck ? ' checked' : '') + '> Fact-check (extra cost while on)</label></div>' +
         '<div class="settings-field"><label>Summaries</label>' +
           '<label class="settings-check"><input type="checkbox" id="setAutoWrite"' + (s.summaryAutoWrite ? ' checked' : '') + '> Auto-save summaries to ~/Documents/CX/Meetings</label></div>' +

@@ -29,6 +29,76 @@ const DEFAULT_SUGGESTION_TTL_MS = (() => {
   const raw = Number(process.env.SUGGESTION_TTL_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 60_000;
 })();
+// Cards expire quickly in the UI, but their topic must remain remembered for
+// the whole meeting. Otherwise the rolling transcript causes the model to
+// rediscover the same "actionable" quote every minute and refill the panel
+// with paraphrases of an expired card.
+const MAX_SUGGESTION_HISTORY = 200;
+const TITLE_TOPIC_STOP_WORDS = new Set([
+  'analyze',
+  'analysis',
+  'build',
+  'create',
+  'define',
+  'document',
+  'draft',
+  'generate',
+  'investigate',
+  'produce',
+  'research',
+  'scaffold',
+  'summarize',
+  'summary',
+  'the',
+  'this',
+  'that',
+  'with',
+  'for',
+  'from',
+  'into',
+  'using',
+]);
+
+interface SuggestionFingerprint {
+  type: string;
+  titleTokens: Set<string>;
+  triggerTokens: Set<string>;
+  normalizedTrigger: string;
+}
+
+function normalizedWords(text: string, stopWords?: Set<string>): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((word) => word.length > 2 && !stopWords?.has(word)),
+  );
+}
+
+function normalizedText(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function jaccard(left: Set<string>, right: Set<string>): { score: number; intersection: number } {
+  let intersection = 0;
+  for (const word of left) {
+    if (right.has(word)) intersection++;
+  }
+  const union = left.size + right.size - intersection;
+  return { score: union > 0 ? intersection / union : 0, intersection };
+}
+
+function fingerprintSuggestion(s: { type: string; title: string; triggerQuote?: string }): SuggestionFingerprint {
+  const trigger = s.triggerQuote ?? '';
+  return {
+    type: s.type,
+    titleTokens: normalizedWords(s.title, TITLE_TOPIC_STOP_WORDS),
+    triggerTokens: normalizedWords(trigger),
+    normalizedTrigger: normalizedText(trigger),
+  };
+}
 
 function isTransientError(error: unknown): boolean {
   if (error instanceof Error) {
@@ -53,6 +123,7 @@ export class WorkerRegistry extends EventEmitter {
   private runningCount = 0;
   private approvedQueue: string[] = []; // Action IDs waiting to run
   private suggestionHashes = new Set<string>();
+  private suggestionHistory: SuggestionFingerprint[] = [];
   private suggestionTimers = new Map<string, NodeJS.Timeout>();
   private suggestionTtlMs = DEFAULT_SUGGESTION_TTL_MS;
 
@@ -105,6 +176,7 @@ export class WorkerRegistry extends EventEmitter {
     // auto-review, rolling summary) — see ActionLifecycle.system.
     if (!opts?.force && this.isDuplicate(suggestion)) return null;
     this.addDedupHash(suggestion);
+    if (!opts?.force) this.rememberSuggestion(suggestion);
 
     const action: ActionLifecycle = {
       id: uuidv4(),
@@ -128,23 +200,50 @@ export class WorkerRegistry extends EventEmitter {
     return action;
   }
 
-  /** Exact (type+params) or fuzzy (similar title within type) duplicate check. */
+  /**
+   * Exact (type+params), same actionable quote, or fuzzy same-type topic check.
+   * The history is independent of live actions so expiry/dismissal cannot make
+   * a duplicate eligible again later in the same meeting.
+   */
   private isDuplicate(s: { type: string; params: Record<string, any>; title: string }, excludeId?: string): boolean {
     const dedupKey = createHash('sha256')
       .update(JSON.stringify({ type: s.type, params: s.params }))
       .digest('hex');
     if (this.suggestionHashes.has(dedupKey)) return true;
 
-    const titleWords = new Set(s.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter((w) => w.length > 3));
+    const candidate = fingerprintSuggestion(s);
+    for (const prior of this.suggestionHistory) {
+      // A single quoted moment should create one card, even if later evals
+      // choose a different worker type or paraphrase the proposed output.
+      if (candidate.normalizedTrigger.length >= 20 && prior.normalizedTrigger.length >= 20) {
+        const exactOrContained = candidate.normalizedTrigger === prior.normalizedTrigger
+          || candidate.normalizedTrigger.includes(prior.normalizedTrigger)
+          || prior.normalizedTrigger.includes(candidate.normalizedTrigger);
+        const triggerSimilarity = jaccard(candidate.triggerTokens, prior.triggerTokens);
+        if (exactOrContained || (triggerSimilarity.intersection >= 5 && triggerSimilarity.score >= 0.8)) {
+          return true;
+        }
+      }
+
+      if (prior.type === candidate.type) {
+        const titleSimilarity = jaccard(candidate.titleTokens, prior.titleTokens);
+        if (titleSimilarity.intersection >= 3 && titleSimilarity.score >= 0.5) {
+          return true;
+        }
+      }
+    }
+
+    // Defense in depth for actions injected through older/non-streaming paths
+    // before the meeting-scoped history was populated.
     for (const existing of this.actions.values()) {
       if (existing.id === excludeId) continue;
       if (existing.type !== s.type) continue;
       if (existing.state === 'cancelled' || existing.state === 'expired') continue;
-      const existingWords = new Set(existing.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter((w) => w.length > 3));
-      let intersection = 0;
-      for (const w of titleWords) { if (existingWords.has(w)) intersection++; }
-      const union = titleWords.size + existingWords.size - intersection;
-      if (union > 0 && intersection / union >= 0.75) return true;
+      const titleSimilarity = jaccard(
+        candidate.titleTokens,
+        fingerprintSuggestion(existing).titleTokens,
+      );
+      if (titleSimilarity.intersection >= 3 && titleSimilarity.score >= 0.5) return true;
     }
     return false;
   }
@@ -154,6 +253,13 @@ export class WorkerRegistry extends EventEmitter {
       .update(JSON.stringify({ type: s.type, params: s.params }))
       .digest('hex');
     this.suggestionHashes.add(dedupKey);
+  }
+
+  private rememberSuggestion(s: { type: string; title: string; triggerQuote?: string }): void {
+    this.suggestionHistory.push(fingerprintSuggestion(s));
+    if (this.suggestionHistory.length > MAX_SUGGESTION_HISTORY) {
+      this.suggestionHistory.splice(0, this.suggestionHistory.length - MAX_SUGGESTION_HISTORY);
+    }
   }
 
   private startSuggestionTtl(actionId: string): void {
@@ -271,6 +377,7 @@ export class WorkerRegistry extends EventEmitter {
       return null;
     }
     this.addDedupHash(full);
+    this.rememberSuggestion(full);
 
     if (action.pendingApproval) {
       this.startApproved(action); // approved during stream → launch now
@@ -434,6 +541,7 @@ export class WorkerRegistry extends EventEmitter {
     }
 
     this.suggestionHashes.clear();
+    this.suggestionHistory = [];
   }
 
   // Metrics helpers

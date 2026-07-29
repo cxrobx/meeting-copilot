@@ -1,68 +1,226 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { claudeTriage } from '../claude-cli.js';
+import { MODEL_CONFIG } from '../model-config.js';
+import { runLiveJson } from './live-json.js';
 import {
+  COACH_SCHEMA,
   COACH_SYSTEM,
   buildCoachPrompt,
+  type CoachIncidentType,
   type CoachSuggestionResult,
   type CoachKind,
 } from './prompts/coach.v1.js';
 import type { AgendaStatus } from './agenda.js';
 
-const EVAL_INTERVAL_MS = 30_000;
-const MIN_NEW_WORDS_BEFORE_EVAL = 30;
-const WINDOW_TAIL_CHARS = 2_800;
-const MIN_PRIORITY = 4;
+const EVAL_INTERVAL_MS = 25_000;
+const MIN_NEW_WORDS_BEFORE_EVAL = 25;
+const WINDOW_TAIL_CHARS = 3_600;
+const MAX_RECENT_TURNS = 10;
+const MAX_TURN_CHARS = 900;
+// A live interruption has a much higher cost than an omitted nice-to-have.
+// Priority 4 is useful post-meeting feedback; only priority 5 earns a realtime
+// card. This keeps the coach focused on recovery rather than facilitation.
+const MIN_PRIORITY = 5;
+const MIN_CONFIDENCE = 0.62;
 const MAX_RECENT_SUGGESTIONS = 8;
-// Event-driven triggering off moment-shaped segments.
-const TRIGGER_MIN_GAP_MS = 15_000;
-const TRIGGER_DEBOUNCE_MS = 2_000;
+const TRIGGER_DEBOUNCE_MS = 250;
+const ADVICE_DEADLINE_MS = 4_000;
+const INCIDENT_COOLDOWN_MS = 12_000;
+const RECENT_SUGGESTION_MS = 2 * 60_000;
 
 const MOMENT_HINTS: Record<string, string> = {
-  'moment:question': 'A question appears to have just been directed at the user.',
-  'moment:decision': 'A decision appears to be happening right now.',
-  'moment:deferral': 'Something is being deferred or pushed out right now — if it touches the user\'s goals, this is the moment to push back.',
-  'moment:commitment': 'Work was just mentioned without a clear owner or date.',
-  'agenda-warning': 'The agenda tracker just flagged something as possibly missing.',
+  'moment:question': 'A question appears to have been directed at the user. Check whether a concise answer or clarifying question is needed.',
+  'moment:pressure': 'The other side appears to be applying pressure, challenging the user, or demanding a commitment.',
+  'moment:objection': 'The other side appears to be objecting or signaling that the answer did not resolve their concern.',
+  'moment:answer-review': 'The user just answered a question. Check only for a material miss, unsupported claim, evasion, or recoverable misunderstanding.',
+  'moment:overcommitment': 'The user may have made a deadline, scope, price, or certainty commitment that needs qualification.',
+  'moment:confusion': 'The exchange suggests confusion or misalignment that may need a quick reset.',
+  'moment:decision': 'A decision appears to be happening now.',
+  'moment:deferral': 'Something is being deferred. Check whether this threatens the user’s agenda or goals.',
+  'moment:commitment': 'Work was mentioned without a clear owner, date, or boundary.',
+  'agenda-warning': 'The agenda tracker flagged an item that may be missed.',
+  interval: 'Periodic safety check. Intervene only for an unresolved, high-stakes moment still active in the latest turns.',
 };
 
+const QUESTION_START_RE = /\b(who|what|when|where|why|how|can|could|would|will|do|does|did|is|are|should|walk me through|help me understand|tell me)\b/i;
+const PRESSURE_RE = /\b(need you|need an answer|you (?:must|have|need) to|we need you to|commit (?:today|now|by)|non[- ]negotiable|not acceptable|unacceptable|why (?:didn'?t|haven'?t|can'?t) you|hold you accountable|make this right|escalat(?:e|ing)|final offer)\b/i;
+const OBJECTION_RE = /\b(that (?:doesn'?t|does not) (?:answer|work|address)|not what (?:i|we) asked|i (?:don'?t|do not) (?:buy|agree)|we (?:don'?t|do not) agree|too (?:expensive|slow|late|risky)|concerned|concern is|push(?:ing)? back|disagree|disappointed|still not clear|be direct)\b/i;
+const CONFUSION_RE = /\b(i'?m confused|we'?re confused|not clear|misunderst(?:and|ood)|talking past each other|disconnect|doesn'?t make sense|contradict)\b/i;
+const MIC_COMMITMENT_RE = /\b(i|we) (?:guarantee|promise|definitely|absolutely)\b|\b(?:no problem|consider it done|one hundred percent|100%)\b/i;
+const MIC_DEADLINE_RE = /\b(i|we) (?:will|can|should be able to) .{0,80}\bby (?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|next week|end of (?:day|week|month|quarter))\b/i;
+const DECISION_RE = /\b(let'?s go with|we'?ll go with|let'?s do|going with|decided|we agreed|agreed to|move forward with|finali[sz]e[ds]?|lock(?:ing)? (?:it |that )?in|ship it)\b/i;
+const DEFERRAL_RE = /\b(revisit|defer|postpone|punt on|park (?:it|this|that)|table (?:it|this|that)|push (?:it|this|that|the \w+) (?:to|out|back)|circle back|next (?:quarter|sprint|month|year) instead|not this (?:quarter|sprint|month|year))\b/i;
+const COMMITMENT_RE = /\b(someone should|somebody should|we should|we need to|needs? to (?:happen|own|get done)|who'?s going to|who will)\b/i;
+const DIRECTED_QUESTION_RE = /\b(you|your|yours|y['’]?all|you all)\b/i;
+
+export interface MomentContext {
+  previousSource?: 'mic' | 'meeting';
+  previousText?: string;
+  final?: boolean;
+}
+
 /**
- * Cheap local heuristic for "this is a moment the user might need to act on".
- * Only meeting-side segments trigger — tips react to what others say.
+ * Cheap, permissive local gate. The model remains the precision layer; these
+ * patterns decide only whether a turn is worth sending under the live budget.
  */
-export function detectMoment(text: string, source: string): string | null {
-  if (source === 'mic' || !text) return null;
-  if (/\?/.test(text) && /\b(you|your|we)\b/i.test(text)) return 'moment:question';
-  if (/\b(let'?s go with|we'?ll go with|let'?s do|going with|decided|we agreed|agreed to|move forward with|finali[sz]e[ds]?|lock(ing)? (it |that )?in|ship it)\b/i.test(text)) return 'moment:decision';
-  if (/\b(revisit|defer|postpone|punt on|park (it|this|that)|table (it|this|that)|push (it|this|that|the \w+) (to|out|back)|circle back|next (quarter|sprint|month|year) instead|not this (quarter|sprint|month|year))\b/i.test(text)) return 'moment:deferral';
-  if (/\b(someone should|somebody should|we should|we need to|needs? to (happen|own|get done)|who'?s going to|who will)\b/i.test(text)) return 'moment:commitment';
+export function detectMoment(
+  text: string,
+  source: string,
+  context: MomentContext = {},
+): string | null {
+  const value = (text ?? '').trim();
+  if (!value) return null;
+
+  if (source === 'mic') {
+    if (MIC_DEADLINE_RE.test(value) || MIC_COMMITMENT_RE.test(value)) {
+      return 'moment:overcommitment';
+    }
+    if (context.final !== false && context.previousSource === 'meeting') {
+      const previous = context.previousText ?? '';
+      if (
+        DIRECTED_QUESTION_RE.test(previous)
+        && (previous.includes('?') || QUESTION_START_RE.test(previous))
+      ) {
+        return 'moment:answer-review';
+      }
+    }
+    return null;
+  }
+
+  if (OBJECTION_RE.test(value)) return 'moment:objection';
+  if (PRESSURE_RE.test(value)) return 'moment:pressure';
+  if (CONFUSION_RE.test(value)) return 'moment:confusion';
+  // Ordinary questions do not need pre-answer coaching. High-stakes questions
+  // are caught above as pressure/objections; a weak response is caught on the
+  // finalized mic turn as answer-review. This saves both attention and calls.
+  if (DECISION_RE.test(value)) return 'moment:decision';
+  if (DEFERRAL_RE.test(value)) return 'moment:deferral';
+  if (COMMITMENT_RE.test(value)) return 'moment:commitment';
   return null;
 }
 
 export interface CoachSuggestion {
   id: string;
+  incidentId: string;
+  incidentType: CoachIncidentType;
   kind: CoachKind;
   priority: number;
+  confidence: number;
   headline: string;
   phrasing: string;
   why: string;
   triggerQuote: string;
   createdAt: number;
+  expiresAt: number;
+  latencyMs: number;
+}
+
+interface CoachTurn {
+  id: string;
+  text: string;
+  source: 'mic' | 'meeting';
+  final: boolean;
+  updatedAt: number;
+}
+
+interface PendingTrigger {
+  reason: string;
+  incidentId: string;
+  incidentKey: string;
+  source: 'mic' | 'meeting' | 'system';
+  text: string;
+  requestedAt: number;
+}
+
+type CoachTriage = (
+  prompt: string,
+  systemPrompt: string,
+  signal?: AbortSignal,
+) => Promise<string>;
+
+export interface CoachEvalDeps {
+  triage?: CoachTriage;
+  now?: () => number;
+}
+
+function normalizeIncidentKey(reason: string, text: string): string {
+  return `${reason}:${text.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim().slice(0, 100)}`;
+}
+
+function reasonIncidentType(reason: string): CoachIncidentType {
+  switch (reason) {
+    case 'moment:pressure': return 'pressure';
+    case 'moment:objection': return 'objection';
+    case 'moment:answer-review': return 'bad_answer';
+    case 'moment:overcommitment': return 'overcommitment';
+    case 'moment:confusion': return 'confusion';
+    case 'moment:decision': return 'decision';
+    case 'moment:commitment': return 'commitment';
+    case 'moment:question': return 'question';
+    case 'agenda-warning':
+    case 'moment:deferral':
+      return 'agenda_risk';
+    default:
+      return 'none';
+  }
+}
+
+function parseCoachResponse(raw: string): CoachSuggestionResult | null {
+  if (!raw) return null;
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try {
+    const parsed = JSON.parse(raw.slice(start, end + 1)) as Partial<CoachSuggestionResult>;
+    if (typeof parsed.hasSuggestion !== 'boolean') return null;
+    const kind: CoachKind = parsed.kind === 'mention' || parsed.kind === 'ask'
+      ? parsed.kind
+      : 'address';
+    const allowedIncidentTypes: CoachIncidentType[] = [
+      'none',
+      'pressure',
+      'objection',
+      'bad_answer',
+      'overcommitment',
+      'confusion',
+      'contradiction',
+      'agenda_risk',
+      'decision',
+      'commitment',
+      'question',
+    ];
+    return {
+      hasSuggestion: parsed.hasSuggestion,
+      kind,
+      incidentType: allowedIncidentTypes.includes(parsed.incidentType as CoachIncidentType)
+        ? parsed.incidentType as CoachIncidentType
+        : 'none',
+      priority: Number.isFinite(parsed.priority) ? Number(parsed.priority) : 0,
+      confidence: Number.isFinite(parsed.confidence) ? Number(parsed.confidence) : 0,
+      headline: typeof parsed.headline === 'string' ? parsed.headline.trim() : '',
+      phrasing: typeof parsed.phrasing === 'string' ? parsed.phrasing.trim() : '',
+      why: typeof parsed.why === 'string' ? parsed.why.trim() : '',
+      triggerQuote: typeof parsed.triggerQuote === 'string' ? parsed.triggerQuote.trim() : '',
+      expiresInMs: Number.isFinite(parsed.expiresInMs) ? Number(parsed.expiresInMs) : 15_000,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Opt-in "say next" coach. One cheap JSON call per window asking whether
- * there is ONE high-priority thing the user should mention, ask, or address.
- * Emits nothing for most windows by design.
- *
- * Fully inert until start() — zero API cost while toggled off.
+ * Event-driven recovery coach. It evaluates both sides of the conversation,
+ * keeps only a handful of recent turns, and drops advice that misses the
+ * moment instead of showing a technically-correct but stale interruption.
  */
 export class CoachMonitor extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
+  private triggerTimer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private generation = 0;
   private currentEval: Promise<void> | null = null;
   private abortController: AbortController | null = null;
+  private pendingTrigger: PendingTrigger | null = null;
 
   private transcriptProvider: () => string = () => '';
   private wordCountProvider: () => number = () => 0;
@@ -73,16 +231,56 @@ export class CoachMonitor extends EventEmitter {
   private attendees = '';
 
   private lastEvalWordCount = 0;
-  private lastRunAt = 0;
-  private triggerTimer: ReturnType<typeof setTimeout> | null = null;
-  private recentSuggestions: string[] = [];
+  private turns: CoachTurn[] = [];
+  private recentSuggestions: Array<{ text: string; at: number }> = [];
+  private recentIncidents = new Map<string, number>();
+  private totalLatencyMs = 0;
+  private staleResults = 0;
 
-  // Metrics
   public evalsRun = 0;
   public suggestionsEmitted = 0;
 
+  private readonly triage: CoachTriage;
+  private readonly now: () => number;
+
+  constructor(deps: CoachEvalDeps = {}) {
+    super();
+    this.now = deps.now ?? Date.now;
+    this.triage = deps.triage ?? (async (prompt, systemPrompt, signal) => {
+      const result = await runLiveJson({
+        prompt,
+        systemPrompt,
+        schema: COACH_SCHEMA,
+        openAiModel: MODEL_CONFIG.coach,
+        label: 'live-coach',
+        signal,
+        // Real Terra smoke: 2.72s end-to-end on a 649-token coach prompt.
+        // Keep the direct provider inside the 4s freshness SLA instead of
+        // aborting a useful response at an unrealistically tight 1.8s.
+        providerTimeoutMs: 3_500,
+        totalTimeoutMs: ADVICE_DEADLINE_MS,
+        maxOutputTokens: 240,
+      });
+      return result.text;
+    });
+  }
+
   isRunning(): boolean {
     return this.running;
+  }
+
+  getMetrics(): {
+    evalsRun: number;
+    suggestionsEmitted: number;
+    staleResults: number;
+    avgLatencyMs: number;
+  } {
+    return {
+      evalsRun: this.evalsRun,
+      suggestionsEmitted: this.suggestionsEmitted,
+      staleResults: this.staleResults,
+      avgLatencyMs: this.evalsRun > 0 ? Math.round(this.totalLatencyMs / this.evalsRun) : 0,
+    };
   }
 
   start(options: {
@@ -103,34 +301,62 @@ export class CoachMonitor extends EventEmitter {
     this.sessionTitle = options.sessionTitle ?? '';
     this.attendees = options.attendees ?? '';
     this.lastEvalWordCount = this.wordCountProvider();
-
+    this.evalsRun = 0;
+    this.suggestionsEmitted = 0;
+    this.totalLatencyMs = 0;
+    this.staleResults = 0;
     this.running = true;
-    this.timer = setInterval(() => {
-      this.scheduleEval('interval').catch(() => {/* surfaced via error event */});
-    }, EVAL_INTERVAL_MS);
+    this.timer = setInterval(() => this.queueTrigger({
+      reason: 'interval',
+      source: 'system',
+      text: '',
+    }), EVAL_INTERVAL_MS);
+    if (typeof this.timer.unref === 'function') this.timer.unref();
   }
 
   /**
-   * Event-driven entry: called per transcript segment. Moment-shaped segments
-   * (question at the user, decision language, ownerless work) fire an eval
-   * within ~2s instead of waiting for the next interval.
+   * Called for both open transcript updates and finalized turns. Meeting-side
+   * questions/pressure may trigger on a stable partial; mic answer review waits
+   * for the cohesive final turn unless the user makes an explicit commitment.
    */
-  noteSegment(text: string, source: string): void {
+  noteSegment(
+    text: string,
+    source: 'mic' | 'meeting',
+    options: { final?: boolean; segmentId?: string; timestamp?: number } = {},
+  ): void {
     if (!this.running) return;
-    const moment = detectMoment(text, source);
+    const value = (text ?? '').trim();
+    if (!value) return;
+    const final = options.final ?? true;
+    const segmentId = options.segmentId ?? randomUUID();
+    const previous = [...this.turns].reverse().find((turn) => turn.id !== segmentId && turn.final);
+    this.upsertTurn({
+      id: segmentId,
+      text: value.slice(0, MAX_TURN_CHARS),
+      source,
+      final,
+      updatedAt: options.timestamp ?? this.now(),
+    });
+
+    const moment = detectMoment(value, source, {
+      previousSource: previous?.source,
+      previousText: previous?.text,
+      final,
+    });
     if (!moment) return;
-    this.requestEval(moment);
+    if (!final && source === 'mic' && moment !== 'moment:overcommitment') return;
+
+    this.queueTrigger({
+      reason: moment,
+      source,
+      text: value,
+      incidentId: `${segmentId}:${moment}:${value.length}`,
+    });
   }
 
-  /** Throttled external trigger (also used by the agenda-warning hook). */
+  /** External trigger, currently used by agenda risk warnings. */
   requestEval(reason: string): void {
-    if (!this.running) return;
-    if (Date.now() - this.lastRunAt < TRIGGER_MIN_GAP_MS) return;
-    if (this.currentEval || this.triggerTimer) return;
-    this.triggerTimer = setTimeout(() => {
-      this.triggerTimer = null;
-      this.scheduleEval(reason).catch(() => {/* surfaced via error event */});
-    }, TRIGGER_DEBOUNCE_MS);
+    this.queueTrigger({ reason, source: 'system', text: '' });
   }
 
   stop(): void {
@@ -145,58 +371,131 @@ export class CoachMonitor extends EventEmitter {
     this.generation++;
     this.running = false;
     this.lastEvalWordCount = 0;
-    this.lastRunAt = 0;
+    this.turns = [];
+    this.pendingTrigger = null;
     this.recentSuggestions = [];
+    this.recentIncidents.clear();
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
     }
   }
 
-  private async scheduleEval(trigger: string): Promise<void> {
+  private upsertTurn(turn: CoachTurn): void {
+    const existing = this.turns.findIndex((candidate) => candidate.id === turn.id);
+    if (existing >= 0) this.turns[existing] = turn;
+    else this.turns.push(turn);
+    this.turns.sort((a, b) => a.updatedAt - b.updatedAt);
+    if (this.turns.length > MAX_RECENT_TURNS) {
+      this.turns.splice(0, this.turns.length - MAX_RECENT_TURNS);
+    }
+  }
+
+  private queueTrigger(params: {
+    reason: string;
+    source: 'mic' | 'meeting' | 'system';
+    text: string;
+    incidentId?: string;
+  }): void {
+    if (!this.running) return;
+    const now = this.now();
+    const incidentKey = normalizeIncidentKey(params.reason, params.text);
+    const recentUntil = this.recentIncidents.get(incidentKey) ?? 0;
+    if (recentUntil > now && !this.currentEval) return;
+
+    this.pendingTrigger = {
+      reason: params.reason,
+      incidentId: params.incidentId ?? `${params.reason}:${now}`,
+      incidentKey,
+      source: params.source,
+      text: params.text.slice(0, MAX_TURN_CHARS),
+      requestedAt: now,
+    };
+    if (this.currentEval) {
+      this.emit('eval', { queued: 'latest', trigger: params.reason });
+      return;
+    }
+    if (this.triggerTimer) clearTimeout(this.triggerTimer);
+    this.triggerTimer = setTimeout(() => {
+      this.triggerTimer = null;
+      const trigger = this.pendingTrigger;
+      this.pendingTrigger = null;
+      if (trigger) this.scheduleEval(trigger).catch(() => {/* surfaced via events */});
+    }, params.reason === 'interval' ? 0 : TRIGGER_DEBOUNCE_MS);
+    if (typeof this.triggerTimer.unref === 'function') this.triggerTimer.unref();
+  }
+
+  private async scheduleEval(trigger: PendingTrigger): Promise<void> {
     if (!this.running) return;
     if (this.currentEval) {
-      this.emit('eval', { skipped: 'in-flight', trigger });
+      this.pendingTrigger = trigger;
       return;
     }
 
-    if (trigger === 'interval') {
-      // Interval evals gate on word growth; triggered evals bypass it — the
-      // triggering moment is the signal.
+    if (trigger.reason === 'interval') {
       const words = this.wordCountProvider();
       if (words - this.lastEvalWordCount < MIN_NEW_WORDS_BEFORE_EVAL) {
-        this.emit('eval', { skipped: `growth: +${words - this.lastEvalWordCount}/${MIN_NEW_WORDS_BEFORE_EVAL}`, trigger });
+        this.emit('eval', {
+          skipped: `growth: +${words - this.lastEvalWordCount}/${MIN_NEW_WORDS_BEFORE_EVAL}`,
+          trigger: trigger.reason,
+        });
         return;
       }
     }
 
+    this.recentIncidents.set(trigger.incidentKey, this.now() + INCIDENT_COOLDOWN_MS);
     const gen = this.generation;
     const controller = new AbortController();
     this.abortController = controller;
     const task = this.runEval(gen, trigger, controller.signal)
-      .catch((err) => {
-        if (gen === this.generation) {
-          this.emit('error', err instanceof Error ? err.message : String(err));
+      .catch((error) => {
+        if (gen !== this.generation) return;
+        const message = error instanceof Error ? error.message : String(error);
+        if (message === 'Aborted') {
+          this.staleResults++;
+          this.emit('eval', { skipped: 'deadline', trigger: trigger.reason });
+          return;
         }
+        this.emit('error', message);
       })
       .finally(() => {
-        this.currentEval = null;
+        if (this.currentEval === task) this.currentEval = null;
         if (this.abortController === controller) this.abortController = null;
+        if (this.running && this.pendingTrigger) {
+          const next = this.pendingTrigger;
+          this.pendingTrigger = null;
+          queueMicrotask(() => this.scheduleEval(next).catch(() => {/* surfaced via events */}));
+        }
       });
     this.currentEval = task;
     await task;
   }
 
-  private async runEval(gen: number, trigger: string, signal: AbortSignal): Promise<void> {
-    const transcript = this.transcriptProvider();
-    if (!transcript || transcript.trim().length < 60) return;
+  private transcriptWindow(): string {
+    if (this.turns.length > 0) {
+      return this.turns
+        .map((turn) => `${turn.source === 'mic' ? '[You]' : '[Meeting]'} ${turn.text}`)
+        .join('\n')
+        .slice(-WINDOW_TAIL_CHARS);
+    }
+    return this.transcriptProvider().slice(-WINDOW_TAIL_CHARS);
+  }
+
+  private async runEval(
+    gen: number,
+    trigger: PendingTrigger,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const transcriptWindow = this.transcriptWindow();
+    if (!transcriptWindow || transcriptWindow.trim().length < 20) return;
     this.lastEvalWordCount = this.wordCountProvider();
-    this.lastRunAt = Date.now();
 
     const agendaStatus = this.agendaStatusProvider();
     const agendaSummary = agendaStatus && agendaStatus.items.length > 0
-      ? agendaStatus.items.map((i) => `[${i.state}] ${i.text}`).join('\n') +
-        (agendaStatus.missing.length > 0 ? `\nPossibly missing: ${agendaStatus.missing.join('; ')}` : '')
+      ? agendaStatus.items.map((item) => `[${item.state}] ${item.text}`).join('\n')
+        + (agendaStatus.missing.length > 0
+          ? `\nPossibly missing: ${agendaStatus.missing.join('; ')}`
+          : '')
       : '';
 
     const stats = this.speakerStatsProvider();
@@ -206,61 +505,108 @@ export class CoachMonitor extends EventEmitter {
       speakerBalance = `the user has spoken ${share}% of the words so far`;
     }
 
+    const now = this.now();
+    this.recentSuggestions = this.recentSuggestions.filter(
+      (suggestion) => now - suggestion.at <= RECENT_SUGGESTION_MS,
+    );
     const prompt = buildCoachPrompt({
-      transcriptWindow: transcript.slice(-WINDOW_TAIL_CHARS),
+      transcriptWindow,
       agendaSummary,
       meetingTitle: this.sessionTitle,
       attendees: this.attendees,
-      recentSuggestions: this.recentSuggestions,
+      recentSuggestions: this.recentSuggestions.map((suggestion) => suggestion.text),
       userGoals: this.goalsProvider(),
       speakerBalance,
-      momentHint: MOMENT_HINTS[trigger],
+      momentHint: MOMENT_HINTS[trigger.reason],
+      triggerSource: trigger.source,
+      triggerText: trigger.text,
     });
 
+    const startedAt = this.now();
     this.evalsRun++;
-    // CLI-only (subscription, no paid API): Gemini → Haiku → Codex chain.
-    const raw = await claudeTriage(
-      `${prompt}\n\nRespond with JSON only, no prose or code fences: {"hasSuggestion" (bool), "kind" ("mention"|"ask"|"address"), "priority" (1-5 integer), "headline", "phrasing", "why", "triggerQuote"}`,
-      COACH_SYSTEM,
-      signal,
-    );
+    const raw = await this.triage(prompt, COACH_SYSTEM, signal);
+    const latencyMs = this.now() - startedAt;
+    this.totalLatencyMs += latencyMs;
     if (gen !== this.generation) return;
 
-    let result: CoachSuggestionResult;
-    try {
-      const start = raw.indexOf('{');
-      const end = raw.lastIndexOf('}');
-      result = JSON.parse(start !== -1 && end > start ? raw.slice(start, end + 1) : raw) as CoachSuggestionResult;
-    } catch {
-      this.emit('eval', { skipped: 'parse-failed' });
+    if (this.now() - trigger.requestedAt > ADVICE_DEADLINE_MS) {
+      this.staleResults++;
+      this.emit('eval', { skipped: 'stale', trigger: trigger.reason, latencyMs });
       return;
     }
 
-    if (!result.hasSuggestion || result.priority < MIN_PRIORITY || !result.phrasing) {
-      this.emit('eval', { suggested: false, priority: result.priority ?? 0, trigger });
+    const result = parseCoachResponse(raw);
+    if (!result) {
+      this.emit('eval', { skipped: 'parse-failed', trigger: trigger.reason, latencyMs });
+      return;
+    }
+    const confidence = Math.max(0, Math.min(1, result.confidence));
+    if (
+      !result.hasSuggestion
+      || result.priority < MIN_PRIORITY
+      || confidence < MIN_CONFIDENCE
+      || !result.phrasing
+    ) {
+      this.emit('eval', {
+        suggested: false,
+        priority: result.priority,
+        confidence,
+        trigger: trigger.reason,
+        latencyMs,
+      });
       return;
     }
 
-    // Soft dedup against recent suggestions by headline overlap
-    const normalized = result.headline.toLowerCase().trim();
-    if (this.recentSuggestions.some((s) => s.toLowerCase().includes(normalized) || normalized.includes(s.toLowerCase()))) {
-      this.emit('eval', { skipped: 'duplicate', headline: result.headline, trigger });
+    const normalized = `${result.headline} ${result.phrasing}`.toLowerCase().trim();
+    if (this.recentSuggestions.some((suggestion) => {
+      const prior = suggestion.text.toLowerCase();
+      return prior.includes(normalized) || normalized.includes(prior);
+    })) {
+      this.emit('eval', {
+        skipped: 'duplicate',
+        headline: result.headline,
+        trigger: trigger.reason,
+        latencyMs,
+      });
       return;
     }
-    this.recentSuggestions.push(result.headline);
-    if (this.recentSuggestions.length > MAX_RECENT_SUGGESTIONS) this.recentSuggestions.shift();
 
-    this.suggestionsEmitted++;
+    const createdAt = this.now();
+    const expiresInMs = Math.max(8_000, Math.min(30_000, result.expiresInMs || 15_000));
+    const incidentType = result.incidentType === 'none'
+      ? reasonIncidentType(trigger.reason)
+      : result.incidentType;
     const suggestion: CoachSuggestion = {
       id: randomUUID(),
+      incidentId: trigger.incidentId,
+      incidentType,
       kind: result.kind,
-      priority: result.priority,
-      headline: result.headline,
-      phrasing: result.phrasing,
-      why: result.why,
-      triggerQuote: result.triggerQuote,
-      createdAt: Date.now(),
+      priority: Math.max(1, Math.min(5, Math.round(result.priority))),
+      confidence,
+      headline: result.headline.slice(0, 80),
+      phrasing: result.phrasing.slice(0, 280),
+      why: result.why.slice(0, 180),
+      triggerQuote: result.triggerQuote.slice(0, 180),
+      createdAt,
+      expiresAt: createdAt + expiresInMs,
+      latencyMs,
     };
+
+    this.recentSuggestions.push({
+      text: `${suggestion.headline} ${suggestion.phrasing}`,
+      at: createdAt,
+    });
+    if (this.recentSuggestions.length > MAX_RECENT_SUGGESTIONS) {
+      this.recentSuggestions.shift();
+    }
+    this.suggestionsEmitted++;
     this.emit('suggestion', suggestion);
+    this.emit('eval', {
+      completed: true,
+      suggested: true,
+      incidentType,
+      trigger: trigger.reason,
+      latencyMs,
+    });
   }
 }

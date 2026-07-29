@@ -5,6 +5,7 @@ import Foundation
 /// Manages the Node.js server and whisper-server as child processes.
 /// Handles launching, monitoring, auto-restart on crash, and graceful shutdown.
 @Observable
+@MainActor
 final class ProcessSupervisor {
     // MARK: - Configuration
 
@@ -29,18 +30,46 @@ final class ProcessSupervisor {
     private var whisperProcess: Process?
     private var serverRestartCount = 0
     private var whisperRestartCount = 0
+    private var serverGeneration = 0
+    private var whisperGeneration = 0
 
     // Parakeet sidecar (NVIDIA Parakeet-TDT via parakeet-mlx) — the DEFAULT
     // transcription backend when `uv` + the sidecar script are present.
     var parakeetRunning: Bool = false
     private var parakeetProcess: Process?
     private var parakeetRestartCount = 0
+    private var parakeetGeneration = 0
 
     private var monitorTasks: [Task<Void, Never>] = []
     private var healthProbeTask: Task<Void, Never>?
     private var lastHealthyAt: Date?
     private var consecutiveHealthFailures = 0
     private var hasAlertedOnCrashLoop = false
+    private var isStopping = false
+
+    /// A FileHandle readability callback fires again at EOF unless it removes
+    /// itself. Leaving it installed caused a tight loop after child exit.
+    private func makeOutputPipe(prefix: String) -> Pipe {
+        let pipe = Pipe()
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                try? handle.close()
+                return
+            }
+            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
+                print("[\(prefix)] \(output.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+        }
+        return pipe
+    }
+
+    private func closeOutputPipe(for process: Process) {
+        guard let pipe = process.standardOutput as? Pipe else { return }
+        pipe.fileHandleForReading.readabilityHandler = nil
+        try? pipe.fileHandleForReading.close()
+    }
 
     // MARK: - Server Paths
 
@@ -224,7 +253,7 @@ final class ProcessSupervisor {
     /// Returns true if the port is in use by another process (not ours).
     private func isPortInUse(_ port: String) -> Bool {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/lsof")
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
         process.arguments = ["-ti", "tcp:\(port)"]
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -247,7 +276,7 @@ final class ProcessSupervisor {
         // Only clean up the copilot server port — whisper may be shared
         let port = String(ServerConfig.port)
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/lsof")
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
         process.arguments = ["-ti", "tcp:\(port)"]
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -273,6 +302,7 @@ final class ProcessSupervisor {
 
     func startServer() {
         guard !serverRunning else { return }
+        isStopping = false
         serverRestartCount = 0
         hasAlertedOnCrashLoop = false
         launchServer()
@@ -390,6 +420,8 @@ final class ProcessSupervisor {
     }
 
     private func launchServer() {
+        serverGeneration += 1
+        let generation = serverGeneration
         let process = Process()
         let serverDir = serverPath
 
@@ -425,16 +457,9 @@ final class ProcessSupervisor {
         process.environment = env
 
         // Pipe output for logging
-        let pipe = Pipe()
+        let pipe = makeOutputPipe(prefix: "Server")
         process.standardOutput = pipe
         process.standardError = pipe
-
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
-                print("[Server] \(output.trimmingCharacters(in: .whitespacesAndNewlines))")
-            }
-        }
 
         do {
             try process.run()
@@ -443,10 +468,12 @@ final class ProcessSupervisor {
             print("[ProcessSupervisor] Server started (PID: \(process.processIdentifier))")
 
             // Monitor for unexpected termination
-            let task = Task.detached { [weak self] in
+            let task = Task.detached { [self] in
                 process.waitUntilExit()
                 await MainActor.run {
-                    guard let self = self else { return }
+                    guard self.serverGeneration == generation, self.serverProcess === process else { return }
+                    self.closeOutputPipe(for: process)
+                    self.serverProcess = nil
                     self.serverRunning = false
                     self.serverHealthy = false
                     print("[ProcessSupervisor] Server exited (code: \(process.terminationStatus))")
@@ -454,7 +481,7 @@ final class ProcessSupervisor {
                     // Auto-restart on any unexpected exit. Code 0 usually means we
                     // called stopAll() intentionally; anything else (including
                     // SIGKILL from the health probe) should trigger recovery.
-                    guard process.terminationStatus != 0 else { return }
+                    guard !self.isStopping, process.terminationStatus != 0 else { return }
 
                     if self.serverRestartCount >= self.maxRestartAttempts {
                         self.notifyCrashLoop()
@@ -464,10 +491,13 @@ final class ProcessSupervisor {
                     let idx = min(self.serverRestartCount - 1, self.restartBackoffSeconds.count - 1)
                     let delay = self.restartBackoffSeconds[idx]
                     print("[ProcessSupervisor] Restarting server in \(delay)s (attempt \(self.serverRestartCount)/\(self.maxRestartAttempts))…")
-                    Task {
+                    let restartTask = Task { [weak self] in
                         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                        guard let self = self, !Task.isCancelled, !self.isStopping,
+                              self.serverProcess == nil else { return }
                         self.launchServer()
                     }
+                    self.monitorTasks.append(restartTask)
                 }
             }
             monitorTasks.append(task)
@@ -488,6 +518,7 @@ final class ProcessSupervisor {
         }
 
         guard !whisperRunning else { return }
+        isStopping = false
 
         // If whisper-server is already running on 8078 (e.g. from notes4chris), reuse it
         if isPortInUse("8078") {
@@ -501,6 +532,8 @@ final class ProcessSupervisor {
     }
 
     private func launchWhisper() {
+        whisperGeneration += 1
+        let generation = whisperGeneration
         let path = whisperPath
         guard FileManager.default.fileExists(atPath: path) else {
             print("[ProcessSupervisor] whisper-server not found at \(path)")
@@ -551,16 +584,9 @@ final class ProcessSupervisor {
 
         process.arguments = args
 
-        let pipe = Pipe()
+        let pipe = makeOutputPipe(prefix: "Whisper")
         process.standardOutput = pipe
         process.standardError = pipe
-
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
-                print("[Whisper] \(output.trimmingCharacters(in: .whitespacesAndNewlines))")
-            }
-        }
 
         do {
             try process.run()
@@ -568,22 +594,27 @@ final class ProcessSupervisor {
             self.whisperRunning = true
             print("[ProcessSupervisor] Whisper started (PID: \(process.processIdentifier))")
 
-            let task = Task.detached { [weak self] in
+            let task = Task.detached { [self] in
                 process.waitUntilExit()
                 await MainActor.run {
-                    guard let self = self else { return }
+                    guard self.whisperGeneration == generation, self.whisperProcess === process else { return }
+                    self.closeOutputPipe(for: process)
+                    self.whisperProcess = nil
                     self.whisperRunning = false
                     print("[ProcessSupervisor] Whisper exited (code: \(process.terminationStatus))")
 
-                    if process.terminationStatus != 0 && self.whisperRestartCount < self.maxRestartAttempts {
+                    if !self.isStopping && process.terminationStatus != 0 && self.whisperRestartCount < self.maxRestartAttempts {
                         self.whisperRestartCount += 1
                         let idx = min(self.whisperRestartCount - 1, self.restartBackoffSeconds.count - 1)
                         let delay = self.restartBackoffSeconds[idx]
                         print("[ProcessSupervisor] Restarting whisper in \(delay)s (attempt \(self.whisperRestartCount)/\(self.maxRestartAttempts))…")
-                        Task {
+                        let restartTask = Task { [weak self] in
                             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                            guard let self = self, !Task.isCancelled, !self.isStopping,
+                                  self.whisperProcess == nil else { return }
                             self.launchWhisper()
                         }
+                        self.monitorTasks.append(restartTask)
                     }
                 }
             }
@@ -598,6 +629,7 @@ final class ProcessSupervisor {
 
     func startParakeet() {
         guard !parakeetRunning else { return }
+        isStopping = false
         // Reuse an already-running sidecar (e.g. from ./scripts/start.sh or a
         // prior launch) — mirrors the whisper-on-8078 reuse.
         if isPortInUse(parakeetPort) {
@@ -610,6 +642,8 @@ final class ProcessSupervisor {
     }
 
     private func launchParakeet() {
+        parakeetGeneration += 1
+        let generation = parakeetGeneration
         guard let uv = uvPath, let script = parakeetScriptPath else {
             appLog("[ProcessSupervisor] Parakeet sidecar unavailable (uv or script missing). Transcription will be degraded — install uv (curl -LsSf https://astral.sh/uv/install.sh | sh) or set TRANSCRIPTION_PROVIDER=whisper.")
             return
@@ -623,15 +657,9 @@ final class ProcessSupervisor {
         process.arguments = ["run", script, "--port", parakeetPort]
         process.environment = processEnvironment()
 
-        let pipe = Pipe()
+        let pipe = makeOutputPipe(prefix: "Parakeet")
         process.standardOutput = pipe
         process.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
-                print("[Parakeet] \(output.trimmingCharacters(in: .whitespacesAndNewlines))")
-            }
-        }
 
         do {
             try process.run()
@@ -639,22 +667,27 @@ final class ProcessSupervisor {
             self.parakeetRunning = true
             appLog("[ProcessSupervisor] Parakeet sidecar started (PID: \(process.processIdentifier)) via \(uv)")
 
-            let task = Task.detached { [weak self] in
+            let task = Task.detached { [self] in
                 process.waitUntilExit()
                 await MainActor.run {
-                    guard let self = self else { return }
+                    guard self.parakeetGeneration == generation, self.parakeetProcess === process else { return }
+                    self.closeOutputPipe(for: process)
+                    self.parakeetProcess = nil
                     self.parakeetRunning = false
                     print("[ProcessSupervisor] Parakeet exited (code: \(process.terminationStatus))")
 
-                    if process.terminationStatus != 0 && self.parakeetRestartCount < self.maxRestartAttempts {
+                    if !self.isStopping && process.terminationStatus != 0 && self.parakeetRestartCount < self.maxRestartAttempts {
                         self.parakeetRestartCount += 1
                         let idx = min(self.parakeetRestartCount - 1, self.restartBackoffSeconds.count - 1)
                         let delay = self.restartBackoffSeconds[idx]
                         print("[ProcessSupervisor] Restarting Parakeet in \(delay)s (attempt \(self.parakeetRestartCount)/\(self.maxRestartAttempts))…")
-                        Task {
+                        let restartTask = Task { [weak self] in
                             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                            guard let self = self, !Task.isCancelled, !self.isStopping,
+                                  self.parakeetProcess == nil else { return }
                             self.launchParakeet()
                         }
+                        self.monitorTasks.append(restartTask)
                     }
                 }
             }
@@ -668,6 +701,10 @@ final class ProcessSupervisor {
     // MARK: - Stop All
 
     func stopAll() async {
+        isStopping = true
+        serverGeneration += 1
+        whisperGeneration += 1
+        parakeetGeneration += 1
         // Cancel monitor + health tasks
         for task in monitorTasks {
             task.cancel()
@@ -691,7 +728,11 @@ final class ProcessSupervisor {
     }
 
     private func stopProcess(_ process: Process?, name: String) async {
-        guard let process = process, process.isRunning else { return }
+        guard let process = process else { return }
+        if !process.isRunning {
+            closeOutputPipe(for: process)
+            return
+        }
 
         print("[ProcessSupervisor] Sending SIGTERM to \(name) (PID: \(process.processIdentifier))")
         process.terminate()
@@ -707,5 +748,6 @@ final class ProcessSupervisor {
             print("[ProcessSupervisor] Force killing \(name) (PID: \(process.processIdentifier))")
             kill(process.processIdentifier, SIGKILL)
         }
+        closeOutputPipe(for: process)
     }
 }

@@ -1,15 +1,19 @@
 import { EventEmitter } from 'node:events';
 import { claudeChat } from '../claude-cli.js';
+import { MODEL_CONFIG } from '../model-config.js';
+import { runLiveJson } from './live-json.js';
 
-// Tighter cadence so pending → partial transitions land close to when the
-// user hears the topic come up, not 15-30s later. Prompt is explicitly
-// lenient on the partial gate (any hint = partial), so small transcript
-// deltas still produce useful state transitions.
-const EVAL_INTERVAL_MS = 8_000;
+// Agenda updates have two lanes: lexical candidate turns take the short delta
+// path immediately; this slower timer reconciles state and catches semantic
+// matches that local token overlap cannot see.
+const EVAL_INTERVAL_MS = 30_000;
+const DELTA_DEBOUNCE_MS = 250;
 const MIN_NEW_WORDS_BEFORE_EVAL = 5;
 // First eval fires when transcript reaches this total word count — doesn't
 // require waiting for MIN_NEW_WORDS_BEFORE_EVAL of growth.
 const MIN_TOTAL_WORDS_FOR_FIRST_EVAL = 15;
+const MAX_DELTA_CHARS = 5_000;
+const MAX_RECONCILE_CHARS = 30_000;
 
 const EXTRACT_MAX_ITEMS = 20;
 const EXTRACT_ITEM_MAX_CHARS = 150;
@@ -74,20 +78,119 @@ export function parseAgenda(raw: string): AgendaItem[] {
     }));
 }
 
+type AgendaTriage = (
+  prompt: string,
+  systemPrompt: string,
+  signal?: AbortSignal,
+) => Promise<string>;
+
 export interface AgendaEvalDeps {
-  triage?: (prompt: string, systemPrompt: string, signal?: AbortSignal) => Promise<string>;
+  /** Backward-compatible injection used for both lanes in existing tests. */
+  triage?: AgendaTriage;
+  deltaTriage?: AgendaTriage;
+  reconcileTriage?: AgendaTriage;
+}
+
+export const AGENDA_SCHEMA = {
+  name: 'agenda_status',
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['items', 'missing_warnings'],
+    properties: {
+      items: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['id', 'state', 'evidence'],
+          properties: {
+            id: { type: 'string' },
+            state: { type: 'string', enum: ['pending', 'partial', 'covered'] },
+            evidence: { type: 'string' },
+          },
+        },
+      },
+      missing_warnings: {
+        type: 'array',
+        items: { type: 'string' },
+      },
+    },
+  },
+} as const;
+
+const AGENDA_DELTA_SYSTEM = `Role: Maintain a live meeting agenda from a small batch of new transcript turns.
+
+For every supplied agenda id, return pending, partial, or covered:
+- pending: the new turns add no evidence for this item.
+- partial: the topic surfaced, a relevant question was asked, or discussion began.
+- covered: the new turns contain an answer, decision, substantive exchange, or explicit deferral that closes this pass through the topic.
+
+Preserve meaning across ordinary synonyms and imperfect ASR. Evidence must be a direct quote under 120 characters. A delta cannot erase earlier evidence: do not regress an existing partial/covered item merely because this small batch omits its history. Leave missing_warnings empty; the periodic reconciliation lane owns wrap-up warnings.
+
+Return only the JSON contract.`;
+
+const AGENDA_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'ask', 'about', 'be', 'confirm', 'cover', 'discuss',
+  'do', 'for', 'how', 'in', 'is', 'it', 'of', 'on', 'or', 'our', 'review',
+  'the', 'their', 'this', 'to', 'we', 'what', 'when', 'who', 'with',
+]);
+
+const AGENDA_ALIASES = [
+  ['budget', 'cost', 'costs', 'price', 'pricing', 'spend'],
+  ['timeline', 'schedule', 'date', 'dates', 'deadline', 'deadlines', 'when'],
+  ['scope', 'deliverable', 'deliverables', 'requirement', 'requirements'],
+  ['risk', 'risks', 'concern', 'concerns', 'blocker', 'blockers', 'problem'],
+  ['owner', 'owners', 'ownership', 'responsible', 'who'],
+  ['team', 'staffing', 'resource', 'resources', 'capacity'],
+  ['decision', 'decide', 'approve', 'approval', 'confirm'],
+  ['action', 'actions', 'followup', 'follow-up', 'next'],
+] as const;
+
+function agendaTokens(text: string): Set<string> {
+  const raw = new Set(
+    text.toLowerCase().match(/[a-z0-9][a-z0-9-]*/g)?.filter(
+      (token) => token.length > 2 && !AGENDA_STOP_WORDS.has(token),
+    ) ?? [],
+  );
+  for (const group of AGENDA_ALIASES) {
+    if (group.some((token) => raw.has(token))) {
+      for (const token of group) raw.add(token);
+    }
+  }
+  return raw;
+}
+
+function isAgendaCandidate(items: AgendaItem[], text: string): boolean {
+  const turnTokens = agendaTokens(text);
+  if (turnTokens.size === 0) return false;
+  return items
+    .filter((item) => item.state !== 'covered')
+    .some((item) => {
+      const itemTokens = agendaTokens(item.text);
+      for (const token of itemTokens) {
+        if (turnTokens.has(token)) return true;
+      }
+      return false;
+    });
 }
 
 export class AgendaTracker extends EventEmitter {
   private items: AgendaItem[] = [];
   private missing: string[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
+  private deltaTimer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private lastEvalAt = 0;
   private lastEvalWordCount = 0;
   private transcriptProvider: () => string = () => '';
   private wordCountProvider: () => number = () => 0;
   private sessionTitle = '';
+  private pendingTranscriptLines: string[] = [];
+  private rerunRequested = false;
+  private totalLatencyMs = 0;
+  private completedEvals = 0;
+  private staleResults = 0;
 
   // Generation token — bumped on every start() and stop(). Any in-flight eval
   // whose captured generation no longer matches is discarded before it can
@@ -103,22 +206,40 @@ export class AgendaTracker extends EventEmitter {
   // Abort controller for the in-flight triage call — signalled on stop().
   private abortController: AbortController | null = null;
 
-  private readonly triage: NonNullable<AgendaEvalDeps['triage']>;
+  private readonly deltaTriage: AgendaTriage;
+  private readonly reconcileTriage: AgendaTriage;
 
   constructor(deps: AgendaEvalDeps = {}) {
     super();
-    // Use Haiku directly via claudeChat rather than the Gemini→Haiku→Codex
-    // triage chain. The chain is tuned for the 15s intelligence loop with a
-    // small 5-minute transcript window; for agenda eval with the full
-    // growing transcript, Gemini was stalling out for 30–40s on first runs
-    // before falling back to Haiku anyway. Skipping straight to Haiku keeps
-    // latency in the 2–5s range and makes the panel responsive.
-    this.triage = deps.triage ?? ((prompt, systemPrompt, signal) =>
-      claudeChat(prompt, {
+    const injected = deps.triage;
+    this.deltaTriage = deps.deltaTriage ?? injected ?? (async (prompt, systemPrompt, signal) => {
+      const result = await runLiveJson({
+        prompt,
         systemPrompt,
-        model: 'claude-haiku-4-5-20251001',
+        schema: AGENDA_SCHEMA,
+        openAiModel: MODEL_CONFIG.agenda,
+        label: 'agenda-delta',
         signal,
-      }));
+        providerTimeoutMs: 2_500,
+        totalTimeoutMs: 5_000,
+        maxOutputTokens: 700,
+      });
+      return result.text;
+    });
+    this.reconcileTriage = deps.reconcileTriage ?? injected ?? (async (prompt, systemPrompt, signal) => {
+      const result = await runLiveJson({
+        prompt,
+        systemPrompt,
+        schema: AGENDA_SCHEMA,
+        openAiModel: MODEL_CONFIG.agendaReconcile,
+        label: 'agenda-reconcile',
+        signal,
+        providerTimeoutMs: 4_000,
+        totalTimeoutMs: 7_000,
+        maxOutputTokens: 900,
+      });
+      return result.text;
+    });
   }
 
   start(options: {
@@ -137,6 +258,11 @@ export class AgendaTracker extends EventEmitter {
     this.sessionTitle = options.sessionTitle ?? '';
     this.lastEvalAt = 0;
     this.lastEvalWordCount = 0;
+    this.pendingTranscriptLines = [];
+    this.rerunRequested = false;
+    this.totalLatencyMs = 0;
+    this.completedEvals = 0;
+    this.staleResults = 0;
 
     if (this.items.length === 0) {
       return [];
@@ -146,6 +272,7 @@ export class AgendaTracker extends EventEmitter {
     this.timer = setInterval(() => {
       this.scheduleEval().catch(() => {/* swallow */});
     }, EVAL_INTERVAL_MS);
+    if (typeof this.timer.unref === 'function') this.timer.unref();
 
     return this.items;
   }
@@ -154,6 +281,10 @@ export class AgendaTracker extends EventEmitter {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    if (this.deltaTimer) {
+      clearTimeout(this.deltaTimer);
+      this.deltaTimer = null;
     }
     this.generation++;
     this.running = false;
@@ -164,6 +295,8 @@ export class AgendaTracker extends EventEmitter {
     this.sessionTitle = '';
     this.lastEvalAt = 0;
     this.lastEvalWordCount = 0;
+    this.pendingTranscriptLines = [];
+    this.rerunRequested = false;
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
@@ -181,18 +314,69 @@ export class AgendaTracker extends EventEmitter {
     };
   }
 
+  getMetrics(): {
+    completedEvals: number;
+    staleResults: number;
+    avgLatencyMs: number;
+    pendingDeltaLines: number;
+  } {
+    return {
+      completedEvals: this.completedEvals,
+      staleResults: this.staleResults,
+      avgLatencyMs: this.completedEvals > 0
+        ? Math.round(this.totalLatencyMs / this.completedEvals)
+        : 0,
+      pendingDeltaLines: this.pendingTranscriptLines.length,
+    };
+  }
+
+  /**
+   * Feed a finalized cohesive transcript turn. Every turn is retained for the
+   * next reconciliation; turns with lexical/alias overlap to an open agenda
+   * item also take the immediate delta path.
+   */
+  noteSegment(text: string, source: 'mic' | 'meeting'): void {
+    if (!this.running || this.items.length === 0) return;
+    const value = (text ?? '').trim();
+    if (!value) return;
+    this.pendingTranscriptLines.push(`${source === 'mic' ? '[You]' : '[Meeting]'} ${value}`);
+    while (this.pendingTranscriptLines.join('\n').length > MAX_DELTA_CHARS) {
+      this.pendingTranscriptLines.shift();
+    }
+    if (isAgendaCandidate(this.items, value)) this.requestDeltaEval();
+  }
+
+  private requestDeltaEval(): void {
+    if (!this.running) return;
+    if (this.currentEval) {
+      this.rerunRequested = true;
+      this.emit('eval', { queued: 'latest', mode: 'delta' });
+      return;
+    }
+    if (this.deltaTimer) clearTimeout(this.deltaTimer);
+    this.deltaTimer = setTimeout(() => {
+      this.deltaTimer = null;
+      this.runEvaluation(false, 'delta').catch(() => {/* surfaced via events */});
+    }, DELTA_DEBOUNCE_MS);
+    if (typeof this.deltaTimer.unref === 'function') this.deltaTimer.unref();
+  }
+
   /**
    * Force an immediate evaluation (e.g., on session.stop for a final wrap-up).
    * Awaits any in-flight eval first so a forced pass is never silently dropped,
    * then runs a fresh pass against the current transcript.
    */
   async evaluateNow(): Promise<void> {
+    if (this.deltaTimer) {
+      clearTimeout(this.deltaTimer);
+      this.deltaTimer = null;
+    }
     if (this.currentEval) {
       try { await this.currentEval; } catch { /* already handled inside */ }
     }
     // After the prior eval settles, the session may have been stopped — in
     // that case `runEvaluation` bails on its own generation check.
-    await this.runEvaluation(true);
+    await this.runEvaluation(true, 'reconcile');
   }
 
   private async scheduleEval(): Promise<void> {
@@ -217,10 +401,13 @@ export class AgendaTracker extends EventEmitter {
       return;
     }
 
-    await this.runEvaluation(false);
+    await this.runEvaluation(false, 'reconcile');
   }
 
-  private async runEvaluation(force: boolean): Promise<void> {
+  private async runEvaluation(
+    force: boolean,
+    mode: 'delta' | 'reconcile',
+  ): Promise<void> {
     // Re-entrancy guard. Forced evals are expected to have awaited the
     // in-flight promise via `evaluateNow()` before reaching here.
     if (this.currentEval) return;
@@ -228,7 +415,10 @@ export class AgendaTracker extends EventEmitter {
     const gen = this.generation;
     if (!force && !this.running) return;
 
-    const transcript = this.transcriptProvider();
+    const consumedDeltaLines = this.pendingTranscriptLines.length;
+    const transcript = mode === 'delta'
+      ? this.pendingTranscriptLines.join('\n')
+      : this.transcriptProvider().slice(-MAX_RECONCILE_CHARS);
     if (!transcript || transcript.trim().length < 20) {
       if (!force) return;
     }
@@ -236,7 +426,13 @@ export class AgendaTracker extends EventEmitter {
     const controller = new AbortController();
     this.abortController = controller;
 
-    const task = this.doEvaluation(gen, transcript, controller.signal);
+    const task = this.doEvaluation(
+      gen,
+      transcript,
+      controller.signal,
+      mode,
+      consumedDeltaLines,
+    );
     this.currentEval = task;
     try {
       await task;
@@ -247,6 +443,10 @@ export class AgendaTracker extends EventEmitter {
       if (this.abortController === controller) {
         this.abortController = null;
       }
+      if (this.running && this.rerunRequested) {
+        this.rerunRequested = false;
+        queueMicrotask(() => this.requestDeltaEval());
+      }
     }
   }
 
@@ -254,16 +454,18 @@ export class AgendaTracker extends EventEmitter {
     gen: number,
     transcript: string,
     signal: AbortSignal,
+    mode: 'delta' | 'reconcile',
+    consumedDeltaLines: number,
   ): Promise<void> {
     const startedAt = Date.now();
-    this.emit('eval', { started: true, words: this.wordCountProvider() });
+    this.emit('eval', { started: true, words: this.wordCountProvider(), mode });
     try {
-      // CLI-only (subscription, no paid API): Haiku via the injected triage().
-      // Loses the Anthropic prompt cache, but incurs no $ cost — acceptable
-      // for the subscription-only posture. The ⚡ Fast button and
-      // highlight-to-ask are the only sanctioned API consumers.
-      const prompt = buildAgendaEvalPrompt(this.items, transcript, this.sessionTitle);
-      const raw = await this.triage(prompt, AGENDA_EVAL_SYSTEM, signal);
+      const prompt = mode === 'delta'
+        ? buildAgendaDeltaPrompt(this.items, transcript, this.sessionTitle)
+        : buildAgendaEvalPrompt(this.items, transcript, this.sessionTitle);
+      const raw = mode === 'delta'
+        ? await this.deltaTriage(prompt, AGENDA_DELTA_SYSTEM, signal)
+        : await this.reconcileTriage(prompt, AGENDA_EVAL_SYSTEM, signal);
 
       // Stale-guard: drop the result if the session changed while we awaited.
       if (gen !== this.generation) {
@@ -282,9 +484,26 @@ export class AgendaTracker extends EventEmitter {
       for (const item of this.items) {
         const update = byId.get(item.id);
         if (!update) continue;
+        let nextState = update.state;
+
+        if (mode === 'delta') {
+          const rank: Record<AgendaItemState, number> = {
+            pending: 0,
+            partial: 1,
+            covered: 2,
+          };
+          // A delta sees only a small batch of new turns. It cannot erase
+          // earlier evidence, and one keyword-level hit cannot jump an item
+          // straight from pending to covered. The full reconciliation lane
+          // confirms coverage against the complete transcript.
+          if (rank[nextState] < rank[item.state]) continue;
+          if (item.state === 'pending' && nextState === 'covered') {
+            nextState = 'partial';
+          }
+        }
 
         // Clear stale evidence when an item transitions back to pending.
-        if (update.state === 'pending' && item.state !== 'pending') {
+        if (nextState === 'pending' && item.state !== 'pending') {
           item.state = 'pending';
           item.evidence = undefined;
           item.updatedAt = Date.now();
@@ -293,24 +512,32 @@ export class AgendaTracker extends EventEmitter {
         }
 
         if (
-          update.state !== item.state ||
+          nextState !== item.state ||
           (update.evidence && update.evidence !== item.evidence)
         ) {
-          item.state = update.state;
+          item.state = nextState;
           if (update.evidence) item.evidence = update.evidence;
           item.updatedAt = Date.now();
           changed = true;
         }
       }
 
-      const nextMissing = parsed.missing_warnings ?? [];
-      if (JSON.stringify(nextMissing) !== JSON.stringify(this.missing)) {
-        this.missing = nextMissing;
-        changed = true;
+      if (mode === 'reconcile') {
+        const nextMissing = parsed.missing_warnings ?? [];
+        if (JSON.stringify(nextMissing) !== JSON.stringify(this.missing)) {
+          this.missing = nextMissing;
+          changed = true;
+        }
       }
 
       this.lastEvalAt = Date.now();
       this.lastEvalWordCount = this.wordCountProvider();
+      if (consumedDeltaLines > 0) {
+        this.pendingTranscriptLines.splice(0, consumedDeltaLines);
+      }
+      const latencyMs = Date.now() - startedAt;
+      this.completedEvals++;
+      this.totalLatencyMs += latencyMs;
 
       // Always emit status on a successful eval so consumers see lastEvalAt
       // advance and can confirm the tracker is live, even when the LLM
@@ -324,13 +551,18 @@ export class AgendaTracker extends EventEmitter {
         covered,
         partial,
         total: this.items.length,
-        latencyMs: Date.now() - startedAt,
+        latencyMs,
+        mode,
       });
       this.emit('status', this.getStatus());
     } catch (err) {
       if (gen !== this.generation) return; // session changed — swallow silently
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg === 'Aborted') return;
+      if (msg === 'Aborted') {
+        this.staleResults++;
+        this.emit('eval', { skipped: 'deadline', mode });
+        return;
+      }
       this.emit('error', msg);
     }
   }
@@ -742,6 +974,29 @@ function buildAgendaEvalPrompt(
   return staticPrefix + dynamicTail;
 }
 
+function buildAgendaDeltaPrompt(
+  items: AgendaItem[],
+  transcriptDelta: string,
+  sessionTitle: string,
+): string {
+  const titleLine = sessionTitle ? `Meeting: ${sessionTitle}\n\n` : '';
+  const agendaList = items
+    .map((item) => {
+      const evidence = item.evidence ? `; prior evidence="${item.evidence}"` : '';
+      return `${item.id}: ${item.text} [current=${item.state}${evidence}]`;
+    })
+    .join('\n');
+  return `${titleLine}Agenda state:
+${agendaList}
+
+New transcript turns only:
+<transcript_delta>
+${transcriptDelta}
+</transcript_delta>
+
+Return one entry for every agenda id. Preserve current state when these new turns add no evidence. missing_warnings must be an empty array.`;
+}
+
 function parseAgendaResponse(raw: string): AgendaEvalResponse | null {
   if (!raw) return null;
   // Extract the largest JSON object in the response
@@ -837,7 +1092,7 @@ export async function extractAgendaItemsFromNotes(
   try {
     response = await chat(firstPrompt, {
       systemPrompt: AGENDA_EXTRACT_SYSTEM,
-      model: 'claude-sonnet-4-6',
+      model: MODEL_CONFIG.suggestion,
       signal,
     });
   } catch (err) {
@@ -857,7 +1112,7 @@ Your previous reply was not valid JSON matching the required shape. Return JSON 
     try {
       const retry = await chat(retryPrompt, {
         systemPrompt: AGENDA_EXTRACT_SYSTEM,
-        model: 'claude-sonnet-4-6',
+        model: MODEL_CONFIG.suggestion,
         signal,
       });
       parsed = parseExtractResponse(retry);

@@ -21,8 +21,8 @@ enum AppSettings {
     /// Whether the VAD-driven chunk emitter is active. When false, falls
     /// back to the 3-second fixed timer path in AudioCaptureManager.
     ///
-    /// Shipped default is `false` so Phase 3 rolls out opt-in per machine.
-    /// After real-meeting validation, flip the default to `true`.
+    /// Enabled by default after soak testing; the environment and stored
+    /// preference remain available as an immediate rollback switch.
     static var useVADEmitter: Bool {
         if let env = ProcessInfo.processInfo.environment["MC_USE_VAD_EMIT"] {
             return env == "1" || env.lowercased() == "true"
@@ -30,7 +30,7 @@ enum AppSettings {
         if UserDefaults.standard.object(forKey: Key.useVADEmitter) != nil {
             return UserDefaults.standard.bool(forKey: Key.useVADEmitter)
         }
-        return false // ship default
+        return true
     }
 
     /// Silero speech-probability threshold. 0.50 matches whisper-server's

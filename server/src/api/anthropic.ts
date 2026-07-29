@@ -1,17 +1,11 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { appendFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { paidApiDisabled } from './killswitch.js';
+import { log } from '../logging.js';
+import { MODEL_CONFIG } from '../model-config.js';
+import { beginLlmRequest, recordLlmUsage } from './budget.js';
 
-const HAIKU_MODEL = 'claude-haiku-4-5-20251001';
-const SONNET_MODEL = 'claude-sonnet-4-6';
-
-const LOG_FILE = join(homedir(), '.meeting-copilot', 'server.log');
-function log(msg: string): void {
-  const line = `[${new Date().toISOString()}] ${msg}\n`;
-  try { appendFileSync(LOG_FILE, line); } catch {}
-}
+const HAIKU_MODEL = MODEL_CONFIG.haiku;
+const SONNET_MODEL = MODEL_CONFIG.suggestion;
 
 let cachedClient: Anthropic | null = null;
 
@@ -31,9 +25,16 @@ export function isAnthropicApiAvailable(): boolean {
 export async function anthropicTriageJson(
   prompt: string,
   systemPrompt: string,
-  options: { signal?: AbortSignal; maxTokens?: number; timeoutMs?: number; label?: string } = {},
+  options: {
+    signal?: AbortSignal;
+    maxTokens?: number;
+    timeoutMs?: number;
+    label?: string;
+    schema?: Record<string, unknown>;
+  } = {},
 ): Promise<string> {
   const client = getClient();
+  beginLlmRequest();
   const tag = options.label ?? 'haiku';
   const started = Date.now();
   const res = await client.messages.create(
@@ -42,6 +43,13 @@ export async function anthropicTriageJson(
       max_tokens: options.maxTokens ?? 512,
       system: systemPrompt,
       messages: [{ role: 'user', content: prompt }],
+      ...(options.schema
+        ? {
+            output_config: {
+              format: { type: 'json_schema' as const, schema: options.schema },
+            },
+          }
+        : {}),
     },
     {
       timeout: options.timeoutMs ?? 10_000,
@@ -51,7 +59,13 @@ export async function anthropicTriageJson(
   );
   const elapsed = Date.now() - started;
   const u = res.usage;
-  log(`[api/anthropic] ${tag} latencyMs=${elapsed} in=${u?.input_tokens ?? 0} out=${u?.output_tokens ?? 0} cacheRead=${u?.cache_read_input_tokens ?? 0} cacheWrite=${u?.cache_creation_input_tokens ?? 0}`);
+  recordLlmUsage({
+    inputTokens: u?.input_tokens ?? 0,
+    outputTokens: u?.output_tokens ?? 0,
+    inputDollarsPerMillion: Number(process.env.COPILOT_ANTHROPIC_INPUT_PER_MILLION || 3),
+    outputDollarsPerMillion: Number(process.env.COPILOT_ANTHROPIC_OUTPUT_PER_MILLION || 15),
+  });
+  log('api/anthropic', `${tag} model=${HAIKU_MODEL} latencyMs=${elapsed} in=${u?.input_tokens ?? 0} out=${u?.output_tokens ?? 0} cacheRead=${u?.cache_read_input_tokens ?? 0} cacheWrite=${u?.cache_creation_input_tokens ?? 0}`);
 
   // Combine all text blocks in the response.
   let text = '';
@@ -77,6 +91,7 @@ export async function anthropicHaikuCachedJson(params: {
   label?: string;
 }): Promise<string> {
   const client = getClient();
+  beginLlmRequest();
   const tag = params.label ?? 'haiku-cached';
   const started = Date.now();
 
@@ -112,7 +127,13 @@ export async function anthropicHaikuCachedJson(params: {
 
   const elapsed = Date.now() - started;
   const u = res.usage;
-  log(`[api/anthropic] ${tag} latencyMs=${elapsed} in=${u?.input_tokens ?? 0} out=${u?.output_tokens ?? 0} cacheRead=${u?.cache_read_input_tokens ?? 0} cacheWrite=${u?.cache_creation_input_tokens ?? 0}`);
+  recordLlmUsage({
+    inputTokens: u?.input_tokens ?? 0,
+    outputTokens: u?.output_tokens ?? 0,
+    inputDollarsPerMillion: Number(process.env.COPILOT_ANTHROPIC_INPUT_PER_MILLION || 1),
+    outputDollarsPerMillion: Number(process.env.COPILOT_ANTHROPIC_OUTPUT_PER_MILLION || 5),
+  });
+  log('api/anthropic', `${tag} model=${HAIKU_MODEL} latencyMs=${elapsed} in=${u?.input_tokens ?? 0} out=${u?.output_tokens ?? 0} cacheRead=${u?.cache_read_input_tokens ?? 0} cacheWrite=${u?.cache_creation_input_tokens ?? 0}`);
 
   let text = '';
   for (const block of res.content) {
@@ -141,6 +162,7 @@ export async function anthropicSuggestStream(params: {
   label?: string;
 }): Promise<{ text: string; usage: Anthropic.Messages.Usage | null }> {
   const client = getClient();
+  beginLlmRequest();
   const tag = params.label ?? 'sonnet-suggest';
   const started = Date.now();
   let firstTokenAt = 0;
@@ -161,6 +183,10 @@ export async function anthropicSuggestStream(params: {
     {
       model: SONNET_MODEL,
       max_tokens: params.maxTokens ?? 2048,
+      // Sonnet 5 enables adaptive thinking by default. Live suggestions are
+      // short, scoped, and latency-sensitive, so explicitly preserve the old
+      // no-thinking behavior.
+      thinking: { type: 'disabled' },
       system: [
         {
           type: 'text',
@@ -187,6 +213,12 @@ export async function anthropicSuggestStream(params: {
   const elapsed = Date.now() - started;
   const ttft = firstTokenAt > 0 ? firstTokenAt - started : -1;
   const u = finalMessage.usage;
-  log(`[api/anthropic] ${tag} ttftMs=${ttft} totalMs=${elapsed} in=${u?.input_tokens ?? 0} out=${u?.output_tokens ?? 0} cacheRead=${u?.cache_read_input_tokens ?? 0} cacheWrite=${u?.cache_creation_input_tokens ?? 0}`);
+  recordLlmUsage({
+    inputTokens: u?.input_tokens ?? 0,
+    outputTokens: u?.output_tokens ?? 0,
+    inputDollarsPerMillion: Number(process.env.COPILOT_ANTHROPIC_INPUT_PER_MILLION || 3),
+    outputDollarsPerMillion: Number(process.env.COPILOT_ANTHROPIC_OUTPUT_PER_MILLION || 15),
+  });
+  log('api/anthropic', `${tag} model=${SONNET_MODEL} ttftMs=${ttft} totalMs=${elapsed} in=${u?.input_tokens ?? 0} out=${u?.output_tokens ?? 0} cacheRead=${u?.cache_read_input_tokens ?? 0} cacheWrite=${u?.cache_creation_input_tokens ?? 0}`);
   return { text: accumulated, usage: finalMessage.usage ?? null };
 }

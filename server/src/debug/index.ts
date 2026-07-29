@@ -2,7 +2,8 @@ import type { Request, Response } from 'express';
 import type { TranscriptionService } from '../transcription/index.js';
 import type { IntelligenceEngine } from '../intelligence/index.js';
 import type { WorkerRegistry } from '../workers/registry.js';
-import type { TranscriptSegment } from '../transcription/types.js';
+import type { TranscriptSegment, TranscriptionProviderInfo } from '../transcription/types.js';
+import { getLlmBudgetSnapshot } from '../api/budget.js';
 
 export interface DebugMetrics {
   audio: {
@@ -15,6 +16,14 @@ export interface DebugMetrics {
     avgLatencyMs: number;
     errorRate: number;
     queueDepth: number;
+    activeCount: number;
+    provider: TranscriptionProviderInfo;
+    queueLatencyP50Ms: number | null;
+    queueLatencyP95Ms: number | null;
+    providerLatencyP50Ms: number | null;
+    providerLatencyP95Ms: number | null;
+    endToEndLatencyP50Ms: number | null;
+    endToEndLatencyP95Ms: number | null;
     hallucinationsFiltered: number;
     prewarmDurationMs: number | null;
   };
@@ -23,6 +32,11 @@ export interface DebugMetrics {
     haikuHitRate: number;
     sonnetCallRate: number;
     avgSuggestionLatencyMs: number;
+    budget: ReturnType<typeof getLlmBudgetSnapshot>;
+    realtime: {
+      agenda: Record<string, number>;
+      coach: Record<string, number>;
+    } | null;
   };
   workers: {
     byState: Record<string, number>;
@@ -70,12 +84,23 @@ export class DebugHandler {
   private firstChunkLatencyMs: number | null = null;
   private e2eLatencySamples: number[] = [];
   private transcriptSegmentsBroadcast = 0;
+  private realtimeMetricsProvider: (() => {
+    agenda: Record<string, number>;
+    coach: Record<string, number>;
+  }) | null = null;
 
   constructor(
     private transcription: TranscriptionService,
     private intelligence: IntelligenceEngine,
     private registry: WorkerRegistry,
   ) {}
+
+  setRealtimeMetricsProvider(provider: () => {
+    agenda: Record<string, number>;
+    coach: Record<string, number>;
+  }): void {
+    this.realtimeMetricsProvider = provider;
+  }
 
   recordAudioChunk(bytes: number): void {
     this.audioChunksReceived++;
@@ -164,6 +189,14 @@ export class DebugHandler {
         avgLatencyMs: this.transcription.avgLatencyMs,
         errorRate: this.transcription.errorRate,
         queueDepth: this.transcription.queueDepth,
+        activeCount: this.transcription.activeTranscriptions,
+        provider: this.transcription.providerInfo,
+        queueLatencyP50Ms: percentile([...this.transcription.queueLatencySamples].sort((a, b) => a - b), 0.5),
+        queueLatencyP95Ms: percentile([...this.transcription.queueLatencySamples].sort((a, b) => a - b), 0.95),
+        providerLatencyP50Ms: percentile([...this.transcription.providerLatencySamples].sort((a, b) => a - b), 0.5),
+        providerLatencyP95Ms: percentile([...this.transcription.providerLatencySamples].sort((a, b) => a - b), 0.95),
+        endToEndLatencyP50Ms: percentile([...this.transcription.endToEndLatencySamples].sort((a, b) => a - b), 0.5),
+        endToEndLatencyP95Ms: percentile([...this.transcription.endToEndLatencySamples].sort((a, b) => a - b), 0.95),
         hallucinationsFiltered: this.transcription.hallucinationsFiltered,
         prewarmDurationMs: this.transcription.prewarmDurationMs,
       },
@@ -172,6 +205,8 @@ export class DebugHandler {
         haikuHitRate: this.intelligence.haikuHitRate,
         sonnetCallRate: this.intelligence.sonnetCallRate,
         avgSuggestionLatencyMs: this.intelligence.avgSuggestionLatencyMs,
+        budget: getLlmBudgetSnapshot(),
+        realtime: this.realtimeMetricsProvider?.() ?? null,
       },
       workers: {
         byState: this.registry.byState,

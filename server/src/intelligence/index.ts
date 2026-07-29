@@ -1,6 +1,10 @@
 import { EventEmitter } from 'node:events';
 import { createHash, randomUUID } from 'node:crypto';
-import { claudeTriage, claudeSuggest } from '../claude-cli.js';
+import { claudeChat, claudeTriage, claudeSuggest } from '../claude-cli.js';
+import { isOpenAiApiAvailable, openaiTriageJson } from '../api/openai.js';
+import { isAnthropicApiAvailable, anthropicSuggestStream } from '../api/anthropic.js';
+import { LLM_CONFIG, MODEL_CONFIG } from '../model-config.js';
+import { LlmBudgetExceededError, resetLlmBudget } from '../api/budget.js';
 import { parsePartialSuggestion, type PartialSuggestion } from './partial-json.js';
 import type { TranscriptSegment } from '../transcription/types.js';
 import type { ActionSuggestion } from '../workers/types.js';
@@ -16,16 +20,15 @@ import {
 import {
   SONNET_SUGGEST_SYSTEM,
   buildSonnetSuggestPrompt,
+  buildSonnetSuggestPromptSplit,
   type SonnetSuggestionResult,
 } from './prompts/sonnet-suggest.v1.js';
 
 const WINDOW_DURATION_MS = 5 * 60 * 1000; // 5 minutes
 const DEFAULT_BASE_EVAL_INTERVAL_MS = 15_000;
-const MAX_EVAL_IN_FLIGHT = 2;
-const EVAL_QUEUE_DEPTH = 5;
 const CONTEXT_COMPRESSION_INTERVAL_MS = 5 * 60 * 1000;
 const OVERLAP_HISTORY_SIZE = 5;
-const OVERLAP_THRESHOLD = 0.8;
+const RECENT_ACTION_SUGGESTION_LIMIT = 12;
 
 const IMMEDIATE_TRIGGERS = [
   '?',
@@ -40,10 +43,16 @@ export class IntelligenceEngine extends EventEmitter {
   private compressionTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private consecutiveNonActionable = 0;
-  private evalInFlight = 0;
-  private evalQueue: Array<() => Promise<void>> = [];
+  private evalInFlight = false;
+  private evalDirty = false;
+  private evalDebounce: ReturnType<typeof setTimeout> | null = null;
+  private currentEvalAbort: AbortController | null = null;
+  private triageApiFailures = 0;
+  private triageApiDisabledUntil = 0;
+  private suggestionApiFailures = 0;
+  private suggestionApiDisabledUntil = 0;
   private recentWindowHashes: string[] = [];
-  private recentWindowWordSets: Set<string>[] = [];
+  private recentActionSuggestions: Array<{ title: string; triggerQuote: string }> = [];
   private contextSummaries: Array<{
     summary: string;
     windowStart: number;
@@ -136,15 +145,34 @@ export class IntelligenceEngine extends EventEmitter {
   addTranscript(segment: TranscriptSegment): void {
     this.segments.push(segment);
 
-    // Check for immediate triggers
-    if (this.running && this.shouldTriggerImmediate(segment.text)) {
-      this.scheduleEval();
+    // Evaluate on meaningful transcript arrivals, with a short debounce. This
+    // cuts perceived latency while the periodic timer remains a safety net.
+    if (this.running && segment.wordCount >= 4) {
+      if (this.evalDebounce) clearTimeout(this.evalDebounce);
+      const delay = this.shouldTriggerImmediate(segment.text) ? 0 : 300;
+      this.evalDebounce = setTimeout(() => {
+        this.evalDebounce = null;
+        this.scheduleEval();
+      }, delay);
     }
   }
 
   start(): void {
     if (this.running) return;
+    // Intelligence state is session-scoped. The singleton engine is reused by
+    // the server, so a meeting started soon after another one must not inherit
+    // transcript windows, compressed context, dedup history, or metrics.
+    this.segments = [];
+    this.recentWindowHashes = [];
+    this.recentActionSuggestions = [];
+    this.contextSummaries = [];
+    this.consecutiveNonActionable = 0;
+    this.evalsRun = 0;
+    this.haikuActionableCount = 0;
+    this.sonnetCallCount = 0;
+    this.totalSuggestionLatencyMs = 0;
     this.running = true;
+    resetLlmBudget();
 
     // Start adaptive eval loop
     this.resetEvalTimer();
@@ -169,6 +197,13 @@ export class IntelligenceEngine extends EventEmitter {
       clearInterval(this.compressionTimer);
       this.compressionTimer = null;
     }
+    if (this.evalDebounce) {
+      clearTimeout(this.evalDebounce);
+      this.evalDebounce = null;
+    }
+    this.currentEvalAbort?.abort();
+    this.currentEvalAbort = null;
+    this.evalDirty = false;
 
     this.projectContext = [];
     this.meetingContext = {};
@@ -274,53 +309,34 @@ export class IntelligenceEngine extends EventEmitter {
 
   private scheduleEval(): void {
     if (!this.running) return;
-
-    // Bounded queue: drop if too deep
-    if (this.evalQueue.length >= EVAL_QUEUE_DEPTH) return;
-
-    const evalFn = async () => {
-      await this.runEvaluation();
-    };
-
-    if (this.evalInFlight < MAX_EVAL_IN_FLIGHT) {
-      this.evalInFlight++;
-      evalFn().finally(() => {
-        this.evalInFlight--;
-        this.drainEvalQueue();
-      });
-    } else {
-      this.evalQueue.push(evalFn);
+    if (this.evalInFlight) {
+      this.evalDirty = true;
+      return;
     }
+    this.evalInFlight = true;
+    this.currentEvalAbort = new AbortController();
+    const signal = this.currentEvalAbort.signal;
+    this.runEvaluation(signal).finally(() => {
+      this.evalInFlight = false;
+      this.currentEvalAbort = null;
+      if (this.running && this.evalDirty) {
+        this.evalDirty = false;
+        queueMicrotask(() => this.scheduleEval());
+      }
+    });
   }
 
-  private drainEvalQueue(): void {
-    while (
-      this.evalInFlight < MAX_EVAL_IN_FLIGHT &&
-      this.evalQueue.length > 0
-    ) {
-      const next = this.evalQueue.shift()!;
-      this.evalInFlight++;
-      next().finally(() => {
-        this.evalInFlight--;
-        this.drainEvalQueue();
-      });
-    }
-  }
-
-  private async runEvaluation(): Promise<void> {
+  private async runEvaluation(signal: AbortSignal): Promise<void> {
     const window = this.getTranscriptWindow();
     if (!window || window.trim().length < 20) return;
 
     // Overlap dedup
     const windowHash = this.hashWindow(window);
-    const windowWords = new Set(window.toLowerCase().split(/\s+/).filter(Boolean));
-    if (this.isOverlapping(windowHash, windowWords)) return;
+    if (this.isOverlapping(windowHash)) return;
 
     this.recentWindowHashes.push(windowHash);
-    this.recentWindowWordSets.push(windowWords);
     if (this.recentWindowHashes.length > OVERLAP_HISTORY_SIZE) {
       this.recentWindowHashes.shift();
-      this.recentWindowWordSets.shift();
     }
 
     this.evalsRun++;
@@ -329,14 +345,18 @@ export class IntelligenceEngine extends EventEmitter {
 
     try {
       // Tier 1: Haiku triage
-      const triageResult = await this.runHaikuTriage(window);
+      const triageResult = await this.runHaikuTriage(window, signal);
+      const repeatedMoment = triageResult.actionable
+        && this.isRepeatedActionableMoment(triageResult.triggerQuote);
       this.emit('intelligence.eval', {
         tier: 1,
-        actionable: triageResult.actionable,
-        reason: triageResult.reason,
+        actionable: triageResult.actionable && !repeatedMoment,
+        reason: repeatedMoment
+          ? 'Suppressed a repeat of an action card already surfaced this meeting'
+          : triageResult.reason,
       });
 
-      if (!triageResult.actionable) {
+      if (!triageResult.actionable || repeatedMoment) {
         this.consecutiveNonActionable++;
         if (this.consecutiveNonActionable === 3) {
           this.resetEvalTimer(); // Switch to backoff
@@ -351,11 +371,21 @@ export class IntelligenceEngine extends EventEmitter {
       // Tier 2: Sonnet suggestion
       this.sonnetCallCount++;
       this.emit('intelligence.activity', { phase: 'generating' });
-      const suggestion = await this.runSonnetSuggestion(window, triageResult);
+      const suggestion = await this.runSonnetSuggestion(window, triageResult, signal);
       const latency = Date.now() - startTime;
       this.totalSuggestionLatencyMs += latency;
 
       if (suggestion) {
+        this.recentActionSuggestions.push({
+          title: suggestion.title,
+          triggerQuote: suggestion.triggerQuote || triageResult.triggerQuote,
+        });
+        if (this.recentActionSuggestions.length > RECENT_ACTION_SUGGESTION_LIMIT) {
+          this.recentActionSuggestions.splice(
+            0,
+            this.recentActionSuggestions.length - RECENT_ACTION_SUGGESTION_LIMIT,
+          );
+        }
         this.emit('intelligence.suggestion', suggestion);
         if (this.suggestionCallback) {
           this.suggestionCallback(suggestion);
@@ -372,7 +402,7 @@ export class IntelligenceEngine extends EventEmitter {
     }
   }
 
-  private async runHaikuTriage(window: string): Promise<HaikuTriageResult> {
+  private async runHaikuTriage(window: string, signal: AbortSignal): Promise<HaikuTriageResult> {
     const projectBrief = this.projectContext.length > 0
       ? formatProjectBrief(this.projectContext[0]!)
       : undefined;
@@ -380,12 +410,53 @@ export class IntelligenceEngine extends EventEmitter {
       window,
       projectBrief,
       this.contextManifest || undefined,
+      this.recentActionSuggestions,
     );
 
-    // CLI-only (subscription, no paid API): Gemini → Haiku → Codex chain.
-    // The ⚡ Fast button and highlight-to-ask are the only sanctioned API
-    // consumers; everything else runs on the headless CLIs.
-    const text = await claudeTriage(prompt, HAIKU_TRIAGE_SYSTEM);
+    // In auto/api mode, prefer the direct structured API for predictable live
+    // latency. `COPILOT_LIVE_LLM_MODE=cli` forces the subscription-backed
+    // Gemini → Haiku fallback chain when incremental cost matters more.
+    const useApi = LLM_CONFIG.liveTransport !== 'cli'
+      && isOpenAiApiAvailable()
+      && Date.now() >= this.triageApiDisabledUntil;
+    let text: string;
+    if (useApi) {
+      try {
+        text = await openaiTriageJson(
+          prompt,
+          HAIKU_TRIAGE_SYSTEM,
+          {
+            name: 'meeting_triage',
+            schema: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['actionable', 'reason', 'triggerQuote'],
+              properties: {
+                actionable: { type: 'boolean' },
+                reason: { type: 'string' },
+                triggerQuote: { type: 'string' },
+              },
+            },
+          },
+          { signal, timeoutMs: 5_000, label: 'live-triage' },
+        );
+        this.triageApiFailures = 0;
+      } catch (error) {
+        if (signal.aborted || error instanceof LlmBudgetExceededError || this.isAuthenticationError(error)) throw error;
+        this.triageApiFailures += 1;
+        if (this.triageApiFailures >= 2) {
+          this.triageApiDisabledUntil = Date.now() + 2 * 60_000;
+        }
+        this.emit('intelligence.error', { code: 'TRIAGE_API_DEGRADED', fallback: 'claude-cli' });
+        text = await claudeChat(prompt, {
+          systemPrompt: HAIKU_TRIAGE_SYSTEM,
+          model: MODEL_CONFIG.haiku,
+          signal,
+        });
+      }
+    } else {
+      text = await claudeTriage(prompt, HAIKU_TRIAGE_SYSTEM, signal);
+    }
     try {
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
@@ -400,6 +471,7 @@ export class IntelligenceEngine extends EventEmitter {
   private async runSonnetSuggestion(
     window: string,
     triageResult: HaikuTriageResult,
+    signal: AbortSignal,
   ): Promise<ActionSuggestion | null> {
     const projectBriefs = this.projectContext.map((c) => formatProjectBrief(c));
     const contextBlock = this.contextDocs.length > 0
@@ -434,21 +506,62 @@ export class IntelligenceEngine extends EventEmitter {
       }
     };
 
-    const text = await claudeSuggest(
-      buildSonnetSuggestPrompt(
+    const triage = {
+      reason: triageResult.reason,
+      triggerQuote: triageResult.triggerQuote,
+    };
+    const useApi = LLM_CONFIG.liveTransport !== 'cli'
+      && isAnthropicApiAvailable()
+      && Date.now() >= this.suggestionApiDisabledUntil;
+    let text: string;
+    if (useApi) {
+      const split = buildSonnetSuggestPromptSplit(
         window,
-        {
-          reason: triageResult.reason,
-          triggerQuote: triageResult.triggerQuote,
-        },
+        triage,
         projectBriefs.length > 0 ? projectBriefs : undefined,
         contextBlock,
-      ),
-      SONNET_SUGGEST_SYSTEM,
-      undefined,
-      undefined,
-      { onDelta },
-    );
+      );
+      try {
+        const deadlineSignal = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
+        const result = await anthropicSuggestStream({
+          systemPrompt: SONNET_SUGGEST_SYSTEM,
+          staticContext: split.staticPrefix,
+          dynamicTail: split.dynamicTail,
+          signal: deadlineSignal,
+          onDelta,
+          label: 'live-suggestion',
+        });
+        text = result.text;
+        this.suggestionApiFailures = 0;
+      } catch (error) {
+        if (signal.aborted || error instanceof LlmBudgetExceededError || this.isAuthenticationError(error)) throw error;
+        this.suggestionApiFailures += 1;
+        if (this.suggestionApiFailures >= 2) {
+          this.suggestionApiDisabledUntil = Date.now() + 2 * 60_000;
+        }
+        this.emit('intelligence.error', { code: 'SUGGESTION_API_DEGRADED', fallback: 'claude-cli' });
+        text = await claudeSuggest(
+          split.staticPrefix + split.dynamicTail,
+          SONNET_SUGGEST_SYSTEM,
+          signal,
+          undefined,
+          { onDelta },
+        );
+      }
+    } else {
+      text = await claudeSuggest(
+        buildSonnetSuggestPrompt(
+          window,
+          triage,
+          projectBriefs.length > 0 ? projectBriefs : undefined,
+          contextBlock,
+        ),
+        SONNET_SUGGEST_SYSTEM,
+        signal,
+        undefined,
+        { onDelta },
+      );
+    }
 
     try {
       const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -475,22 +588,41 @@ export class IntelligenceEngine extends EventEmitter {
     return createHash('sha256').update(window).digest('hex');
   }
 
-  private isOverlapping(newHash: string, newWords: Set<string>): boolean {
-    if (this.recentWindowHashes.includes(newHash)) return true;
+  private isRepeatedActionableMoment(triggerQuote: string): boolean {
+    const normalized = triggerQuote.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (normalized.length < 20) return false;
+    const words = new Set(normalized.split(/\s+/).filter((word) => word.length > 2));
 
-    // Check Jaccard similarity against recent eval windows
-    for (const prevWords of this.recentWindowWordSets) {
-      let intersection = 0;
-      for (const word of newWords) {
-        if (prevWords.has(word)) intersection++;
+    for (const recent of this.recentActionSuggestions) {
+      const prior = recent.triggerQuote.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      if (prior.length < 20) continue;
+      if (normalized === prior || normalized.includes(prior) || prior.includes(normalized)) {
+        return true;
       }
-      const union = newWords.size + prevWords.size - intersection;
-      if (union > 0 && intersection / union >= OVERLAP_THRESHOLD) {
+
+      const priorWords = new Set(prior.split(/\s+/).filter((word) => word.length > 2));
+      let intersection = 0;
+      for (const word of words) {
+        if (priorWords.has(word)) intersection++;
+      }
+      const union = words.size + priorWords.size - intersection;
+      if (intersection >= 5 && union > 0 && intersection / union >= 0.8) {
         return true;
       }
     }
-
     return false;
+  }
+
+  private isAuthenticationError(error: unknown): boolean {
+    const status = (error as { status?: number } | null)?.status;
+    return status === 401 || status === 403;
+  }
+
+  private isOverlapping(newHash: string): boolean {
+    // Exact-window dedup is sufficient with single-flight/latest-wins. Fuzzy
+    // Jaccard dedup suppressed fresh speech because a five-minute rolling
+    // window is naturally >80% similar after each new sentence.
+    return this.recentWindowHashes.includes(newHash);
   }
 
   private async compressOldContext(): Promise<void> {

@@ -2,18 +2,41 @@ import Foundation
 import AppKit
 import SwiftUI
 
-// File-based debug logging (stdout invisible when launched from Finder)
-func appLog(_ msg: String) {
-    let ts = ISO8601DateFormatter().string(from: Date())
-    let line = "[\(ts)] \(msg)\n"
-    let path = NSString("~/.meeting-copilot/app.log").expandingTildeInPath
-    if let handle = FileHandle(forWritingAtPath: path) {
-        handle.seekToEndOfFile()
-        handle.write(line.data(using: .utf8) ?? Data())
-        handle.closeFile()
-    } else {
-        FileManager.default.createFile(atPath: path, contents: line.data(using: .utf8))
+// Buffered, bounded file logging (stdout is invisible when launched from Finder).
+private final class AppFileLogger: @unchecked Sendable {
+    static let shared = AppFileLogger()
+    private let queue = DispatchQueue(label: "meeting-copilot.app-log", qos: .utility)
+    private let path = NSString("~/.meeting-copilot/app.log").expandingTildeInPath
+    private let maxBytes: UInt64 = 5 * 1024 * 1024
+
+    func write(_ message: String) {
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(message.replacingOccurrences(of: "\n", with: " "))\n"
+        queue.async { [self] in
+            let manager = FileManager.default
+            try? manager.createDirectory(
+                atPath: (path as NSString).deletingLastPathComponent,
+                withIntermediateDirectories: true
+            )
+            if let size = (try? manager.attributesOfItem(atPath: path)[.size]) as? UInt64,
+               size + UInt64(line.utf8.count) >= maxBytes {
+                try? manager.removeItem(atPath: "\(path).2")
+                try? manager.moveItem(atPath: "\(path).1", toPath: "\(path).2")
+                try? manager.moveItem(atPath: path, toPath: "\(path).1")
+            }
+            let data = line.data(using: .utf8) ?? Data()
+            if let handle = FileHandle(forWritingAtPath: path) {
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+                try? handle.close()
+            } else {
+                manager.createFile(atPath: path, contents: data)
+            }
+        }
     }
+}
+
+func appLog(_ msg: String) {
+    AppFileLogger.shared.write(msg)
 }
 
 // MARK: - Session Manager
@@ -216,6 +239,7 @@ final class SessionManager {
                                 try await self.webSocketClient.send(.audioChunk(
                                     data: base64,
                                     source: sourceStr,
+                                    chunkId: meta.chunkId,
                                     audioDurationSec: meta.audioDurationSec,
                                     captureStartedAt: meta.captureStartedAt,
                                     captureEndedAt: meta.captureEndedAt,
@@ -333,6 +357,7 @@ final class SessionManager {
                     try await webSocketClient.send(.audioChunk(
                         data: base64,
                         source: sourceStr,
+                        chunkId: meta.chunkId,
                         audioDurationSec: meta.audioDurationSec,
                         captureStartedAt: meta.captureStartedAt,
                         captureEndedAt: meta.captureEndedAt,

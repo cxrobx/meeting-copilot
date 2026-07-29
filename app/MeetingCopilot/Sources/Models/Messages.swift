@@ -13,6 +13,7 @@ enum ClientMessage: Encodable {
     case audioChunk(
         data: String,
         source: String, // "mic"|"meeting"
+        chunkId: String,
         audioDurationSec: Double,
         captureStartedAt: Date,
         captureEndedAt: Date,
@@ -31,7 +32,7 @@ enum ClientMessage: Encodable {
 
     private enum CodingKeys: String, CodingKey {
         case type, data, source, actionId, title, projectNames, agenda, attendees, contextPaths, actionType, prompt,
-             audioDurationSec, captureStartedAt, captureEndedAt, sequence, isContinuation
+             chunkId, audioDurationSec, captureStartedAt, captureEndedAt, sequence, isContinuation
     }
 
     private static let iso8601: ISO8601DateFormatter = {
@@ -52,10 +53,11 @@ enum ClientMessage: Encodable {
             try container.encodeIfPresent(contextPaths, forKey: .contextPaths)
         case .sessionStop:
             try container.encode("session.stop", forKey: .type)
-        case .audioChunk(let data, let source, let audioDurationSec, let captureStartedAt, let captureEndedAt, let sequence, let isContinuation):
+        case .audioChunk(let data, let source, let chunkId, let audioDurationSec, let captureStartedAt, let captureEndedAt, let sequence, let isContinuation):
             try container.encode("audio_chunk", forKey: .type)
             try container.encode(data, forKey: .data)
             try container.encode(source, forKey: .source)
+            try container.encode(chunkId, forKey: .chunkId)
             try container.encode(audioDurationSec, forKey: .audioDurationSec)
             try container.encode(Self.iso8601.string(from: captureStartedAt), forKey: .captureStartedAt)
             try container.encode(Self.iso8601.string(from: captureEndedAt), forKey: .captureEndedAt)

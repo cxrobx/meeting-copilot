@@ -22,6 +22,7 @@
 |----------|-------------|
 | [api.md](./api.md) | WebSocket & REST API reference |
 | [setup.md](./setup.md) | Environment & deployment |
+| [e2e-reliability-latency-plan.md](./e2e-reliability-latency-plan.md) | End-to-end performance, reliability, privacy, and model upgrade plan |
 
 ## Contributing
 

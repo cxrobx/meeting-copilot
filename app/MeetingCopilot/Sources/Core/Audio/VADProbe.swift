@@ -22,7 +22,11 @@ final class VADProbe {
     /// Returns nil if the model file can't be loaded (missing, corrupt,
     /// wrong format). Call site should fall back to the fixed-timer
     /// emitter in that case and log the failure.
-    init?(modelPath: String, useGPU: Bool = true, threadCount: Int32 = 2) {
+    // The Silero model is under 1 MB and runs comfortably in realtime on CPU.
+    // whisper.cpp 1.8.3 can abort (rather than return an error) while building
+    // the mixed Metal/CPU VAD graph on pre-M5 Apple Silicon, so CPU is the
+    // reliable production default.
+    init?(modelPath: String, useGPU: Bool = false, threadCount: Int32 = 2) {
         guard FileManager.default.fileExists(atPath: modelPath) else {
             appLog("[VADProbe] model not found at \(modelPath)")
             return nil

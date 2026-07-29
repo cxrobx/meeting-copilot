@@ -23,6 +23,8 @@ actor WebSocketClient {
     private var isConnected = false
     private var isIntentionalDisconnect = false
     private var receiveTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    private var connectionGeneration = 0
 
     // MARK: - Callbacks
 
@@ -53,6 +55,7 @@ actor WebSocketClient {
     func connect() {
         isIntentionalDisconnect = false
         reconnectAttempts = 0
+        reconnectTask?.cancel()
         establishConnection()
     }
 
@@ -60,13 +63,23 @@ actor WebSocketClient {
         isIntentionalDisconnect = true
         receiveTask?.cancel()
         receiveTask = nil
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        connectionGeneration += 1
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
+        urlSession?.invalidateAndCancel()
+        urlSession = nil
         isConnected = false
         onDisconnect?()
     }
 
     private func establishConnection() {
+        receiveTask?.cancel()
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        urlSession?.invalidateAndCancel()
+        connectionGeneration += 1
+        let generation = connectionGeneration
         let session = URLSession(configuration: .default)
         self.urlSession = session
         let task = session.webSocketTask(with: serverURL)
@@ -76,7 +89,7 @@ actor WebSocketClient {
         // Start receiving — connection is confirmed on first successful receive
         receiveTask = Task { [weak self] in
             guard let self = self else { return }
-            await self.startReceiving()
+            await self.startReceiving(task: task, generation: generation)
         }
     }
 
@@ -87,27 +100,24 @@ actor WebSocketClient {
         onConnect?()
     }
 
-    private func startReceiving() {
-        guard let task = webSocketTask else { return }
-
-        Task {
-            while !Task.isCancelled {
-                do {
-                    // Race the receive against a timeout so we detect hung sockets
-                    let message = try await withThrowingTimeout(seconds: receiveTimeout) {
-                        try await task.receive()
-                    }
-                    // First successful receive confirms the connection is live
-                    if !isConnected {
-                        await markConnected()
-                    }
-                    await handleRawMessage(message)
-                } catch {
-                    if !isIntentionalDisconnect {
-                        await handleDisconnect()
-                    }
-                    break
+    private func startReceiving(
+        task: URLSessionWebSocketTask,
+        generation: Int
+    ) async {
+        while !Task.isCancelled && generation == connectionGeneration {
+            do {
+                let message = try await withThrowingTimeout(seconds: receiveTimeout) {
+                    try await task.receive()
                 }
+                guard generation == connectionGeneration else { return }
+                markConnected()
+                handleRawMessage(message)
+            } catch {
+                guard generation == connectionGeneration else { return }
+                if !isIntentionalDisconnect {
+                    handleDisconnect(generation: generation)
+                }
+                return
             }
         }
     }
@@ -154,7 +164,8 @@ actor WebSocketClient {
         }
     }
 
-    private func handleDisconnect() {
+    private func handleDisconnect(generation: Int) {
+        guard generation == connectionGeneration else { return }
         isConnected = false
         onDisconnect?()
 
@@ -165,11 +176,17 @@ actor WebSocketClient {
         reconnectAttempts += 1
         print("[WebSocket] Reconnecting in \(delay)s (attempt \(reconnectAttempts))…")
 
-        Task {
+        reconnectTask?.cancel()
+        reconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard !isIntentionalDisconnect else { return }
-            establishConnection()
+            guard let self = self else { return }
+            await self.reconnectIfCurrent(generation: generation)
         }
+    }
+
+    private func reconnectIfCurrent(generation: Int) {
+        guard !isIntentionalDisconnect, generation == connectionGeneration else { return }
+        establishConnection()
     }
 
     // MARK: - Sending

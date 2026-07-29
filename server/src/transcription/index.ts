@@ -7,6 +7,8 @@ import { CHUNK_DURATION_SECONDS } from '../audio/chunkConfig.js';
 import { paidApiDisabled } from '../api/killswitch.js';
 
 interface QueueItem {
+  chunkId: string;
+  queuedAt: number;
   wavBuffer: Buffer;
   source: 'mic' | 'meeting';
   audioDurationSec: number;
@@ -97,7 +99,11 @@ function createProvider(): TranscriptionProvider {
       process.env.PARAKEET_URL ??
       `http://127.0.0.1:${process.env.PARAKEET_PORT ?? '8077'}`;
     console.log(`[Transcription] Using Parakeet sidecar at ${url}`);
-    return new WhisperProvider(url);
+    return new WhisperProvider(url, {
+      mode: 'parakeet',
+      model: process.env.PARAKEET_MODEL ?? 'mlx-community/parakeet-tdt-0.6b-v3',
+      supportsPrompt: false,
+    });
   }
   if (selection === 'deepgram' && paidApiDisabled()) {
     console.warn(
@@ -106,12 +112,17 @@ function createProvider(): TranscriptionProvider {
     return new WhisperProvider();
   }
   if (selection === 'deepgram') {
+    if (process.env.COPILOT_ALLOW_CLOUD_AUDIO !== 'true') {
+      console.warn('[Transcription] Cloud audio is not consented; using local whisper. Set COPILOT_ALLOW_CLOUD_AUDIO=true explicitly to enable Deepgram.');
+      return new WhisperProvider();
+    }
     return new DeepgramProvider();
   }
   return new WhisperProvider();
 }
 
 export interface TranscribeChunkMeta {
+  chunkId?: string;
   audioDurationSec?: number;
   captureStartedAt?: string;
   captureEndedAt?: string;
@@ -131,6 +142,9 @@ export class TranscriptionService extends EventEmitter {
   public errorCount = 0;
   public hallucinationsFiltered = 0;
   public prewarmDurationMs: number | null = null;
+  public queueLatencySamples: number[] = [];
+  public providerLatencySamples: number[] = [];
+  public endToEndLatencySamples: number[] = [];
 
   constructor(provider?: TranscriptionProvider) {
     super();
@@ -139,6 +153,10 @@ export class TranscriptionService extends EventEmitter {
 
   async isProviderAvailable(): Promise<boolean> {
     return this.provider.isAvailable();
+  }
+
+  get providerInfo() {
+    return this.provider.getInfo();
   }
 
   /**
@@ -164,20 +182,30 @@ export class TranscriptionService extends EventEmitter {
    * the user's first real chunk doesn't pay the cold-start cost.
    */
   async prewarm(): Promise<void> {
-    const start = Date.now();
-    try {
-      const samples = Math.round(16_000 * 0.1);
-      const pcm = Buffer.alloc(samples * 2); // 16-bit mono silence
-      const wav = wrapPcmAsWav(pcm);
-      await this.provider.transcribe(wav);
-      this.prewarmDurationMs = Date.now() - start;
-      console.log(`[Transcription] Pre-warm complete in ${this.prewarmDurationMs}ms`);
-    } catch (err) {
-      console.warn(
-        '[Transcription] Pre-warm failed:',
-        err instanceof Error ? err.message : String(err),
-      );
+    const samples = Math.round(16_000 * 0.1);
+    const pcm = Buffer.alloc(samples * 2);
+    const wav = wrapPcmAsWav(pcm);
+    let lastError: unknown;
+    // The Swift supervisor starts Node and the ASR sidecar concurrently.
+    // Wait for model readiness instead of treating the initial connection
+    // refusal as a permanent loss of prewarming.
+    for (let attempt = 1; attempt <= 30; attempt += 1) {
+      try {
+        if (!await this.provider.isAvailable()) throw new Error('provider not ready');
+        const start = Date.now();
+        await this.provider.transcribe(wav);
+        this.prewarmDurationMs = Date.now() - start;
+        console.log(`[Transcription] Pre-warm complete in ${this.prewarmDurationMs}ms (attempt ${attempt})`);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 30) {
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+        }
+      }
     }
+    console.warn('[Transcription] Pre-warm failed after 30 attempts:',
+      lastError instanceof Error ? lastError.message : String(lastError));
   }
 
   /**
@@ -214,6 +242,9 @@ export class TranscriptionService extends EventEmitter {
     this.totalLatencyMs = 0;
     this.errorCount = 0;
     this.hallucinationsFiltered = 0;
+    this.queueLatencySamples = [];
+    this.providerLatencySamples = [];
+    this.endToEndLatencySamples = [];
   }
 
   transcribeChunk(
@@ -223,6 +254,8 @@ export class TranscriptionService extends EventEmitter {
   ): Promise<TranscriptSegment> {
     return new Promise<TranscriptSegment>((resolve, reject) => {
       this.queue.push({
+        chunkId: meta?.chunkId ?? uuidv4(),
+        queuedAt: Date.now(),
         wavBuffer,
         source,
         audioDurationSec: meta?.audioDurationSec ?? CHUNK_DURATION_SECONDS,
@@ -238,6 +271,10 @@ export class TranscriptionService extends EventEmitter {
 
   get queueDepth(): number {
     return this.queue.length;
+  }
+
+  get activeTranscriptions(): number {
+    return this.activeCount;
   }
 
   get avgLatencyMs(): number {
@@ -263,15 +300,21 @@ export class TranscriptionService extends EventEmitter {
   }
 
   private async processItem(item: QueueItem): Promise<void> {
+    const providerStart = Date.now();
+    const queueLatency = providerStart - item.queuedAt;
     const startTime = Date.now();
     try {
       const result = await this.provider.transcribe(item.wavBuffer, {
         prompt: this.sessionPrompt || undefined,
       });
       const latency = Date.now() - startTime;
+      const endToEndLatency = Date.now() - item.queuedAt;
 
       this.chunksProcessed++;
       this.totalLatencyMs += latency;
+      this.recordLatency(this.queueLatencySamples, queueLatency);
+      this.recordLatency(this.providerLatencySamples, latency);
+      this.recordLatency(this.endToEndLatencySamples, endToEndLatency);
 
       const text = result.text.trim();
       const promptContinuation =
@@ -286,12 +329,16 @@ export class TranscriptionService extends EventEmitter {
         if (text) this.hallucinationsFiltered++;
         const segment: TranscriptSegment = {
           id: uuidv4(),
+          chunkId: item.chunkId,
           text: '',
           source: item.source,
           label: item.source === 'mic' ? '[You]' : '[Meeting]',
           timestamp: Date.now(),
           audioDurationSec: 0,
           transcriptionLatencyMs: latency,
+          queueLatencyMs: queueLatency,
+          endToEndLatencyMs: endToEndLatency,
+          provider: this.provider.getInfo().mode,
           captureStartedAt: item.captureStartedAt,
           captureEndedAt: item.captureEndedAt,
           sequence: item.sequence,
@@ -304,12 +351,16 @@ export class TranscriptionService extends EventEmitter {
 
       const segment: TranscriptSegment = {
         id: uuidv4(),
+        chunkId: item.chunkId,
         text,
         source: item.source,
         label: item.source === 'mic' ? '[You]' : '[Meeting]',
         timestamp: Date.now(),
         audioDurationSec: item.audioDurationSec,
         transcriptionLatencyMs: latency,
+        queueLatencyMs: queueLatency,
+        endToEndLatencyMs: endToEndLatency,
+        provider: this.provider.getInfo().mode,
         captureStartedAt: item.captureStartedAt,
         captureEndedAt: item.captureEndedAt,
         sequence: item.sequence,
@@ -328,6 +379,11 @@ export class TranscriptionService extends EventEmitter {
       this.emit('transcription.error', err);
       item.reject(err);
     }
+  }
+
+  private recordLatency(samples: number[], value: number): void {
+    samples.push(value);
+    if (samples.length > 500) samples.shift();
   }
 }
 
