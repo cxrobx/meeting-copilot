@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meeting Copilot — Design Exploration</title>
+<link rel="stylesheet" href="/vendor/css/fonts.css">
+<style>
+/* ────────────────────────────────────────────────────────────────
+   Mock exploration page — three visual directions for the /present
+   dashboard. Reached via GET /mock (dev only); data is static.
+   Tokens mirror the CXMail warm-neutral palette in present/index.ts.
+   ──────────────────────────────────────────────────────────────── */
+:root {
+  --base:     rgb(251,248,243);
+  --mantle:   rgb(248,243,235);
+  --crust:    rgb(241,234,223);
+  --surface0: rgb(245,239,228);
+  --surface1: rgb(241,234,223);
+  --surface2: rgb(213,205,189);
+  --overlay1: rgb(155,148,135);
+  --overlay2: rgb(115,108,95);
+  --text:     rgb(30,25,15);
+  --subtext0: rgb(70,60,45);
+  --subtext1: rgb(100,90,75);
+  --red:      rgb(212,118,106);
+  --peach:    rgb(212,150,110);
+  --gold:     rgb(212,168,90);
+  --accent:   rgb(20,18,14);
+  --accent-soft: rgba(20,18,14,0.08);
+  /* Stage (variant C) — warm dark, cream ink */
+  --stage-base:    rgb(22,19,15);
+  --stage-surface: rgb(32,28,22);
+  --stage-line:    rgb(48,42,34);
+  --stage-ink:     rgb(243,236,221);
+  --stage-dim:     rgb(150,140,124);
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  background: var(--crust);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.6;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+button { font-family: inherit; cursor: pointer; }
+
+/* ─── Shell: switcher bar + footer ─────────────────────────────── */
+.shell-bar {
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 20px;
+  background: var(--base);
+  border-bottom: 1px solid var(--surface2);
+  position: sticky; top: 0; z-index: 50;
+}
+.shell-bar .brand { font-size: 12px; font-weight: 700; }
+.switcher { display: flex; border: 1px solid var(--surface2); border-radius: 8px; overflow: hidden; }
+.switcher button {
+  padding: 5px 14px; font-size: 11px; font-weight: 600;
+  background: var(--surface0); color: var(--subtext0); border: none;
+}
+.switcher button + button { border-left: 1px solid var(--surface2); }
+.switcher button.on { background: var(--accent); color: var(--base); }
+.blurb { font-size: 11px; color: var(--subtext1); }
+.shell-foot {
+  padding: 6px; text-align: center;
+  font-size: 10px; color: var(--overlay1);
+  background: var(--base); border-top: 1px solid var(--surface2);
+}
+.stage-area { flex: 1; padding: 24px; overflow-y: auto; }
+.variant { display: none; }
+.variant.on { display: block; }
+
+/* ─── Shared bits ──────────────────────────────────────────────── */
+.frame {
+  max-width: 1180px; margin: 0 auto;
+  background: var(--base);
+  border: 1px solid var(--surface2); border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(30,25,15,0.08);
+  overflow: hidden;
+}
+.pill {
+  font-size: 9px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.07em; padding: 3px 9px; border-radius: 9px;
+}
+.pill.live { background: var(--accent); color: var(--base); }
+.chip {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.05em;
+  padding: 2px 7px; border-radius: 4px;
+  background: var(--accent-soft); color: var(--subtext0);
+  text-transform: uppercase;
+}
+.chip.research { background: rgba(212,150,110,0.18); color: rgb(160,100,60); }
+.chip.mockup   { background: rgba(212,168,90,0.20);  color: rgb(150,110,40); }
+.chip.coach    { background: rgba(212,118,106,0.16); color: rgb(170,80,70); }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.dot.rec { background: var(--red); animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:.35; transform:scale(.9)} 50%{opacity:1; transform:scale(1.1)} }
+
+/* Live waveform bars */
+.wave { display: flex; align-items: flex-end; gap: 2px; height: 14px; }
+.wave i { width: 3px; border-radius: 1px; background: var(--accent); animation: wv 1.1s ease-in-out infinite; }
+.wave i:nth-child(1){height:35%; animation-delay:0s}
+.wave i:nth-child(2){height:80%; animation-delay:.15s}
+.wave i:nth-child(3){height:55%; animation-delay:.3s}
+.wave i:nth-child(4){height:95%; animation-delay:.45s}
+.wave i:nth-child(5){height:45%; animation-delay:.6s}
+.wave i:nth-child(6){height:70%; animation-delay:.75s}
+@keyframes wv { 0%,100%{transform:scaleY(.5)} 50%{transform:scaleY(1)} }
+
+/* Shimmer sweep for "working" cards */
+.shimmer { position: relative; overflow: hidden; }
+.shimmer::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(105deg, transparent 40%, rgba(20,18,14,0.05) 50%, transparent 60%);
+  background-size: 250% 100%;
+  animation: shim 2.4s linear infinite;
+}
+@keyframes shim { from{background-position:200% 0} to{background-position:-50% 0} }
+
+.meter { height: 4px; border-radius: 2px; background: var(--surface2); overflow: hidden; }
+.meter > i { display: block; height: 100%; border-radius: 2px; background: var(--accent); animation: fill 1s cubic-bezier(.2,.8,.2,1) both; }
+@keyframes fill { from { width: 0 } }
+
+/* ══════════════════════════════════════════════════════════════
+   VARIANT A — "Refined console"
+   ══════════════════════════════════════════════════════════════ */
+.a-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 18px; border-bottom: 1px solid var(--surface2);
+}
+.a-head h2 { font-size: 14px; font-weight: 700; }
+.a-head .meta { font-size: 11px; color: var(--subtext1); }
+.a-head .timer { margin-left: auto; font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--subtext0); }
+.a-stats { display: flex; gap: 10px; padding: 10px 18px; border-bottom: 1px solid var(--surface2); background: var(--mantle); }
+.a-stat { flex: 1; background: var(--base); border: 1px solid var(--surface2); border-radius: 8px; padding: 8px 12px; }
+.a-stat .k { font-size: 8.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--overlay2); }
+.a-stat .v { font-size: 17px; font-weight: 700; line-height: 1.3; font-variant-numeric: tabular-nums; }
+.a-stat .v small { font-size: 10px; font-weight: 600; color: var(--overlay1); }
+.a-grid { display: grid; grid-template-columns: 300px minmax(0,1fr) 250px; height: 460px; }
+
+.a-transcript { background: var(--mantle); border-right: 1px solid var(--surface2); overflow-y: auto; padding: 12px; }
+.a-col-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; color: var(--overlay2); margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.seg { display: flex; gap: 8px; margin-bottom: 10px; }
+.seg .rail { width: 3px; border-radius: 2px; flex-shrink: 0; }
+.seg.me .rail { background: var(--accent); }
+.seg.them .rail { background: var(--peach); }
+.seg .who { font-size: 9px; font-weight: 700; letter-spacing: .05em; color: var(--subtext1); }
+.seg .who span { font-weight: 500; color: var(--overlay1); margin-left: 6px; }
+.seg p { font-size: 11.5px; line-height: 1.55; color: var(--subtext0); }
+.seg.latest p { color: var(--text); }
+.seg.latest p::after { content: "▍"; animation: caret 1s steps(1) infinite; color: var(--accent); }
+@keyframes caret { 50% { opacity: 0 } }
+
+.a-main { overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+.card {
+  background: var(--base); border: 1px solid var(--surface2);
+  border-radius: 10px; padding: 12px 14px;
+}
+.card.suggested { border-color: var(--accent); box-shadow: 0 2px 12px rgba(20,18,14,0.07); }
+.card-top { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.card-top .t { font-size: 12.5px; font-weight: 700; }
+.card-top .when { margin-left: auto; font-size: 10px; color: var(--overlay1); }
+.quote {
+  font-size: 10.5px; color: var(--subtext1); font-style: italic;
+  border-left: 3px solid var(--surface2); padding: 2px 8px; margin: 6px 0;
+}
+.card p.body { font-size: 11.5px; color: var(--subtext0); }
+.card .actions { display: flex; gap: 8px; margin-top: 10px; }
+.btn {
+  font-size: 10.5px; font-weight: 600; padding: 5px 13px;
+  border-radius: 6px; border: 1px solid transparent;
+  transition: filter .12s;
+}
+.btn:hover { filter: brightness(1.12); }
+.btn.primary { background: var(--accent); color: var(--base); }
+.btn.ghost { background: transparent; border-color: var(--surface2); color: var(--subtext0); }
+.elapsed { font-size: 10px; color: var(--overlay1); font-variant-numeric: tabular-nums; }
+.result-list { margin: 6px 0 0 16px; font-size: 11.5px; color: var(--subtext0); }
+.result-list li { margin-bottom: 3px; }
+.result-list li::marker { color: var(--accent); }
+
+.a-side { background: var(--mantle); border-left: 1px solid var(--surface2); overflow-y: auto; padding: 12px; }
+.agenda-item { display: flex; align-items: baseline; gap: 8px; padding: 5px 0; font-size: 11.5px; color: var(--subtext0); }
+.agenda-item .box { font-size: 11px; }
+.agenda-item.done { color: var(--overlay1); text-decoration: line-through; }
+.agenda-item.now { color: var(--text); font-weight: 700; }
+.agenda-item.now .box { color: var(--accent); }
+.side-card {
+  background: var(--base); border: 1px solid var(--surface2);
+  border-radius: 8px; padding: 10px 12px; margin-top: 12px; font-size: 11px; color: var(--subtext0);
+}
+.side-card b { display: flex; align-items: center; gap: 6px; font-size: 10px; text-transform: uppercase; letter-spacing: .07em; margin-bottom: 5px; }
+.talk-meter { display: flex; align-items: center; gap: 8px; margin-top: 7px; font-size: 10px; color: var(--overlay2); }
+
+/* ══════════════════════════════════════════════════════════════
+   VARIANT B — "Mission control"
+   ══════════════════════════════════════════════════════════════ */
+.b-wrap { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+.b-head { display: flex; align-items: center; gap: 14px; }
+.b-head h2 { font-size: 17px; font-weight: 700; letter-spacing: -0.02em; }
+.b-head .sub { font-size: 11px; color: var(--subtext1); }
+.model-chain { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 9.5px; color: var(--overlay2); }
+.model-chain .m {
+  padding: 3px 8px; border-radius: 5px; background: var(--base);
+  border: 1px solid var(--surface2); font-weight: 600; color: var(--subtext0);
+}
+.model-chain .m.hot { border-color: var(--accent); color: var(--accent); }
+.b-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.b-tile {
+  background: var(--base); border: 1px solid var(--surface2);
+  border-radius: 12px; padding: 14px 16px; position: relative;
+}
+.b-tile .k { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--overlay2); display: flex; align-items: center; gap: 6px; }
+.b-tile .v { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.b-tile .v small { font-size: 11px; color: var(--overlay1); font-weight: 600; }
+.b-tile .foot { font-size: 9.5px; color: var(--overlay1); margin-top: 2px; }
+.ring { position: absolute; top: 12px; right: 12px; transform: rotate(-90deg); }
+.ring .track { stroke: var(--surface2); }
+.ring .arc { stroke: var(--accent); transition: stroke-dashoffset 1s linear; }
+.ring-num {
+  position: absolute; top: 12px; right: 12px; width: 34px; height: 34px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.b-label { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; color: var(--overlay2); margin-bottom: 8px; }
+.b-workers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.b-card { background: var(--base); border: 1px solid var(--surface2); border-radius: 12px; padding: 13px 15px; }
+.b-card.running { border-color: var(--accent); }
+.b-card.queued { opacity: .75; }
+.b-card .head { display: flex; align-items: center; gap: 7px; font-size: 10.5px; font-weight: 600; }
+.b-card .head .state-run { color: var(--accent); }
+.b-card .head .state-done { color: rgb(120,105,60); }
+.b-card .head .state-q { color: var(--overlay2); }
+.b-card .title { font-size: 12.5px; font-weight: 700; margin-top: 7px; }
+.b-card .sub { font-size: 10px; color: var(--overlay1); margin-top: 1px; }
+.b-card .tokens { margin-top: 9px; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--subtext0); }
+.b-card .tokens span { color: var(--overlay1); }
+.b-card .row { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+.approve-q { border: 1px solid var(--surface2); border-radius: 12px; overflow: hidden; }
+.q-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; background: var(--base); font-size: 12px;
+}
+.q-row + .q-row { border-top: 1px solid var(--surface1); }
+.q-row .t { font-weight: 600; min-width: 0; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.q-row .q { font-size: 10px; color: var(--overlay1); font-style: italic; max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.q-row .ttl { font-size: 9.5px; color: var(--overlay2); font-variant-numeric: tabular-nums; }
+.b-live {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--base); border: 1px solid var(--surface2);
+  border-radius: 12px; padding: 10px 16px; font-size: 12px;
+}
+.b-live .who { font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(212,150,110,0.18); color: rgb(160,100,60); }
+.b-live p { flex: 1; color: var(--subtext0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.b-live p::after { content: "▍"; animation: caret 1s steps(1) infinite; color: var(--accent); }
+
+/* ══════════════════════════════════════════════════════════════
+   VARIANT C — "Stage" (warm-dark presentation mode)
+   ══════════════════════════════════════════════════════════════ */
+.c-frame {
+  max-width: 1180px; margin: 0 auto; height: 620px;
+  background: var(--stage-base); color: var(--stage-ink);
+  border-radius: 14px; overflow: hidden; position: relative;
+  display: flex; flex-direction: column;
+  box-shadow: 0 14px 44px rgba(20,15,8,0.35);
+}
+.c-top { display: flex; align-items: center; gap: 16px; padding: 16px 24px; }
+.c-agenda { display: flex; align-items: center; gap: 10px; }
+.c-agenda .step { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--stage-dim); }
+.c-agenda .step .sdot { width: 7px; height: 7px; border-radius: 50%; background: var(--stage-line); }
+.c-agenda .step.done .sdot { background: var(--stage-dim); }
+.c-agenda .step.now { color: var(--stage-ink); font-weight: 700; }
+.c-agenda .step.now .sdot { background: var(--stage-ink); animation: pulse 2s ease-in-out infinite; }
+.c-timer { margin-left: auto; display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.c-prompter { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 0 90px; gap: 18px; }
+.c-hist { font-size: 14px; line-height: 1.6; color: var(--stage-dim); opacity: .55; }
+.c-hist.h2 { opacity: .3; }
+.c-hist b { color: inherit; font-weight: 700; }
+.c-now { font-size: 23px; line-height: 1.5; font-weight: 500; letter-spacing: -0.01em; min-height: 3.1em; }
+.c-now .who { display: block; font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--stage-dim); margin-bottom: 8px; }
+.c-now .w { opacity: 0; display: inline; animation: wordin .3s ease-out both; }
+@keyframes wordin { from { opacity: 0; filter: blur(2px); } to { opacity: 1; filter: none; } }
+.c-wave { display: flex; align-items: flex-end; gap: 3px; height: 22px; padding: 0 24px 18px; }
+.c-wave i { flex: 1; border-radius: 1px; background: rgba(243,236,221,0.28); animation: wv 1.3s ease-in-out infinite; }
+.c-toast {
+  position: absolute; right: 24px; bottom: 58px; width: 300px;
+  background: var(--stage-surface); border: 1px solid var(--stage-line);
+  border-radius: 12px; padding: 13px 15px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+  animation: toastin .35s cubic-bezier(.2,.8,.2,1) both;
+}
+@keyframes toastin { from { opacity: 0; transform: translateY(14px) } }
+.c-toast .head { display: flex; align-items: center; gap: 8px; font-size: 9.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--stage-dim); }
+.c-toast .title { font-size: 13px; font-weight: 700; margin-top: 6px; }
+.c-toast .why { font-size: 10.5px; color: var(--stage-dim); margin-top: 3px; line-height: 1.5; }
+.c-toast .row { display: flex; align-items: center; gap: 8px; margin-top: 11px; }
+.c-toast .btn.primary { background: var(--stage-ink); color: var(--stage-base); }
+.c-toast .btn.ghost { border-color: var(--stage-line); color: var(--stage-dim); }
+.c-ttl { margin-left: auto; position: relative; width: 26px; height: 26px; }
+.c-ttl svg { transform: rotate(-90deg); }
+.c-ttl .track { stroke: var(--stage-line); }
+.c-ttl .arc { stroke: var(--stage-ink); }
+.c-ttl b { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 8.5px; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<div class="shell-bar">
+  <span class="brand">Meeting Copilot — design exploration</span>
+  <div class="switcher" role="tablist">
+    <button data-v="A" class="on">A · Refined console</button>
+    <button data-v="B">B · Mission control</button>
+    <button data-v="C">C · Stage</button>
+  </div>
+  <span class="blurb" id="blurb">Today's three-column layout, polished — speaker rails, calmer cards, stat strip</span>
+</div>
+
+<div class="stage-area">
+
+<!-- ═══ VARIANT A — Refined console ═══ -->
+<section class="variant on" data-v="A">
+  <div class="frame">
+    <div class="a-head">
+      <span class="dot rec"></span>
+      <h2>ACME — LSA Kickoff</h2>
+      <span class="pill live">Live</span>
+      <span class="meta">Rory, Eli · started 2:14 PM</span>
+      <div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <span class="timer" data-timer>12:47</span>
+    </div>
+    <div class="a-stats">
+      <div class="a-stat"><div class="k">Segments</div><div class="v">128</div></div>
+      <div class="a-stat"><div class="k">Suggestions</div><div class="v">6 <small>4 approved</small></div></div>
+      <div class="a-stat"><div class="k">Workers run</div><div class="v">3</div></div>
+      <div class="a-stat"><div class="k">Transcribe latency</div><div class="v">1.8<small>s avg</small></div></div>
+      <div class="a-stat"><div class="k">Next eval</div><div class="v"><span data-count>7</span><small>s</small></div></div>
+    </div>
+    <div class="a-grid">
+      <div class="a-transcript">
+        <div class="a-col-label">Transcript <span style="margin-left:auto;font-weight:500;letter-spacing:0;text-transform:none">highlight to ask</span></div>
+        <div class="seg them"><div class="rail"></div><div><div class="who">RORY <span>14:24:03</span></div><p>The main thing is speed — half these leads call somebody else if we don't pick up.</p></div></div>
+        <div class="seg me"><div class="rail"></div><div><div class="who">CHRIS <span>14:24:19</span></div><p>Right, and that's the whole design goal: the responder replies in under sixty seconds, every time, even at 2 AM.</p></div></div>
+        <div class="seg them"><div class="rail"></div><div><div class="who">RORY <span>14:24:41</span></div><p>What does Google actually charge us per lead on LSA right now?</p></div></div>
+        <div class="seg them latest"><div class="rail"></div><div><div class="who">ERIC <span>14:25:02</span></div><p>And can it hand off to dispatch when it's an emergency call</p></div></div>
+      </div>
+      <div class="a-main">
+        <div class="card suggested">
+          <div class="card-top"><span class="chip research">Research</span><span class="t">LSA cost-per-lead — electricians, Franklin</span><span class="when">just now</span></div>
+          <div class="quote">"What does Google actually charge us per lead on LSA right now?"</div>
+          <p class="body">Pull current Local Services Ads pricing for electrical contractors in the Franklin / Nashville metro, plus dispute-credit rules.</p>
+          <div class="actions"><button class="btn primary">Approve</button><button class="btn ghost">Dismiss</button><span class="elapsed" style="margin-left:auto">expires in 48s</span></div>
+        </div>
+        <div class="card shimmer">
+          <div class="card-top"><span class="chip mockup">Mockup</span><span class="t">Six-field intake form — wireframe</span><span class="elapsed" style="margin-left:auto">running · 0:23</span></div>
+          <p class="body">ASCII wireframe first, HTML mockup to follow. Fields: name, callback number, address, issue type, urgency, photos.</p>
+          <div class="meter" style="margin-top:10px"><i style="width:62%"></i></div>
+        </div>
+        <div class="card">
+          <div class="card-top"><span class="chip research">Research</span><span class="t">Sub-60s responders — market scan</span><span class="when">14:19</span></div>
+          <ul class="result-list">
+            <li>Google rewards fast response: sub-5-min replies correlate with ~2× booking rate</li>
+            <li>Competing dispatch tools (Housecall Pro, FieldPulse) average 8–15 min human response</li>
+            <li>No local competitor advertises 24/7 automated LSA reply — open positioning</li>
+          </ul>
+          <div class="actions"><button class="btn ghost">Summarize</button><button class="btn ghost">Copy</button></div>
+        </div>
+      </div>
+      <div class="a-side">
+        <div class="a-col-label">Agenda · 2 of 4</div>
+        <div class="agenda-item done"><span class="box">☑</span> Recap Phase 1 scope</div>
+        <div class="agenda-item done"><span class="box">☑</span> Response-time SLA</div>
+        <div class="agenda-item now"><span class="box">◉</span> LSA budget &amp; lead cost</div>
+        <div class="agenda-item"><span class="box">☐</span> Emergency dispatch path</div>
+        <div class="side-card">
+          <b><span class="chip coach">Coach</span></b>
+          Rory asked about price twice — anchor on the $3,000 setup before the monthly.
+          <div class="talk-meter">talk ratio <div class="meter" style="flex:1"><i style="width:38%"></i></div> 38%</div>
+        </div>
+        <div class="side-card">
+          <b>Fact check</b>
+          "LSA charges per click" — <span style="color:rgb(170,80,70);font-weight:700">Likely incorrect</span> · LSA bills per <i>lead</i>, not per click.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ VARIANT B — Mission control ═══ -->
+<section class="variant" data-v="B">
+  <div class="b-wrap">
+    <div class="b-head">
+      <span class="dot rec"></span>
+      <div>
+        <h2>ACME — LSA Kickoff</h2>
+        <div class="sub">Live · <span data-timer>12:47</span> · Rory, Eli · 128 segments</div>
+      </div>
+      <div class="model-chain">
+        triage <span class="m hot">gemini-flash</span> → <span class="m">haiku</span> → <span class="m">gpt-mini</span>
+        <span style="margin:0 4px">·</span> suggest <span class="m hot">sonnet</span>
+      </div>
+    </div>
+
+    <div class="b-tiles">
+      <div class="b-tile">
+        <div class="k">Next triage eval</div>
+        <div class="v"><span data-count>7</span><small>s</small></div>
+        <div class="foot">15s cadence · adaptive</div>
+        <svg class="ring" width="34" height="34" viewBox="0 0 34 34">
+          <circle class="track" cx="17" cy="17" r="14" fill="none" stroke-width="3"/>
+          <circle class="arc" data-ring cx="17" cy="17" r="14" fill="none" stroke-width="3" stroke-linecap="round" stroke-dasharray="87.96"/>
+        </svg>
+      </div>
+      <div class="b-tile">
+        <div class="k">Suggestions</div>
+        <div class="v">4<small> / 6 approved</small></div>
+        <div class="foot">67% hit rate this session</div>
+      </div>
+      <div class="b-tile">
+        <div class="k">Tokens this session</div>
+        <div class="v" data-tokens>96,420</div>
+        <div class="foot">all subscription · $0.00 API</div>
+      </div>
+      <div class="b-tile">
+        <div class="k">Transcription</div>
+        <div class="v">1.8<small>s</small></div>
+        <div class="foot">whisper local · VAD on</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="b-label">Worker activity</div>
+      <div class="b-workers">
+        <div class="b-card running shimmer">
+          <div class="head"><span class="dot rec" style="background:var(--accent)"></span><span class="state-run">Running · 0:23</span><span class="chip mockup" style="margin-left:auto">Mockup</span></div>
+          <div class="title">Six-field intake form</div>
+          <div class="sub">ASCII wireframe → HTML · sonnet</div>
+          <div class="tokens" data-tokens2>12,840 <span>tokens</span></div>
+        </div>
+        <div class="b-card">
+          <div class="head"><span class="state-done">✓ Completed · 14:19</span><span class="chip research" style="margin-left:auto">Research</span></div>
+          <div class="title">Sub-60s responders — market scan</div>
+          <div class="sub">3 findings · 2 sources</div>
+          <div class="row"><button class="btn primary">Open result</button><button class="btn ghost">Summarize</button></div>
+        </div>
+        <div class="b-card queued">
+          <div class="head"><span class="state-q">Queued</span><span class="chip" style="margin-left:auto">Summary</span></div>
+          <div class="title">Running meeting summary</div>
+          <div class="sub">fires at next lull · auto</div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="b-label">Approval queue</div>
+      <div class="approve-q">
+        <div class="q-row">
+          <span class="chip research">Research</span>
+          <span class="t">LSA cost-per-lead — electricians, Franklin</span>
+          <span class="q">"What does Google actually charge us per lead?"</span>
+          <span class="ttl">48s</span>
+          <button class="btn primary">Approve</button><button class="btn ghost">Skip</button>
+        </div>
+        <div class="q-row">
+          <span class="chip">Analysis</span>
+          <span class="t">Break-even: $399/mo vs. one recovered lead</span>
+          <span class="q">"is it worth it if it saves two calls a week"</span>
+          <span class="ttl">31s</span>
+          <button class="btn primary">Approve</button><button class="btn ghost">Skip</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="b-live">
+      <span class="who">ERIC</span>
+      <p>And can it hand off to dispatch when it's an emergency call</p>
+      <div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ VARIANT C — Stage ═══ -->
+<section class="variant" data-v="C">
+  <div class="c-frame">
+    <div class="c-top">
+      <span class="dot rec"></span>
+      <div class="c-agenda">
+        <span class="step done"><span class="sdot"></span>Scope</span>
+        <span class="step done"><span class="sdot"></span>SLA</span>
+        <span class="step now"><span class="sdot"></span>Budget</span>
+        <span class="step"><span class="sdot"></span>Dispatch</span>
+      </div>
+      <div class="c-timer"><span class="pill live" style="background:var(--stage-ink);color:var(--stage-base)">Live</span><span data-timer>12:47</span></div>
+    </div>
+    <div class="c-prompter">
+      <p class="c-hist h2"><b>CHRIS</b> — Right, and that's the whole design goal: the responder replies in under sixty seconds, every time, even at 2 AM.</p>
+      <p class="c-hist"><b>RORY</b> — What does Google actually charge us per lead on LSA right now?</p>
+      <div class="c-now"><span class="who">Eli · speaking</span><span data-prompter></span></div>
+    </div>
+    <div class="c-wave" aria-hidden="true"></div>
+    <div class="c-toast">
+      <div class="head"><span class="dot rec" style="width:6px;height:6px"></span> Suggested · Research</div>
+      <div class="title">LSA cost-per-lead, Franklin</div>
+      <div class="why">Triggered by Rory's pricing question — pulls live rates + dispute-credit rules.</div>
+      <div class="row">
+        <button class="btn primary">Approve</button>
+        <button class="btn ghost">Skip</button>
+        <div class="c-ttl">
+          <svg width="26" height="26" viewBox="0 0 26 26">
+            <circle class="track" cx="13" cy="13" r="10" fill="none" stroke-width="2.5"/>
+            <circle class="arc" data-ttl cx="13" cy="13" r="10" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="62.83"/>
+          </svg>
+          <b data-ttl-num>48</b>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</div>
+
+<div class="shell-foot">Mock exploration page — data is static.</div>
+
+<script>
+/* Variant switcher */
+const BLURBS = {
+  A: "Today's three-column layout, polished — speaker rails, calmer cards, stat strip",
+  B: "Leads with the AI story — triage ring, worker grid, approval queue, token ticker",
+  C: "Presentation mode — dark teleprompter, agenda dots, suggestion toast with TTL ring",
+};
+document.querySelectorAll('.switcher button').forEach((b) => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.switcher button').forEach((x) => x.classList.toggle('on', x === b));
+    document.querySelectorAll('.variant').forEach((v) => v.classList.toggle('on', v.dataset.v === b.dataset.v));
+    document.getElementById('blurb').textContent = BLURBS[b.dataset.v];
+  });
+});
+addEventListener('keydown', (e) => {
+  const map = { 1: 'A', 2: 'B', 3: 'C' };
+  if (map[e.key]) document.querySelector(`.switcher button[data-v="${map[e.key]}"]`).click();
+});
+
+/* Session timers tick up from 12:47 */
+let secs = 12 * 60 + 47;
+setInterval(() => {
+  secs++;
+  const t = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+  document.querySelectorAll('[data-timer]').forEach((el) => (el.textContent = t));
+}, 1000);
+
+/* Eval countdown 7→0→15, with ring */
+let count = 7;
+setInterval(() => {
+  count = count <= 0 ? 15 : count - 1;
+  document.querySelectorAll('[data-count]').forEach((el) => (el.textContent = count));
+  const C = 87.96;
+  document.querySelectorAll('[data-ring]').forEach((el) => (el.style.strokeDashoffset = C * (1 - count / 15)));
+}, 1000);
+
+/* Token tickers */
+let tok = 96420, tok2 = 12840;
+setInterval(() => {
+  tok += Math.floor(Math.random() * 420) + 60;
+  tok2 += Math.floor(Math.random() * 180) + 30;
+  const el = document.querySelector('[data-tokens]');
+  const el2 = document.querySelector('[data-tokens2]');
+  if (el) el.textContent = tok.toLocaleString();
+  if (el2) el2.innerHTML = `${tok2.toLocaleString()} <span>tokens</span>`;
+}, 900);
+
+/* Variant C — teleprompter word-by-word loop */
+const LINES = [
+  'And can it hand off to dispatch when it’s an actual emergency call, like a panel fire?',
+  'Because nights and weekends are exactly when we lose the most leads to the big franchises.',
+  'If the bot books even two extra jobs a week this thing pays for itself, easy.',
+];
+let li = 0;
+function playLine() {
+  const host = document.querySelector('[data-prompter]');
+  if (!host) return;
+  host.innerHTML = '';
+  const words = LINES[li].split(' ');
+  words.forEach((w, i) => {
+    const s = document.createElement('span');
+    s.className = 'w';
+    s.style.animationDelay = `${i * 140}ms`;
+    s.textContent = w + ' ';
+    host.appendChild(s);
+  });
+  li = (li + 1) % LINES.length;
+  setTimeout(playLine, words.length * 140 + 2600);
+}
+playLine();
+
+/* Variant C — ambient waveform bars */
+const wave = document.querySelector('.c-wave');
+for (let i = 0; i < 48; i++) {
+  const bar = document.createElement('i');
+  bar.style.height = `${20 + Math.round(60 * Math.abs(Math.sin(i * 0.9)))}%`;
+  bar.style.animationDelay = `${(i % 8) * 0.12}s`;
+  wave.appendChild(bar);
+}
+
+/* Variant C — suggestion TTL ring 48→0, loops */
+let ttl = 48;
+setInterval(() => {
+  ttl = ttl <= 0 ? 48 : ttl - 1;
+  const num = document.querySelector('[data-ttl-num]');
+  const arc = document.querySelector('[data-ttl]');
+  if (num) num.textContent = ttl;
+  if (arc) arc.style.strokeDashoffset = 62.83 * (1 - ttl / 48);
+}, 1000);
+</script>
+</body>
+</html>

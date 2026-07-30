@@ -18,7 +18,11 @@ echo "── JS libraries"
 curl -fsSL "https://cdn.jsdelivr.net/npm/marked@${MARKED_VERSION}/marked.min.js" -o "$VENDOR/js/marked.min.js"
 curl -fsSL "https://cdn.jsdelivr.net/npm/dompurify@${DOMPURIFY_VERSION}/dist/purify.min.js" -o "$VENDOR/js/purify.min.js"
 curl -fsSL "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@${HLJS_VERSION}/build/highlight.min.js" -o "$VENDOR/js/highlight.min.js"
+# Both hljs themes are vendored: the dashboard ships a light/dark toggle and
+# must keep working offline, so the inactive one is disabled in the DOM rather
+# than fetched on demand.
 curl -fsSL "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@${HLJS_VERSION}/build/styles/gruvbox-light.min.css" -o "$VENDOR/css/gruvbox-light.min.css"
+curl -fsSL "https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@${HLJS_VERSION}/build/styles/gruvbox-dark.min.css" -o "$VENDOR/css/gruvbox-dark.min.css"
 
 echo "── JetBrains Mono (woff2, latin)"
 # weights the dashboard uses: 300/400/500/600/700 + 400 italic

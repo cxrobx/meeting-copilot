@@ -46,7 +46,7 @@ cd app/MeetingCopilot && swift build
 - **Transcription**: whisper-server local (default), Deepgram cloud (optional)
 - **Intelligence**: Gemini Flash triage (15s cadence) → Sonnet suggestions. Fallback: Haiku → GPT 5.4 Mini
 - **Workers**: Research, Summary, Analysis, Mockup, CodeGen (all implemented)
-- **UI**: Web dashboard at `/present` (Gruvbox Light theme, JetBrains Mono) served in WKWebView
+- **UI**: Web dashboard at `/present` served in WKWebView — CX family design system shared with cxmail/cxtasks/cxnotes (Apple-blue accent, warm charcoal/off-white surfaces, SF system sans with JetBrains Mono reserved for data). Dark default + light toggle via `data-theme` on `<html>`, remembered in `localStorage['mc-theme']`. Full-screen **Stage** presentation mode is always dark.
 - **Storage**: SQLite per session at `~/.meeting-copilot/sessions/<id>/`
 - **Privacy**: No raw audio stored. Consent affirmation checkbox on the start form per session. Visible REC indicator.
 

@@ -1,5 +1,6 @@
 import { Router, type Response } from 'express';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -108,6 +109,23 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
   // ─── GET /present — HTML dashboard ──────────────────────────────────
   router.get('/present', (_req, res) => {
     res.type('html').send(PRESENT_HTML);
+  });
+
+  // ─── GET /mock — design exploration page (dev only, static data) ─────
+  // Read from disk on every request so edits show on refresh. mock.html is
+  // not compiled or bundled, so under dist/ we fall back to the src copy;
+  // in the packaged app neither exists and this 404s, which is fine.
+  router.get('/mock', (_req, res) => {
+    const candidates = [
+      fileURLToPath(new URL('./mock.html', import.meta.url)),
+      join(process.cwd(), 'src', 'present', 'mock.html'),
+    ];
+    const file = candidates.find((p) => existsSync(p));
+    if (!file) {
+      res.status(404).send('mock.html not found — dev-only page, run from server/ via npm run dev');
+      return;
+    }
+    res.type('html').send(readFileSync(file, 'utf8'));
   });
 
   // ─── GET /present/actions — JSON snapshot (live or stored session) ───
@@ -440,70 +458,187 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
 // ─── Inline HTML Template ─────────────────────────────────────────────────
 
 const PRESENT_HTML = `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
+<meta name="color-scheme" content="dark light">
 <title>Meeting Copilot</title>
 <script src="/vendor/js/marked.min.js"><\/script>
 <script src="/vendor/js/purify.min.js"><\/script>
 <script src="/vendor/js/highlight.min.js"><\/script>
-<link rel="stylesheet" href="/vendor/css/gruvbox-light.min.css">
 <link rel="stylesheet" href="/vendor/css/fonts.css">
+<link rel="stylesheet" id="hljsLight" href="/vendor/css/gruvbox-light.min.css">
+<link rel="stylesheet" id="hljsDark" href="/vendor/css/gruvbox-dark.min.css">
+<script>
+  // Applied before first paint so a light-theme user never sees a dark flash.
+  // Inline and dependency-free for that reason, and placed after the two hljs
+  // stylesheets so it can disable the one that doesn't match.
+  (function () {
+    var t = 'dark';
+    try {
+      var stored = localStorage.getItem('mc-theme');
+      if (stored === 'light' || stored === 'dark') t = stored;
+    } catch (e) { /* private mode — keep the dark default */ }
+    document.documentElement.setAttribute('data-theme', t);
+    var light = document.getElementById('hljsLight');
+    var dark = document.getElementById('hljsDark');
+    if (light) light.disabled = (t !== 'light');
+    if (dark) dark.disabled = (t === 'light');
+  })();
+<\/script>
 <style>
-  /* ─── CXMail palette (warm neutrals + iOS-blue accent) ───────
-     Light-only by design. 'color-scheme: light' pins native UA
-     surfaces (scrollbars, form controls, highlight.js fallback)
-     even when the OS is in dark mode.
-     Variable names kept as --gb-* so the 1,000+ CSS rules below
-     don't need renaming.
-     Note: --gb-green is repointed to iOS blue so "LIVE/connected/
-     success" semantics use blue accents instead of green.          */
+  /* ─── CX family design tokens ────────────────────────────────
+     Shared with cxmail, cxtasks and cxnotes: warm charcoal / warm
+     off-white surfaces, Apple-blue accent, sage-amber-terracotta
+     semantics, SF system sans with mono reserved for data, small
+     radii, thin scrollbars. Token NAMES and VALUES are copied from
+     those apps verbatim so the four read as one family.
+
+     Values are space-separated RGB triplets (the family convention)
+     so any rule can take an alpha: rgb(var(--accent) / 0.12).
+
+     Dark is the default, matching cxnotes; the header toggle flips
+     data-theme on <html> and is remembered in localStorage.         */
   :root {
+    --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 10px;
+    --radius-xl: 12px;
+    --radius-full: 999px;
+    --transition: 150ms ease;
+  }
+
+  [data-theme="dark"] {
+    color-scheme: dark;
+    --bg-primary:  28 26 23;
+    --bg-sidebar:  35 32 28;
+    --bg-surface:  42 39 34;
+    --bg-elevated: 53 49 43;
+    --bg-input:    35 32 28;
+
+    --border-default: 74 68 57;
+    --border-subtle:  53 49 43;
+
+    --text-primary:   255 255 255;
+    --text-secondary: 210 208 205;
+    --text-muted:     155 153 150;
+    --text-faint:     115 113 110;
+
+    --accent:       10 132 255;
+    --accent-hover:  8 106 204;
+
+    --success: 143 179 136;
+    --error:   212 118 106;
+    --warning: 212 168 90;
+
+    --ai-accent: 160 140 120;
+    --shadow-color: 0 0 0;
+  }
+
+  [data-theme="light"] {
     color-scheme: light;
-    /* Backgrounds (warm cream, light) */
-    --gb-base:     rgb(251,248,243);
-    --gb-mantle:   rgb(248,243,235);
-    --gb-crust:    rgb(241,234,223);
-    --gb-surface0: rgb(245,239,228);
-    --gb-surface1: rgb(241,234,223);
-    --gb-surface2: rgb(213,205,189);
-    /* Overlays / muted text ramp */
-    --gb-overlay0: rgb(213,205,189);
-    --gb-overlay1: rgb(155,148,135);
-    --gb-overlay2: rgb(115,108,95);
-    --gb-text:     rgb(30,25,15);
-    --gb-subtext0: rgb(70,60,45);
-    --gb-subtext1: rgb(100,90,75);
-    /* Semantic (constant across modes) */
-    --gb-red:      rgb(212,118,106); /* warm coral error    */
-    --gb-maroon:   rgb(190,90,80);
-    --gb-peach:    rgb(212,150,110);
-    --gb-yellow:   rgb(212,168,90);  /* warm gold warning   */
-    --gb-green:    rgb(20,18,14);    /* success → near-black (no blue/green in UI) */
-    --gb-teal:     rgb(30,25,15);
-    --gb-sky:      rgb(30,25,15);
-    --gb-sapphire: rgb(20,18,14);
-    --gb-blue:     rgb(20,18,14);    /* accent → near-black */
-    /* Warm-neutral variants of CXMail ai-accent for signal colors */
-    --gb-lavender: rgb(180,160,140);
-    --gb-mauve:    rgb(200,150,130);
-    --gb-pink:     rgb(210,160,150);
-    --gb-rosewater:rgb(200,170,150);
-    --gb-flamingo: rgb(210,170,160);
-    /* Accent polish tokens */
-    --accent:       var(--gb-blue);
-    --accent-hover: rgb(60,55,45);
-    --accent-soft:  color-mix(in srgb, var(--gb-blue) 10%, transparent);
-    --focus-ring:   color-mix(in srgb, var(--gb-blue) 28%, transparent);
+    --bg-primary:  248 247 245;
+    --bg-sidebar:  243 242 240;
+    --bg-surface:  255 255 254;
+    --bg-elevated: 251 250 248;
+    --bg-input:    255 255 254;
+
+    --border-default: 225 222 218;
+    --border-subtle:  238 236 232;
+
+    --text-primary:    30 25 15;
+    --text-secondary:  75 70 60;
+    --text-muted:     130 125 115;
+    --text-faint:     170 165 155;
+
+    --accent:       10 132 255;
+    --accent-hover:  8 106 204;
+
+    --success: 125 155 118;
+    --error:   196 92 74;
+    --warning: 196 146 58;
+
+    --ai-accent: 139 115 85;
+    --shadow-color: 44 31 14;
+  }
+
+  /* ─── Legacy --gb-* aliases ──────────────────────────────────
+     The 1,000+ rules below were written against these names. Rather
+     than rename every one (and risk missing some), each alias now
+     resolves to a family token, so the whole dashboard follows the
+     active theme for free. Do not add new --gb-* names — use the
+     family tokens directly in new rules.                            */
+  :root {
+    --gb-base:     rgb(var(--bg-primary));
+    --gb-mantle:   rgb(var(--bg-sidebar));
+    --gb-crust:    rgb(var(--bg-sidebar));
+    --gb-surface0: rgb(var(--bg-surface));
+    --gb-surface1: rgb(var(--bg-elevated));
+    --gb-surface2: rgb(var(--border-default));
+    --gb-overlay0: rgb(var(--border-default));
+    --gb-overlay1: rgb(var(--text-faint));
+    --gb-overlay2: rgb(var(--text-muted));
+    --gb-text:     rgb(var(--text-primary));
+    --gb-subtext0: rgb(var(--text-secondary));
+    --gb-subtext1: rgb(var(--text-muted));
+
+    --gb-red:      rgb(var(--error));
+    --gb-maroon:   rgb(var(--error));
+    --gb-yellow:   rgb(var(--warning));
+    --gb-peach:    rgb(var(--warning));
+    --gb-green:    rgb(var(--success));
+    --gb-blue:     rgb(var(--accent));
+    --gb-teal:     rgb(var(--accent));
+    --gb-sky:      rgb(var(--accent));
+    --gb-sapphire: rgb(var(--accent));
+    --gb-lavender: rgb(var(--ai-accent));
+    --gb-mauve:    rgb(var(--ai-accent));
+    --gb-pink:     rgb(var(--ai-accent));
+    --gb-rosewater:rgb(var(--ai-accent));
+    --gb-flamingo: rgb(var(--ai-accent));
+
+    --accent-soft:  rgb(var(--accent) / 0.12);
+    --focus-ring:   rgb(var(--accent) / 0.6);
+    --shadow-macos: 0 2px 8px rgb(var(--shadow-color) / 0.3), 0 1px 3px rgb(var(--shadow-color) / 0.2);
+    --shadow-macos-lg: 0 8px 32px rgb(var(--shadow-color) / 0.4), 0 2px 8px rgb(var(--shadow-color) / 0.3);
   }
 
 
   * { margin:0; padding:0; box-sizing:border-box; }
 
+  /* Mono is reserved for content where character alignment carries meaning —
+     figures you compare down a column, clock time, and verbatim transcript.
+     Everything else is system sans, matching cxmail/cxtasks/cxnotes. */
+  .stat-value,
+  .session-timer,
+  .seg-time,
+  .seg-text,
+  .card-trigger,
+  .stage-timer,
+  .stage-live,
+  .stage-hist,
+  .agenda-evidence,
+  code, pre, kbd,
+  .tabular { font-family: var(--font-mono); }
+
+  .stat-value,
+  .session-timer,
+  .seg-time,
+  .stage-timer { font-variant-numeric: tabular-nums; }
+
+  input, textarea, select, button { font-family: inherit; font-size: inherit; color: inherit; }
+  input:focus-visible, textarea:focus-visible,
+  select:focus-visible, button:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
+  }
+
   body {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
     background: var(--gb-base);
     color: var(--gb-text);
     line-height: 1.6;
@@ -545,7 +680,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     background: var(--gb-overlay0);
     flex-shrink: 0;
   }
-  .status-dot.connected { background: var(--gb-green); animation: pulse 2s ease-in-out infinite; }
+  .status-dot.connected { background: rgb(var(--accent)); animation: pulse 2s ease-in-out infinite; }
   .status-dot.disconnected { background: var(--gb-red); }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
@@ -580,8 +715,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .state-pill.live { background: var(--gb-blue); }
   .state-pill.priming, .state-pill.ending {
     background: var(--accent-soft);
-    color: var(--accent);
-    border: 1px solid var(--accent);
+    color: rgb(var(--accent));
+    border: 1px solid rgb(var(--accent));
   }
   .state-pill.degraded { background: var(--gb-yellow); }
   .state-pill.error { background: var(--gb-red); }
@@ -631,6 +766,33 @@ const PRESENT_HTML = `<!DOCTYPE html>
     100% { transform: scale(1); opacity: 1; }
   }
 
+  /* Waveform beside REC. Decorative — it rides the same .visible flag as the
+     dot (audio is flowing) rather than real amplitude, so it must never be
+     the only evidence that capture is working; app.log peak= is the truth. */
+  .audio-wave {
+    display: inline-flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 11px;
+    margin-left: 1px;
+  }
+  .audio-wave i {
+    width: 2px;
+    border-radius: 1px;
+    background: var(--gb-red);
+    opacity: 0.75;
+    animation: audio-wv 1.1s ease-in-out infinite;
+  }
+  .audio-wave i:nth-child(1) { height: 40%; animation-delay: 0s; }
+  .audio-wave i:nth-child(2) { height: 85%; animation-delay: 0.15s; }
+  .audio-wave i:nth-child(3) { height: 55%; animation-delay: 0.3s; }
+  .audio-wave i:nth-child(4) { height: 100%; animation-delay: 0.45s; }
+  .audio-wave i:nth-child(5) { height: 65%; animation-delay: 0.6s; }
+  @keyframes audio-wv { 0%,100% { transform: scaleY(0.45); } 50% { transform: scaleY(1); } }
+  @media (prefers-reduced-motion: reduce) {
+    .audio-wave i { animation: none; }
+  }
+
   .session-timer {
     font-size: 16px;
     font-weight: 600;
@@ -642,7 +804,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   /* ─── Buttons ──────────────────────────────────────────────── */
   .btn {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
     font-size: 11px;
     font-weight: 600;
     padding: 6px 14px;
@@ -655,7 +817,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
-  .btn-green { background: var(--gb-green); color: white; }
+  /* Primary affirmative action. Blue (accent), not sage: the family spends
+     accent on the thing it wants clicked and keeps --success for STATE. */
+  .btn-green { background: rgb(var(--accent)); color: white; }
   .btn-red { background: var(--gb-red); color: white; }
   .btn-blue { background: var(--gb-blue); color: white; }
   .btn-ghost { background: transparent; border: 1px solid var(--gb-surface2); color: var(--gb-subtext0); }
@@ -674,24 +838,38 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   .stat-tile {
     flex: 1;
-    background: var(--gb-surface0);
+    background: var(--gb-base);
     border: 1px solid var(--gb-surface2);
-    border-radius: 6px;
-    padding: 8px 14px;
-    text-align: center;
+    border-radius: 8px;
+    padding: 7px 13px;
+    text-align: left;
+    min-width: 0;
   }
   .stat-label {
-    font-size: 9px;
+    font-size: 8.5px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--gb-overlay2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .stat-value {
-    font-size: 18px;
+    font-size: 17px;
     font-weight: 700;
     color: var(--gb-text);
-    line-height: 1.2;
+    line-height: 1.3;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+  /* Secondary figure inside a tile ("6 · 4 approved") — carries context
+     without spending a whole tile on it. */
+  .stat-value small {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--gb-overlay1);
+    letter-spacing: 0;
   }
 
   /* ─── Layout ───────────────────────────────────────────────── */
@@ -778,7 +956,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
 
   .filter-btn {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
     font-size: 10px;
     font-weight: 600;
     padding: 3px 10px;
@@ -799,7 +977,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   .transcript-search {
     width: 100%;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
     font-size: 11px;
     padding: 5px 10px;
     border: 1px solid var(--gb-surface2);
@@ -850,7 +1028,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     border: none;
     border-radius: 999px;
     cursor: pointer;
-    box-shadow: 0 4px 12px -6px rgba(20,18,14,0.5);
+    box-shadow: 0 4px 12px -6px rgb(var(--shadow-color) / 0.5);
   }
   .new-seg-pill:hover { opacity: 0.85; }
 
@@ -862,8 +1040,23 @@ const PRESENT_HTML = `<!DOCTYPE html>
     transition: background 0.1s;
   }
   .seg:hover { background: var(--gb-surface0); }
-  .seg.mic { border-left-color: var(--gb-blue); }
-  .seg.meeting { border-left-color: var(--gb-yellow); }
+  .seg.mic { border-left-color: rgb(var(--accent)); }
+  .seg.meeting { border-left-color: var(--gb-peach); }
+
+  /* The newest segment is the live edge: full-strength ink plus a caret, so
+     you can tell at a glance that transcription is still flowing. Set by
+     markLatestSegment() on every insert. */
+  .seg.latest .seg-text { color: var(--gb-text); }
+  .seg.latest .seg-text::after {
+    content: "▍";
+    color: rgb(var(--accent));
+    margin-left: 1px;
+    animation: seg-caret 1.05s steps(1) infinite;
+  }
+  @keyframes seg-caret { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .seg.latest .seg-text::after { animation: none; }
+  }
 
   .seg-top {
     display: flex;
@@ -878,8 +1071,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
     padding: 1px 5px;
     border-radius: 3px;
   }
-  .seg-source.mic { background: rgba(69,133,136,0.12); color: var(--gb-blue); }
-  .seg-source.meeting { background: rgba(215,153,33,0.12); color: var(--gb-yellow); }
+  .seg-source.mic { background: rgb(var(--text-primary) / 0.09); color: var(--gb-subtext0); }
+  .seg-source.meeting { background: rgb(var(--warning) / 0.18); color: rgb(var(--warning)); }
 
   .seg-time {
     font-size: 10px;
@@ -901,10 +1094,10 @@ const PRESENT_HTML = `<!DOCTYPE html>
     border-radius: 2px;
     letter-spacing: 0.04em;
   }
-  .signal-tag.action { background: rgba(20,18,14,0.08); color: var(--gb-green); }
-  .signal-tag.decision { background: rgba(69,133,136,0.12); color: var(--gb-blue); }
-  .signal-tag.question { background: rgba(146,111,175,0.12); color: var(--gb-lavender); }
-  .signal-tag.risk { background: rgba(204,36,29,0.12); color: var(--gb-red); }
+  .signal-tag.action { background: rgb(var(--text-primary) / 0.08); color: var(--gb-green); }
+  .signal-tag.decision { background: rgb(var(--accent) / 0.12); color: var(--gb-blue); }
+  .signal-tag.question { background: rgb(var(--ai-accent) / 0.12); color: var(--gb-lavender); }
+  .signal-tag.risk { background: rgb(var(--error) / 0.12); color: var(--gb-red); }
 
   /* ─── Main Column ──────────────────────────────────────────── */
   .main {
@@ -963,7 +1156,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     margin-top: 10px;
   }
   .idle-form input, .idle-form textarea {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
     font-size: 12px;
     width: 100%;
     padding: 7px 10px;
@@ -976,7 +1169,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     transition: border-color 120ms, box-shadow 120ms;
   }
   .idle-form input:focus, .idle-form textarea:focus {
-    border-color: var(--accent);
+    border-color: rgb(var(--accent));
     box-shadow: 0 0 0 3px var(--focus-ring);
   }
 
@@ -1053,7 +1246,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     text-transform: uppercase;
     letter-spacing: 0.07em;
     font-weight: 700;
-    color: var(--accent);
+    color: rgb(var(--accent));
     margin: 26px 0 10px;
     padding-bottom: 6px;
     border-bottom: 1px solid var(--gb-surface2);
@@ -1073,18 +1266,18 @@ const PRESENT_HTML = `<!DOCTYPE html>
     width: 5px;
     height: 5px;
     border-radius: 50%;
-    background: var(--accent);
+    background: rgb(var(--accent));
   }
   .review-md ol { margin: 8px 0; padding-left: 22px; }
   .review-md ol > li { margin: 8px 0; padding-left: 4px; }
-  .review-md li::marker { color: var(--accent); font-weight: 700; }
+  .review-md li::marker { color: rgb(var(--accent)); font-weight: 700; }
   .review-md strong { color: var(--gb-text); font-weight: 700; }
   .review-md em { color: var(--gb-subtext1); font-style: italic; }
   .review-md blockquote {
     margin: 0 0 20px;
     padding: 9px 14px;
     background: var(--gb-surface0);
-    border-left: 3px solid var(--accent);
+    border-left: 3px solid rgb(var(--accent));
     color: var(--gb-subtext1);
     font-size: 12px;
   }
@@ -1106,7 +1299,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .agenda-editor-row + .agenda-editor-row { margin-top: 2px; }
   .agenda-editor-input {
     flex: 1 1 auto;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
     font-size: 11px;
     padding: 5px 8px;
     border: 1px solid var(--gb-surface2);
@@ -1177,7 +1370,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     margin-left: auto;
   }
   .proj-badge.ios {
-    background: rgba(69,133,136,0.12);
+    background: rgb(var(--accent) / 0.12);
     color: var(--gb-blue);
   }
 
@@ -1241,14 +1434,14 @@ const PRESENT_HTML = `<!DOCTYPE html>
     flex-shrink: 0;
     border-radius: 3px;
   }
-  .ctx-remove:hover { color: var(--gb-red); background: rgba(204,36,29,0.08); }
+  .ctx-remove:hover { color: var(--gb-red); background: rgb(var(--error) / 0.08); }
   .ctx-add-row {
     display: flex;
     gap: 6px;
     margin-top: 6px;
   }
   .ctx-add-btn {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
     font-size: 11px;
     padding: 4px 10px;
     border: 1px dashed var(--gb-surface2);
@@ -1266,7 +1459,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
   .ctx-input-row input {
     flex: 1;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
     font-size: 11px;
     padding: 5px 8px;
     border: 1px solid var(--gb-blue);
@@ -1276,7 +1469,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     outline: none;
   }
   .ctx-input-row button {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
     font-size: 11px;
     padding: 4px 8px;
     border-radius: 5px;
@@ -1299,7 +1492,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
   .ctx-input-row input.drag-over {
     border-color: var(--gb-green);
-    background: rgba(20,18,14,0.04);
+    background: rgb(var(--text-primary) / 0.04);
   }
 
   .consent-row {
@@ -1378,7 +1571,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
   .settings-field input[type="number"] {
     width: 110px;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
     font-size: 12px;
     padding: 6px 8px;
     border: 1px solid var(--gb-surface2);
@@ -1425,7 +1618,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     justify-content: space-between;
     align-items: center;
   }
-  .session-item:hover { background: var(--gb-surface1); border-left-color: var(--accent); }
+  .session-item:hover { background: var(--gb-surface1); border-left-color: rgb(var(--accent)); }
   .session-item-title { font-weight: 600; color: var(--gb-text); font-size: 13px; }
   .session-item-meta { font-size: 11px; color: var(--gb-subtext0); }
   .session-item-stats { font-size: 10px; color: var(--gb-overlay2); text-align: right; }
@@ -1474,7 +1667,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     position: sticky;
     top: 0;
     z-index: 20;
-    box-shadow: 0 6px 14px -12px rgba(20,18,14,0.45);
+    box-shadow: 0 6px 14px -12px rgb(var(--shadow-color) / 0.45);
   }
   .quick-actions-title {
     font-size: 10px;
@@ -1485,7 +1678,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     margin-bottom: 8px;
   }
   .quick-actions-input {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
     font-size: 11px;
     width: 100%;
     padding: 6px 10px;
@@ -1502,16 +1695,40 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   /* ─── Cards ────────────────────────────────────────────────── */
   .card {
-    background: var(--gb-surface0);
+    background: var(--gb-base);
     border: 1px solid var(--gb-surface2);
-    border-radius: 8px;
-    padding: 20px;
-    margin-bottom: 16px;
-    transition: border-color 0.2s;
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin-bottom: 14px;
+    transition: border-color 0.2s, box-shadow 0.2s;
   }
-  .card.suggested { border-color: var(--gb-yellow); background: rgba(215,153,33,0.05); }
-  .card.running { border-color: var(--gb-blue); animation: border-pulse 1.5s ease-in-out infinite; }
-  @keyframes border-pulse { 0%,100%{border-color:var(--gb-blue)} 50%{border-color:var(--gb-surface2)} }
+  /* A pending suggestion is the only thing on screen asking for a decision,
+     so it earns the accent border + lift rather than a colour wash. */
+  .card.suggested {
+    border-color: rgb(var(--accent));
+    background: var(--gb-base);
+    box-shadow: 0 2px 14px -6px rgb(var(--shadow-color) / 0.35);
+  }
+  /* Running cards sweep instead of pulsing their border: a blinking outline
+     next to live transcript text reads as an error state. */
+  .card.running {
+    border-color: var(--gb-surface2);
+    position: relative;
+    overflow: hidden;
+  }
+  .card.running::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(105deg, transparent 40%, rgb(var(--text-primary) / 0.05) 50%, transparent 60%);
+    background-size: 250% 100%;
+    animation: card-sweep 2.4s linear infinite;
+  }
+  @keyframes card-sweep { from { background-position: 200% 0 } to { background-position: -50% 0 } }
+  @media (prefers-reduced-motion: reduce) {
+    .card.running::after { animation: none; }
+  }
   .card.fade-out {
     opacity: 0;
     transform: translateY(-4px);
@@ -1534,13 +1751,18 @@ const PRESENT_HTML = `<!DOCTYPE html>
     padding: 2px 7px;
     border-radius: 4px;
   }
-  .card-type.research { background: rgba(20,18,14,0.08); color: var(--gb-green); }
-  .card-type.summary { background: rgba(215,153,33,0.12); color: var(--gb-yellow); }
-  .card-type.mockup { background: rgba(177,98,134,0.12); color: var(--gb-mauve); }
-  .card-type.codegen { background: rgba(69,133,136,0.12); color: var(--gb-blue); }
-  .card-type.analysis { background: rgba(214,93,14,0.12); color: var(--gb-peach); }
-  .card-type.review { background: rgba(104,157,106,0.14); color: var(--gb-aqua, var(--gb-green)); }
-  .card-type.failed { background: rgba(204,36,29,0.12); color: var(--gb-red); }
+  /* Worker chips: tinted background + same-hue text, the family's chip
+     pattern. Seven types have to stay tellable apart from the four semantic
+     hues the family defines, so neutrals carry the two least urgent kinds
+     (codegen, summary) and the rest take a hue each. Every value is a token,
+     so the whole set inverts correctly in dark mode. */
+  .card-type.research { background: rgb(var(--accent) / 0.16);    color: rgb(var(--accent)); }
+  .card-type.analysis { background: rgb(var(--warning) / 0.18);   color: rgb(var(--warning)); }
+  .card-type.mockup   { background: rgb(var(--ai-accent) / 0.20); color: rgb(var(--ai-accent)); }
+  .card-type.review   { background: rgb(var(--success) / 0.18);   color: rgb(var(--success)); }
+  .card-type.failed   { background: rgb(var(--error) / 0.18);     color: rgb(var(--error)); }
+  .card-type.codegen  { background: rgb(var(--text-primary) / 0.09); color: var(--gb-subtext0); }
+  .card-type.summary  { background: rgb(var(--text-primary) / 0.06); color: var(--gb-subtext1); }
 
   .card-title {
     font-size: 14px;
@@ -1559,10 +1781,14 @@ const PRESENT_HTML = `<!DOCTYPE html>
     font-size: 13px;
     color: var(--gb-subtext1);
   }
-  .card-body h1 { color: var(--gb-red); font-size: 18px; font-weight: 700; margin-top: 16px; margin-bottom: 6px; }
-  .card-body h2 { color: var(--gb-peach); font-size: 15px; font-weight: 700; margin-top: 14px; margin-bottom: 6px; }
-  .card-body h3 { color: var(--gb-sky); font-size: 14px; font-weight: 600; margin-top: 12px; margin-bottom: 4px; }
-  .card-body h4 { color: var(--gb-blue); font-size: 13px; font-weight: 600; margin-top: 10px; margin-bottom: 4px; }
+  /* Headings carry rank through size and weight, not hue — the old palette
+     gave h1-h4 four different colours, which read as a rainbow inside a card
+     and fought the accent for attention. The family keeps prose monochrome
+     and spends colour on chips, links and state. */
+  .card-body h1 { color: var(--gb-text); font-size: 18px; font-weight: 700; margin-top: 16px; margin-bottom: 6px; }
+  .card-body h2 { color: var(--gb-text); font-size: 15px; font-weight: 700; margin-top: 14px; margin-bottom: 6px; }
+  .card-body h3 { color: var(--gb-text); font-size: 14px; font-weight: 600; margin-top: 12px; margin-bottom: 4px; }
+  .card-body h4 { color: var(--gb-subtext0); font-size: 13px; font-weight: 600; margin-top: 10px; margin-bottom: 4px; }
   .card-body p { margin-bottom: 8px; }
   .card-body ul, .card-body ol { padding-left: 18px; margin-bottom: 8px; }
   .card-body li { margin-bottom: 3px; }
@@ -1581,8 +1807,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .card-body a { color: var(--gb-blue); text-decoration: none; }
   .card-body a:hover { text-decoration: underline; }
   .card-body pre { background: var(--gb-surface1); border: 1px solid var(--gb-surface2); border-radius: 5px; padding: 12px; overflow-x: auto; margin: 10px 0; font-size: 12px; line-height: 1.5; }
-  .card-body code { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
-  .card-body :not(pre) > code { background: var(--gb-surface1); color: var(--gb-peach); padding: 1px 5px; border-radius: 3px; }
+  .card-body code { font-family: var(--font-mono); font-size: 12px; }
+  .card-body :not(pre) > code { background: var(--gb-surface1); color: var(--gb-text); padding: 1px 5px; border-radius: 3px; }
   .card-body hr { border: none; border-top: 1px solid var(--gb-surface2); margin: 12px 0; }
   .card-body blockquote { border-left: 3px solid var(--gb-overlay0); padding-left: 12px; color: var(--gb-subtext0); margin: 8px 0; }
   .card-body table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 12px; }
@@ -1676,7 +1902,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     background: var(--gb-base, #fff);
     border: 1px solid var(--gb-surface1, #ddd);
     border-radius: 8px;
-    box-shadow: 0 10px 24px -12px rgba(20,18,14,0.4);
+    box-shadow: 0 10px 24px -12px rgb(var(--shadow-color) / 0.4);
     padding: 10px 12px;
     font-size: 11px;
     max-width: 380px;
@@ -1713,13 +1939,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
     align-items: center;
     gap: 10px;
     font-size: 11px;
-    box-shadow: 0 10px 24px -12px rgba(20,18,14,0.6);
+    box-shadow: 0 10px 24px -12px rgb(var(--shadow-color) / 0.6);
     animation: toast-in 0.25s ease-out;
   }
   @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
   .toast-msg { flex: 1; line-height: 1.4; min-width: 0; }
   .toast-undo {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
     font-size: 10px;
     font-weight: 700;
     text-transform: uppercase;
@@ -1759,7 +1985,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .qa-title-row .quick-actions-title { margin-bottom: 0; }
   .monitor-toggles { display: flex; gap: 4px; flex-shrink: 0; }
   .monitor-toggle {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
     font-size: 9px;
     font-weight: 700;
     text-transform: uppercase;
@@ -1784,7 +2010,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     display: flex;
     align-items: flex-start;
     gap: 10px;
-    background: rgba(215,153,33,0.08);
+    background: rgb(var(--warning) / 0.08);
     border: 1px solid var(--gb-yellow);
     border-radius: 8px;
     padding: 12px 14px;
@@ -1822,9 +2048,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .coach-close:hover { color: var(--gb-text); }
 
   /* ─── Fact-check flag cards ────────────────────────────────── */
-  .card.factflag { border-color: var(--gb-red); background: rgba(204,36,29,0.04); }
-  .card-type.factcheck { background: rgba(204,36,29,0.12); color: var(--gb-red); }
-  .toc-badge.factcheck { background: rgba(204,36,29,0.15); color: var(--gb-red); }
+  .card.factflag { border-color: var(--gb-red); background: rgb(var(--error) / 0.04); }
+  .card-type.factcheck { background: rgb(var(--error) / 0.12); color: var(--gb-red); }
+  .toc-badge.factcheck { background: rgb(var(--error) / 0.15); color: var(--gb-red); }
   .fact-verdict {
     font-size: 9px;
     font-weight: 700;
@@ -1847,7 +2073,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     background: var(--gb-base);
     border: 1px solid var(--gb-surface2);
     border-radius: 8px;
-    box-shadow: 0 10px 28px -10px rgba(20,18,14,0.4);
+    box-shadow: 0 10px 28px -10px rgb(var(--shadow-color) / 0.4);
     padding: 4px;
     min-width: 190px;
   }
@@ -1868,7 +2094,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .askmenu-input-row.open { display: flex; }
   .askmenu-input-row textarea {
     flex: 1;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
     font-size: 11px;
     padding: 6px 8px;
     border: 1px solid var(--gb-surface2);
@@ -1881,7 +2107,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     resize: vertical;
     line-height: 1.5;
   }
-  .askmenu-input-row textarea:focus { border-color: var(--accent); }
+  .askmenu-input-row textarea:focus { border-color: rgb(var(--accent)); }
 
   /* Selection mini-toolbar — visible affordance for highlight-to-ask */
   .selbar {
@@ -1894,7 +2120,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     background: var(--gb-base);
     border: 1px solid var(--gb-surface2);
     border-radius: 8px;
-    box-shadow: 0 10px 28px -10px rgba(20,18,14,0.4);
+    box-shadow: 0 10px 28px -10px rgb(var(--shadow-color) / 0.4);
     padding: 3px;
   }
   .selbar-btn {
@@ -1917,7 +2143,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .selbar-input-row.open { display: flex; }
   .selbar-input-row input {
     flex: 1;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-sans);
     font-size: 11px;
     padding: 5px 8px;
     border: 1px solid var(--gb-surface2);
@@ -1927,7 +2153,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     outline: none;
     min-width: 220px;
   }
-  .selbar-input-row input:focus { border-color: var(--accent); }
+  .selbar-input-row input:focus { border-color: rgb(var(--accent)); }
 
   .askpanel {
     position: fixed;
@@ -1942,7 +2168,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     background: var(--gb-base);
     border: 1px solid var(--gb-surface2);
     border-radius: 10px;
-    box-shadow: 0 18px 44px -16px rgba(20,18,14,0.5);
+    box-shadow: 0 18px 44px -16px rgb(var(--shadow-color) / 0.5);
     flex-direction: column;
     resize: both;
     overflow: hidden;
@@ -1988,7 +2214,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
 
   /* ─── Newest-first transcript ──────────────────────────────── */
-  .seg.newest { background: rgba(215,153,33,0.09); }
+  .seg.newest { background: rgb(var(--warning) / 0.09); }
   .transcript-order {
     font-size: 9px;
     font-weight: 700;
@@ -1997,7 +2223,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     padding: 1px 7px;
     border-radius: 8px;
     margin-left: 6px;
-    background: rgba(20,18,14,0.08);
+    background: rgb(var(--text-primary) / 0.08);
     color: var(--gb-green);
   }
 
@@ -2049,11 +2275,14 @@ const PRESENT_HTML = `<!DOCTYPE html>
     letter-spacing: 0.04em; padding: 1px 4px; border-radius: 3px;
     display: inline; vertical-align: middle; margin-right: 3px;
   }
-  .toc-badge.research { background: rgba(20,18,14,0.10); color: var(--gb-green); }
-  .toc-badge.summary { background: rgba(215,153,33,0.15); color: var(--gb-yellow); }
-  .toc-badge.mockup { background: rgba(177,98,134,0.15); color: var(--gb-mauve); }
-  .toc-badge.codegen { background: rgba(69,133,136,0.15); color: var(--gb-blue); }
-  .toc-badge.analysis { background: rgba(214,93,14,0.15); color: var(--gb-peach); }
+  /* Same hue per worker type as .card-type above — a card and its outline
+     entry must agree, or the badge stops being a wayfinding cue. */
+  .toc-badge.research { background: rgb(var(--accent) / 0.16);    color: rgb(var(--accent)); }
+  .toc-badge.analysis { background: rgb(var(--warning) / 0.18);   color: rgb(var(--warning)); }
+  .toc-badge.mockup   { background: rgb(var(--ai-accent) / 0.20); color: rgb(var(--ai-accent)); }
+  .toc-badge.review   { background: rgb(var(--success) / 0.18);   color: rgb(var(--success)); }
+  .toc-badge.codegen  { background: rgb(var(--text-primary) / 0.09); color: var(--gb-subtext0); }
+  .toc-badge.summary  { background: rgb(var(--text-primary) / 0.06); color: var(--gb-subtext1); }
 
   .toc-heading {
     display: block;
@@ -2068,7 +2297,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
   .toc-heading.depth-3 { padding-left: 28px; }
   .toc-heading:hover { color: var(--gb-subtext1); background: var(--gb-surface1); }
-  .toc-heading.active { color: var(--gb-text); background: rgba(69,133,136,0.1); border-left: 2px solid var(--gb-blue); padding-left: 16px; }
+  .toc-heading.active { color: var(--gb-text); background: rgb(var(--accent) / 0.1); border-left: 2px solid var(--gb-blue); padding-left: 16px; }
   .toc-heading.active.depth-3 { padding-left: 26px; }
 
   /* ─── Agenda Tracker Panel ─────────────────────────────────── */
@@ -2167,7 +2396,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     margin-top: 10px;
     padding: 8px 10px;
     border-radius: 4px;
-    background: rgba(204,36,29,0.08);
+    background: rgb(var(--error) / 0.08);
     border-left: 2px solid var(--gb-red);
     font-size: 11px;
     color: var(--gb-red);
@@ -2181,6 +2410,281 @@ const PRESENT_HTML = `<!DOCTYPE html>
     margin-bottom: 4px;
   }
   .agenda-warning-item + .agenda-warning-item { margin-top: 4px; }
+
+  /* ─── Stage View ───────────────────────────────────────────────
+     A full-screen, warm-dark presentation mode: agenda dots, a large
+     teleprompter of what was just said, and the two things worth
+     interrupting for (a suggestion, a coach line).
+
+     Deliberately trails the speaker: chunks are 4s with 1s overlap and
+     whisper adds ~1-2s, so this is a "read what was just said" view, not
+     live captioning. The stitcher grows an open segment in place under a
+     stable id, which is what makes the word-by-word reveal real rather
+     than decorative — each new word is a word that actually arrived.     */
+  .stage-view {
+    /* Always dark, like cxnotes — a lit presentation surface reads wrong in a
+       meeting. Values are the family's DARK palette verbatim, so Stage looks
+       identical to cxnotes regardless of the dashboard's current theme. */
+    --stage-base:    rgb(28,26,23);
+    --stage-surface: rgb(42,39,34);
+    --stage-line:    rgb(74,68,57);
+    --stage-ink:     rgb(255,255,255);
+    --stage-dim:     rgb(155,153,150);
+    position: fixed;
+    inset: 0;
+    z-index: 400;
+    display: none;
+    flex-direction: column;
+    background: var(--stage-base);
+    color: var(--stage-ink);
+  }
+  .stage-view.active { display: flex; }
+
+  .stage-top {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 18px 26px;
+    flex-shrink: 0;
+  }
+  .stage-rec {
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    background: var(--gb-red);
+    flex-shrink: 0;
+    animation: rec-pulse 1.4s ease-in-out infinite;
+  }
+  .stage-rec.off { background: var(--stage-line); animation: none; }
+
+  .stage-agenda { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
+  .stage-step {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10.5px;
+    color: var(--stage-dim);
+    max-width: 190px;
+  }
+  .stage-step .sdot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--stage-line);
+    flex-shrink: 0;
+  }
+  .stage-step .stext { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stage-step.state-covered .sdot { background: var(--stage-dim); }
+  .stage-step.state-partial .sdot { background: var(--stage-dim); opacity: 0.6; }
+  .stage-step.state-partial { color: var(--stage-ink); }
+  .stage-step.state-pending .sdot { background: var(--stage-line); }
+
+  .stage-clock {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .stage-pill {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 3px 9px;
+    border-radius: 9px;
+    background: var(--stage-ink);
+    color: var(--stage-base);
+  }
+  .stage-timer { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stage-exit {
+    font-family: var(--font-sans);
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 5px 11px;
+    border-radius: 6px;
+    border: 1px solid var(--stage-line);
+    background: transparent;
+    color: var(--stage-dim);
+    cursor: pointer;
+  }
+  .stage-exit:hover { color: var(--stage-ink); border-color: var(--stage-dim); }
+
+  /* Two modes share one feed element:
+       mode-live    — the default prompter: three lines, centred, fading into
+                      the past. Nothing to scroll; it is a glance, not a doc.
+       mode-history — the reader scrolled up, so the full back-transcript
+                      opens, bottom-anchored and fully legible.
+     Jump-to-live (or scrolling back to the bottom) returns to mode-live.    */
+  .stage-prompter {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    padding: 0 clamp(28px, 7vw, 110px);
+    scrollbar-width: thin;
+    scrollbar-color: var(--stage-line) transparent;
+    overscroll-behavior: contain;
+  }
+  .stage-prompter.mode-live { overflow: hidden; }
+  .stage-prompter.mode-history { overflow-y: auto; }
+  .stage-prompter::-webkit-scrollbar { width: 5px; }
+  .stage-prompter::-webkit-scrollbar-thumb { background: var(--stage-line); border-radius: 3px; }
+
+  .stage-feed {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-height: 100%;
+  }
+  .mode-live .stage-feed { justify-content: center; gap: 18px; }
+  .mode-history .stage-feed { justify-content: flex-end; padding: 40px 0 24px; }
+
+  .stage-hist {
+    font-size: clamp(12px, 1.15vw, 15px);
+    line-height: 1.6;
+    color: var(--stage-dim);
+  }
+  .stage-hist .who { font-weight: 700; }
+  .stage-hist.mic .who { color: rgb(255 255 255 / 0.78); }
+  /* The fade is a live-mode effect only. In history mode it would be actively
+     hostile — fading out the very lines the reader scrolled back to read. */
+  .mode-live .stage-hist { opacity: 0.55; }
+  .mode-live .stage-hist.older { opacity: 0.3; }
+
+  .stage-older-btn {
+    align-self: center;
+    font-family: var(--font-sans);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 5px 14px;
+    border-radius: 999px;
+    border: 1px dashed var(--stage-line);
+    background: transparent;
+    color: var(--stage-dim);
+    cursor: pointer;
+  }
+  .stage-older-btn:hover { color: var(--stage-ink); }
+
+  /* Shown only when the reader has scrolled off the live edge. Positioned
+     against .stage-view (not the prompter) — an absolute child of a scrolling
+     container scrolls away with the content. Sits above the waveform, and
+     centred so it never collides with the right-hand toast stack. */
+  .stage-jump {
+    position: absolute;
+    left: 50%;
+    bottom: 52px;
+    transform: translateX(-50%);
+    display: none;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-sans);
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 5px 14px;
+    border-radius: 999px;
+    border: none;
+    background: var(--stage-ink);
+    color: var(--stage-base);
+    cursor: pointer;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+    z-index: 2;
+  }
+  .stage-jump.visible { display: inline-flex; }
+  .stage-live {
+    font-size: clamp(17px, 2vw, 25px);
+    line-height: 1.5;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+  }
+  .stage-live .who {
+    display: block;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--stage-dim);
+    margin-bottom: 9px;
+  }
+  .stage-live .w { animation: stage-word 0.3s ease-out both; }
+  @keyframes stage-word { from { opacity: 0; filter: blur(2px); } to { opacity: 1; filter: none; } }
+  .stage-empty { color: var(--stage-dim); font-size: 13px; }
+
+  .stage-wave {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    height: 22px;
+    padding: 0 26px 20px;
+    flex-shrink: 0;
+  }
+  .stage-wave i {
+    flex: 1;
+    border-radius: 1px;
+    background: rgb(255 255 255 / 0.22);
+    animation: stage-wv 1.3s ease-in-out infinite;
+  }
+  @keyframes stage-wv { 0%,100% { transform: scaleY(0.45); } 50% { transform: scaleY(1); } }
+  .stage-view.paused .stage-wave i { animation: none; opacity: 0.4; }
+
+  /* Interruptions — bottom-right, stacked */
+  .stage-toasts {
+    position: absolute;
+    right: 26px;
+    bottom: 56px;
+    width: 330px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .stage-toast {
+    background: var(--stage-surface);
+    border: 1px solid var(--stage-line);
+    border-radius: 12px;
+    padding: 13px 15px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+    animation: stage-toast-in 0.35s cubic-bezier(.2,.8,.2,1) both;
+  }
+  @keyframes stage-toast-in { from { opacity: 0; transform: translateY(14px); } }
+  .stage-toast .head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--stage-dim);
+  }
+  .stage-toast .title { font-size: 13px; font-weight: 700; margin-top: 7px; line-height: 1.4; }
+  .stage-toast .why { font-size: 10.5px; color: var(--stage-dim); margin-top: 4px; line-height: 1.5; }
+  .stage-toast .row { display: flex; align-items: center; gap: 8px; margin-top: 11px; }
+  .stage-btn {
+    font-family: var(--font-sans);
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 5px 13px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    cursor: pointer;
+  }
+  .stage-btn.primary { background: var(--stage-ink); color: var(--stage-base); }
+  .stage-btn.ghost { background: transparent; border-color: var(--stage-line); color: var(--stage-dim); }
+  .stage-btn.ghost:hover { color: var(--stage-ink); }
+
+  /* Coach TTL ring — driven by the real expiresAt the coach payload carries.
+     Suggestions deliberately have no ring: no expiry reaches the client, and
+     a countdown that isn't backed by one would be a lie about a deadline. */
+  .stage-ttl { margin-left: auto; position: relative; width: 26px; height: 26px; flex-shrink: 0; }
+  .stage-ttl svg { transform: rotate(-90deg); display: block; }
+  .stage-ttl .track { stroke: var(--stage-line); }
+  .stage-ttl .arc { stroke: var(--stage-ink); transition: stroke-dashoffset 0.9s linear; }
+  .stage-ttl b {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 8.5px; font-weight: 600; font-variant-numeric: tabular-nums;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .stage-wave i, .stage-live .w, .stage-toast, .stage-rec { animation: none; }
+  }
 </style>
 </head>
 <body>
@@ -2196,22 +2700,46 @@ const PRESENT_HTML = `<!DOCTYPE html>
     <span class="audio-indicator" id="audioIndicator">
       <span class="audio-dot" id="audioDot"></span>
       <span>REC</span>
+      <span class="audio-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
     </span>
     <span class="ending-hint" id="endingHint" style="display:none"></span>
     <span class="state-pill idle" id="statePill">Idle</span>
     <span class="session-timer" id="sessionTimer"></span>
     <button class="btn btn-ghost" id="newMeetingBtn" style="display:none" onclick="newMeeting()">&larr; New Meeting</button>
     <button class="btn btn-green" id="startStopBtn" style="display:none" onclick="toggleSession()">Start</button>
+    <button class="btn btn-ghost btn-sm" id="themeBtn" onclick="toggleTheme()" aria-label="Toggle light and dark theme" title="Toggle theme"></button>
+    <button class="btn btn-ghost btn-sm" id="stageBtn" onclick="toggleStage()" aria-label="Stage view" title="Stage view (declutters to transcript + prompts)">Stage</button>
     <button class="btn btn-ghost btn-sm" id="settingsBtn" onclick="openSettings()" aria-label="Settings" title="Settings">&#9881;</button>
   </div>
 </div>
 
+<!-- ─── Stage View (full-screen presentation mode) ──────────── -->
+<div class="stage-view" id="stageView" role="region" aria-label="Stage view">
+  <div class="stage-top">
+    <span class="stage-rec" id="stageRec"></span>
+    <div class="stage-agenda" id="stageAgenda"></div>
+    <div class="stage-clock">
+      <span class="stage-pill" id="stagePill">Live</span>
+      <span class="stage-timer" id="stageTimer"></span>
+      <button class="stage-exit" onclick="toggleStage()" title="Exit stage view (Esc)">Exit</button>
+    </div>
+  </div>
+  <div class="stage-prompter" id="stagePrompter">
+    <div class="stage-feed" id="stageFeed"></div>
+  </div>
+  <button class="stage-jump" id="stageJump" onclick="stageJumpToLive()">Jump to live &#8595;</button>
+  <div class="stage-wave" id="stageWave" aria-hidden="true"></div>
+  <div class="stage-toasts" id="stageToasts"></div>
+</div>
+
 <!-- ─── Stats Bar ──────────────────────────────────────────── -->
 <div class="stats-bar" id="statsBar">
+  <div class="stat-tile"><div class="stat-label">Segments</div><div class="stat-value" id="statSegments">0</div></div>
   <div class="stat-tile"><div class="stat-label">Words</div><div class="stat-value" id="statWords">0</div></div>
   <div class="stat-tile"><div class="stat-label">Pace</div><div class="stat-value" id="statPace">0/m</div></div>
   <div class="stat-tile"><div class="stat-label">You</div><div class="stat-value" id="statYou">0</div></div>
   <div class="stat-tile"><div class="stat-label">Meeting</div><div class="stat-value" id="statMeeting">0</div></div>
+  <div class="stat-tile"><div class="stat-label">Suggestions</div><div class="stat-value" id="statActions">0</div></div>
 </div>
 
 <!-- ─── Layout ─────────────────────────────────────────────── -->
@@ -2721,6 +3249,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   // ─── Agenda Tracker ────────────────────────────────────────
   function renderAgendaStatus(status) {
+    stageLastAgenda = status;
+    if (stageActive) stageRenderAgenda();
     if (!status || !status.items || status.items.length === 0) {
       agendaPanel.className = 'agenda-panel hidden';
       return;
@@ -2850,6 +3380,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     timerInterval = setInterval(function() {
       if (sessionStartTime) {
         sessionTimerEl.textContent = formatDuration(Date.now() - sessionStartTime);
+        if (stageActive) stageTimerEl.textContent = sessionTimerEl.textContent;
       }
     }, 1000);
   }
@@ -2881,12 +3412,27 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   // ─── Stats ─────────────────────────────────────────────────
   function updateStats() {
+    document.getElementById('statSegments').textContent = segments.length;
     document.getElementById('statWords').textContent = totalWords;
     document.getElementById('statYou').textContent = micWords;
     document.getElementById('statMeeting').textContent = meetingWords;
     var elapsed = sessionStartTime ? (Date.now() - sessionStartTime) / 60000 : 1;
     var pace = elapsed > 0.5 ? Math.round(totalWords / elapsed) : 0;
     document.getElementById('statPace').textContent = pace + '/m';
+    updateActionStat();
+  }
+
+  // Suggestions tile: total cards the copilot has put up this session, with
+  // the still-pending count as the secondary figure. Counted off the rendered
+  // cards so no extra state has to be kept in sync with the SSE stream.
+  function updateActionStat() {
+    var el = document.getElementById('statActions');
+    if (!el) return;
+    // Fact-check flags render as .card too but were never suggestions — the
+    // copilot raises them unprompted, so they must not inflate this count.
+    var total = resultsEl.querySelectorAll('.card:not(.factflag)').length;
+    var pending = resultsEl.querySelectorAll('.card.suggested').length;
+    el.innerHTML = total + (pending > 0 ? ' <small>' + pending + ' pending</small>' : '');
   }
 
   // ─── Intelligence Status ───────────────────────────────────
@@ -2990,6 +3536,11 @@ const PRESENT_HTML = `<!DOCTYPE html>
     // State pill
     statePill.className = 'state-pill ' + sessionState;
     statePill.textContent = sessionState.charAt(0).toUpperCase() + sessionState.slice(1);
+
+    // The live-edge caret is a claim that transcription is still flowing —
+    // retract it the moment the session stops being live.
+    if (sessionState !== 'live') clearLatestSegment();
+    if (stageActive) stageSyncState();
 
     // Wrap-up progress hint (only while ending, and only if the server sent one)
     if (endingHintEl) {
@@ -3512,6 +4063,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   var pendingDismissals = new Map(); // actionId -> { timer }
 
   window.dismissAction = function(id) {
+    stageClearSuggestion(id);
     var card = actionCards.get(id);
     if (!card || pendingDismissals.has(id)) {
       if (!card) wsSend({ type: 'action.dismiss', actionId: id });
@@ -4252,6 +4804,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       prior.wordCount = wc;
       updateStats();
       updateSegmentEl(prior.el, seg);
+      stageOnSegment(seg);
       return;
     }
 
@@ -4264,6 +4817,22 @@ const PRESENT_HTML = `<!DOCTYPE html>
     updateStats();
     var el = renderSegment(seg);
     if (el && seg.id != null) segById.set(seg.id, { el: el, wordCount: wc, source: seg.source });
+    if (el && !isReplay) markLatestSegment(el);
+    stageOnSegment(seg);
+  }
+
+  // Live-edge marker. Only one segment carries it, so moving it is a clear +
+  // set rather than a class toggle across the whole feed.
+  var latestSegEl = null;
+  function markLatestSegment(el) {
+    if (latestSegEl === el) return;
+    if (latestSegEl) latestSegEl.classList.remove('latest');
+    el.classList.add('latest');
+    latestSegEl = el;
+  }
+  function clearLatestSegment() {
+    if (latestSegEl) latestSegEl.classList.remove('latest');
+    latestSegEl = null;
   }
 
   // Update an already-rendered segment line in place as its text grows.
@@ -4482,7 +5051,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     }
     var cta = card.querySelector('.card-cta');
     if (cta && action.pendingApproval && !cta.querySelector('.pending-approve')) {
-      cta.innerHTML = '<span class="pending-approve" style="color:var(--gb-green);font-size:13px;font-weight:600">\\u2713 Approved \\u2014 starting when ready\\u2026</span>';
+      cta.innerHTML = '<span class="pending-approve" style="color:rgb(var(--accent));font-size:13px;font-weight:600">\\u2713 Approved \\u2014 starting when ready\\u2026</span>';
     }
     if (!action.streaming) {
       var pill = card.querySelector('.streaming-pill');
@@ -4516,7 +5085,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       if (!isReplay) {
         body += '<div class="card-actions card-cta">';
         if (action.pendingApproval) {
-          body += '<span class="pending-approve" style="color:var(--gb-green);font-size:13px;font-weight:600">\\u2713 Approved \\u2014 starting when ready\\u2026</span>';
+          body += '<span class="pending-approve" style="color:rgb(var(--accent));font-size:13px;font-weight:600">\\u2713 Approved \\u2014 starting when ready\\u2026</span>';
         } else {
           // Approve is live even while streaming: pre-approve and the worker
           // launches the instant params finish (no need to read the whole card).
@@ -4581,6 +5150,11 @@ const PRESENT_HTML = `<!DOCTYPE html>
     actionCards.set(action.id, card);
     highlightCode();
     rebuildToc();
+    updateActionStat();
+    // Stage shows only what needs a decision: raise on suggest, retract the
+    // moment it starts running, completes, or fails.
+    if (action.state === 'suggested' && !isReplay) stageSetSuggestion(action);
+    else stageClearSuggestion(action.id);
   }
 
   // ─── Fact-check Flags ─────────────────────────────────────
@@ -4642,6 +5216,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       question: 'Answer',
     };
     var label = labels[incident] || 'Coach';
+    stageSetCoach(s, label);
     coachSlot.innerHTML = '<div class="coach-strip">' +
       '<span class="coach-kind ' + escapeHtml(incident) + '">' + escapeHtml(label) + '</span>' +
       '<div class="coach-body">' +
@@ -4656,7 +5231,388 @@ const PRESENT_HTML = `<!DOCTYPE html>
   window.dismissCoach = function() {
     if (coachExpireTimer) { clearTimeout(coachExpireTimer); coachExpireTimer = null; }
     coachSlot.innerHTML = '';
+    stageClearCoach();
   };
+
+  // ─── Theme ────────────────────────────────────────────────
+  // data-theme on <html> drives every token; the pre-paint script in <head>
+  // has already applied the stored choice, so this only has to keep the
+  // button label in sync and write changes back.
+  function syncThemeBtn() {
+    var btn = document.getElementById('themeBtn');
+    if (!btn) return;
+    var dark = document.documentElement.getAttribute('data-theme') !== 'light';
+    // Label shows the destination, not the current state.
+    btn.textContent = dark ? 'Light' : 'Dark';
+  }
+
+  window.toggleTheme = function() {
+    var next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', next);
+    // Syntax highlighting is a separate stylesheet pair — swap which is live.
+    var light = document.getElementById('hljsLight');
+    var dark = document.getElementById('hljsDark');
+    if (light) light.disabled = (next !== 'light');
+    if (dark) dark.disabled = (next === 'light');
+    try { localStorage.setItem('mc-theme', next); } catch (e) { /* non-fatal */ }
+    syncThemeBtn();
+  };
+  syncThemeBtn();
+
+  // ─── Stage View ───────────────────────────────────────────
+  // Full-screen presentation mode: agenda dots, a large teleprompter, and
+  // only the two things worth interrupting for (a suggestion, a coach line).
+  //
+  // It is a pure VIEW over state the dashboard already maintains — it never
+  // fetches, subscribes, or keeps its own copy of the transcript, so it
+  // cannot drift from the panel behind it. Every hook below is a one-liner
+  // called from the existing render path.
+  var stageEl = document.getElementById('stageView');
+  var stagePrompterEl = document.getElementById('stagePrompter');
+  var stageFeedEl = document.getElementById('stageFeed');
+  var stageJumpEl = document.getElementById('stageJump');
+  var stageAgendaEl = document.getElementById('stageAgenda');
+  var stageToastsEl = document.getElementById('stageToasts');
+  var stageTimerEl = document.getElementById('stageTimer');
+  var stagePillEl = document.getElementById('stagePill');
+  var stageRecEl = document.getElementById('stageRec');
+  var stageBtnEl = document.getElementById('stageBtn');
+  var stageActive = false;
+  var stageLastAgenda = null;
+  var stageLiveKey = null;   // which segment the big line is showing
+  var stageLiveWords = 0;    // words already painted, so growth only adds
+  var stageSuggestion = null;
+  var stageCoach = null;
+
+  // Ambient bars — decorative, built once. Not amplitude-driven; the REC dot
+  // is the honest signal and app.log peak= is the truth (gotcha #12).
+  (function buildStageWave() {
+    var waveEl = document.getElementById('stageWave');
+    if (!waveEl) return;
+    var html = '';
+    for (var i = 0; i < 44; i++) {
+      var h = 20 + Math.round(60 * Math.abs(Math.sin(i * 0.9)));
+      html += '<i style="height:' + h + '%;animation-delay:' + ((i % 8) * 0.12).toFixed(2) + 's"></i>';
+    }
+    waveEl.innerHTML = html;
+  })();
+
+  window.toggleStage = function() {
+    stageActive = !stageActive;
+    stageEl.classList.toggle('active', stageActive);
+    if (stageBtnEl) {
+      stageBtnEl.classList.toggle('btn-blue', stageActive);
+      stageBtnEl.classList.toggle('btn-ghost', !stageActive);
+    }
+    if (stageActive) stageSyncAll();
+  };
+
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && stageActive) {
+      e.preventDefault();
+      window.toggleStage();
+    }
+  });
+
+  function stageSyncAll() {
+    // Entering always lands on the calm prompter, whatever the reader had
+    // scrolled back to last time.
+    stageMode = 'live';
+    stageJumpEl.classList.remove('visible');
+    stageRenderAgenda();
+    stageRenderPrompter(false);
+    stageRenderToasts();
+    stageSyncState();
+    stageTimerEl.textContent = sessionTimerEl.textContent;
+  }
+
+  // Mirrors the header's live/idle state so the stage never implies a meeting
+  // is running when it has stopped.
+  function stageSyncState() {
+    var live = sessionState === 'live';
+    stageEl.classList.toggle('paused', !live);
+    stageRecEl.className = 'stage-rec' + (live ? '' : ' off');
+    stagePillEl.textContent = sessionState.charAt(0).toUpperCase() + sessionState.slice(1);
+  }
+
+  function stageKeyFor(seg) {
+    return seg.id != null ? 's' + seg.id : 't' + seg.timestamp;
+  }
+  function stageSpeaker(seg) {
+    return seg.source === 'mic' ? 'You' : 'Meeting';
+  }
+
+  function stageRenderAgenda() {
+    if (!stageLastAgenda || !stageLastAgenda.items || stageLastAgenda.items.length === 0) {
+      stageAgendaEl.innerHTML = '';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < stageLastAgenda.items.length; i++) {
+      var item = stageLastAgenda.items[i];
+      var state = item.state || 'pending';
+      html += '<span class="stage-step state-' + state + '" title="' + escapeHtml(item.text) + '">' +
+        '<span class="sdot"></span><span class="stext">' + escapeHtml(item.text) + '</span></span>';
+    }
+    stageAgendaEl.innerHTML = html;
+  }
+
+  // History is capped like the main panel — a long meeting is thousands of
+  // rows. "Show older" lifts the cap for the rest of the view's lifetime.
+  var STAGE_MAX_RENDERED = 200;
+  var stageShowAll = false;
+  var stageMode = 'live'; // 'live' (centred prompter) | 'history' (scrollback)
+
+  function stageHistHtml(seg, older) {
+    return '<p class="stage-hist ' + (seg.source === 'mic' ? 'mic' : 'meeting') +
+      (older ? ' older' : '') + '"><span class="who">' + escapeHtml(stageSpeaker(seg)) +
+      '</span> \\u2014 ' + escapeHtml(seg.text) + '</p>';
+  }
+
+  function stageLiveBlockHtml(seg) {
+    return '<div class="stage-live" id="stageLiveBlock"><span class="who">' +
+      escapeHtml(stageSpeaker(seg)) + ' \\u00b7 speaking</span><span id="stageLiveText"></span></div>';
+  }
+
+  function stageRenderPrompter(animateLive) {
+    if (stageMode === 'history') return stageRenderHistory();
+    stagePrompterEl.className = 'stage-prompter mode-live';
+    if (segments.length === 0) {
+      stageFeedEl.innerHTML = '<div class="stage-empty">Waiting for the first words\\u2026</div>';
+      stageLiveKey = null;
+      stageLiveWords = 0;
+      return;
+    }
+    var live = segments[segments.length - 1];
+    var prev = segments[segments.length - 2];
+    var older = segments[segments.length - 3];
+    var html = '';
+    if (older) html += stageHistHtml(older, true);
+    if (prev) html += stageHistHtml(prev, false);
+    html += stageLiveBlockHtml(live);
+    stageFeedEl.innerHTML = html;
+    stageLiveKey = stageKeyFor(live);
+    stageLiveWords = 0;
+    stagePaintWords(live.text, !!animateLive);
+  }
+
+  function stageRenderHistory() {
+    stagePrompterEl.className = 'stage-prompter mode-history';
+    if (segments.length === 0) {
+      stageFeedEl.innerHTML = '<div class="stage-empty">Waiting for the first words\\u2026</div>';
+      return;
+    }
+    var start = stageShowAll ? 0 : Math.max(0, segments.length - STAGE_MAX_RENDERED);
+    var html = '';
+    if (start > 0) {
+      html += '<button class="stage-older-btn" onclick="stageShowOlder()">Show ' + start +
+        ' older segment' + (start === 1 ? '' : 's') + '</button>';
+    }
+    for (var i = start; i < segments.length - 1; i++) html += stageHistHtml(segments[i], false);
+    var live = segments[segments.length - 1];
+    html += stageLiveBlockHtml(live);
+    stageFeedEl.innerHTML = html;
+    stageLiveKey = stageKeyFor(live);
+    stageLiveWords = 0;
+    stagePaintWords(live.text, false);
+    stagePrompterEl.scrollTop = stagePrompterEl.scrollHeight;
+  }
+
+  // Suppresses the auto-return while a PROGRAMMATIC scrollTop assignment's
+  // scroll event lands. Without it, entering history sets scrollTop to the
+  // bottom, the resulting event reads "you're caught up", and the view snaps
+  // straight back to live — history would flash for one frame and vanish.
+  var stageIgnoreScrollUntil = 0;
+
+  function stageEnterHistory() {
+    if (stageMode === 'history') return;
+    stageMode = 'history';
+    stageRenderHistory();
+    stageJumpEl.classList.add('visible');
+    // The reader pushed UP — actually move up a notch, so the gesture visibly
+    // does something and we don't sit pinned to the auto-return threshold.
+    var step = 160;
+    stageIgnoreScrollUntil = Date.now() + 400;
+    stagePrompterEl.scrollTop = Math.max(
+      0,
+      stagePrompterEl.scrollHeight - stagePrompterEl.clientHeight - step
+    );
+  }
+
+  window.stageJumpToLive = function() {
+    stageMode = 'live';
+    stageJumpEl.classList.remove('visible');
+    stageRenderPrompter(false);
+  };
+
+  window.stageShowOlder = function() {
+    stageShowAll = true;
+    stageRenderHistory();
+  };
+
+  // A new segment demotes the current live block to history and opens a fresh
+  // one, rather than rebuilding the feed — in history mode that also keeps the
+  // reader's scroll position from jumping under them.
+  function stageAppendSegment(seg) {
+    var block = document.getElementById('stageLiveBlock');
+    if (!block) { stageRenderPrompter(true); return; }
+    if (stageMode === 'live') {
+      // Only three lines live here, so a re-render is the cheapest way to
+      // roll the fade ramp forward (prev becomes older, live becomes prev).
+      stageRenderPrompter(true);
+      return;
+    }
+    var prevIdx = segments.length - 2;
+    if (prevIdx >= 0) {
+      var holder = document.createElement('div');
+      holder.innerHTML = stageHistHtml(segments[prevIdx], false);
+      stageFeedEl.insertBefore(holder.firstChild, block);
+    }
+    block.innerHTML = '<span class="who">' + escapeHtml(stageSpeaker(seg)) +
+      ' \\u00b7 speaking</span><span id="stageLiveText"></span>';
+    stageLiveKey = stageKeyFor(seg);
+    stageLiveWords = 0;
+    stagePaintWords(seg.text, true);
+    stageTrimFeed();
+  }
+
+  // Trimming removes rows from the TOP, which would shift the page under
+  // someone reading the middle of it. While history is open the cap is left
+  // alone; returning to live re-renders from segments[] anyway, so nothing
+  // accumulates permanently.
+  function stageTrimFeed() {
+    if (stageShowAll || stageMode === 'history') return;
+    var rows = stageFeedEl.querySelectorAll('.stage-hist');
+    for (var i = 0; i < rows.length - STAGE_MAX_RENDERED; i++) rows[i].remove();
+  }
+
+  // Live mode has nothing to scroll, so reaching for history is expressed as
+  // scroll INTENT — a wheel/trackpad push upward, or the usual back-up keys.
+  stagePrompterEl.addEventListener('wheel', function(e) {
+    if (stageMode === 'live' && e.deltaY < 0) stageEnterHistory();
+  }, { passive: true });
+
+  document.addEventListener('keydown', function(e) {
+    if (!stageActive || stageMode !== 'live') return;
+    if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') stageEnterHistory();
+  });
+
+  // Scrolling back down to the bottom means "I'm caught up" — return to the
+  // prompter so the default view is always the calm one.
+  stagePrompterEl.addEventListener('scroll', function() {
+    if (stageMode !== 'history') return;
+    if (Date.now() < stageIgnoreScrollUntil) return;
+    var dist = stagePrompterEl.scrollHeight - stagePrompterEl.scrollTop - stagePrompterEl.clientHeight;
+    if (dist <= 2) window.stageJumpToLive();
+  });
+
+  // Paints only the words that are new since the last call, so an open
+  // segment growing under a stable id reveals word-by-word instead of
+  // re-animating the whole line on every stitcher update.
+  function stagePaintWords(text, animate) {
+    var host = document.getElementById('stageLiveText');
+    if (!host) return;
+    var words = String(text || '').split(/\\s+/).filter(Boolean);
+    if (words.length < stageLiveWords) {
+      // The stitcher re-cut the sentence shorter — repaint from scratch.
+      host.innerHTML = '';
+      stageLiveWords = 0;
+    }
+    for (var i = stageLiveWords; i < words.length; i++) {
+      var span = document.createElement('span');
+      if (animate) {
+        span.className = 'w';
+        span.style.animationDelay = ((i - stageLiveWords) * 55) + 'ms';
+      }
+      span.textContent = words[i] + ' ';
+      host.appendChild(span);
+    }
+    stageLiveWords = words.length;
+  }
+
+  function stageOnSegment(seg) {
+    if (!stageActive) return;
+    if (stageKeyFor(seg) === stageLiveKey) {
+      // Same open segment growing under a stable id — reveal the new words.
+      // Note there is deliberately no auto-scroll in history mode: the reader
+      // opened it to read, and yanking them to the bottom on every stitcher
+      // update would both fight them and trip the caught-up auto-return.
+      stagePaintWords(seg.text, true);
+    } else {
+      stageAppendSegment(seg);
+    }
+  }
+
+  function stageRenderToasts() {
+    if (!stageActive) return;
+    var html = '';
+    if (stageCoach) {
+      html += '<div class="stage-toast">' +
+        '<div class="head">Coach \\u00b7 ' + escapeHtml(stageCoach.label) +
+          '<span class="stage-ttl"><svg width="26" height="26" viewBox="0 0 26 26">' +
+            '<circle class="track" cx="13" cy="13" r="10" fill="none" stroke-width="2.5"></circle>' +
+            '<circle class="arc" id="stageTtlArc" cx="13" cy="13" r="10" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="62.83"></circle>' +
+          '</svg><b id="stageTtlNum"></b></span>' +
+        '</div>' +
+        '<div class="title">' + escapeHtml(stageCoach.phrasing) + '</div>' +
+        (stageCoach.why ? '<div class="why">' + escapeHtml(stageCoach.why) + '</div>' : '') +
+        '<div class="row"><button class="stage-btn ghost" onclick="dismissCoach()">Dismiss</button></div>' +
+      '</div>';
+    }
+    if (stageSuggestion) {
+      html += '<div class="stage-toast">' +
+        '<div class="head">Suggested \\u00b7 ' + escapeHtml(stageSuggestion.type) + '</div>' +
+        '<div class="title">' + escapeHtml(stageSuggestion.title) + '</div>' +
+        (stageSuggestion.description ? '<div class="why">' + escapeHtml(stageSuggestion.description) + '</div>' : '') +
+        '<div class="row">' +
+          '<button class="stage-btn primary" onclick="approveAction(\\'' + stageSuggestion.id + '\\')">Approve</button>' +
+          '<button class="stage-btn ghost" onclick="dismissAction(\\'' + stageSuggestion.id + '\\')">Skip</button>' +
+        '</div>' +
+      '</div>';
+    }
+    stageToastsEl.innerHTML = html;
+    stageTickCoach();
+  }
+
+  function stageSetSuggestion(action) {
+    stageSuggestion = { id: action.id, type: action.type, title: action.title, description: action.description || '' };
+    stageRenderToasts();
+  }
+  function stageClearSuggestion(id) {
+    if (stageSuggestion && stageSuggestion.id === id) {
+      stageSuggestion = null;
+      stageRenderToasts();
+    }
+  }
+  function stageSetCoach(s, label) {
+    var expiresAt = Number(s.expiresAt || 0) || (Date.now() + 15000);
+    stageCoach = {
+      label: label,
+      phrasing: s.phrasing,
+      why: s.headline || '',
+      expiresAt: expiresAt,
+      totalMs: Math.max(1, expiresAt - Date.now()),
+    };
+    stageRenderToasts();
+  }
+  function stageClearCoach() {
+    if (!stageCoach) return;
+    stageCoach = null;
+    stageRenderToasts();
+  }
+
+  // Ring is updated in place — re-rendering the toast each second would
+  // restart its entry animation and steal focus from the buttons.
+  function stageTickCoach() {
+    if (!stageCoach || !stageActive) return;
+    var arc = document.getElementById('stageTtlArc');
+    var num = document.getElementById('stageTtlNum');
+    if (!arc || !num) return;
+    var left = Math.max(0, stageCoach.expiresAt - Date.now());
+    num.textContent = String(Math.ceil(left / 1000));
+    arc.style.strokeDashoffset = (62.83 * (1 - left / stageCoach.totalMs)).toFixed(2);
+  }
+  setInterval(stageTickCoach, 1000);
 
   // Debug hooks: render monitor output without a live meeting (local-only
   // dashboard, so exposing these is harmless and useful for UI testing).

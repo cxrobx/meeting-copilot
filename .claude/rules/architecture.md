@@ -11,7 +11,7 @@
 | Database | better-sqlite3 per-session SQLite |
 | Audio | ScreenCaptureKit (meeting) + AVAudioEngine (mic) |
 | Transcription | whisper-server local (default), Deepgram cloud (optional) |
-| Dashboard | Web UI at `/present` (Gruvbox Light, JetBrains Mono) in WKWebView |
+| Dashboard | Web UI at `/present` in WKWebView — CX family tokens (shared with cxmail/cxtasks/cxnotes), dark default + light toggle |
 
 ## Two-Process Architecture
 
