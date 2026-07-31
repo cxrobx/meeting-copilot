@@ -14,9 +14,15 @@ let cachedClient: OpenAI | null = null;
 // with the SDK until a dependency upgrade is separately evaluated.
 type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
 
+// Dollars per million tokens. Updated 2026-07-30 for OpenAI's price cut —
+// Luna dropped 80% (was 1/6) and Terra 20% (was 2.5/15). These feed the
+// per-session dollar ceiling in budget.ts, so stale-high numbers trip the
+// killswitch early rather than merely mis-reporting.
+// Sol is unchanged; `service_tier: "fast"` (which replaced Priority
+// Processing) would bill Sol at 2x these rates, but no call site sets it.
 function tokenPrices(model: string): { input: number; output: number } {
-  if (model.includes('gpt-5.6-luna')) return { input: 1, output: 6 };
-  if (model.includes('gpt-5.6-terra')) return { input: 2.5, output: 15 };
+  if (model.includes('gpt-5.6-luna')) return { input: 0.2, output: 1.2 };
+  if (model.includes('gpt-5.6-terra')) return { input: 2, output: 12 };
   if (model.includes('gpt-5.6-sol') || model === 'gpt-5.6') return { input: 5, output: 30 };
   return { input: 2, output: 10 };
 }

@@ -19,6 +19,7 @@ import type { TranscriptSegment } from './transcription/types.js';
 import { TranscriptDedup } from './transcription/dedup.js';
 import { TranscriptStitcher } from './transcription/stitch.js';
 import { IntelligenceEngine } from './intelligence/index.js';
+import { setLlmBudgetExceededHandler } from './api/budget.js';
 import { AgendaTracker, type AgendaStatus } from './intelligence/agenda.js';
 import { FactCheckMonitor, type FactFlag } from './intelligence/factcheck.js';
 import { CoachMonitor, type CoachSuggestion } from './intelligence/coach.js';
@@ -207,7 +208,7 @@ type OutboundMessage =
       // silent monitor errors are visible in the dashboard instead of only
       // in server.log.
       type: 'intelligence.error';
-      source: 'triage' | 'suggest' | 'compression' | 'agenda' | 'factcheck' | 'coach' | 'cli';
+      source: 'triage' | 'suggest' | 'compression' | 'agenda' | 'factcheck' | 'coach' | 'cli' | 'budget';
       message: string;
       at: number; // epoch ms
       /** True when a whole tier/monitor is being skipped, not just one failure. */
@@ -1623,6 +1624,18 @@ intelligence.on('intelligence.error', (data) => {
     message,
     at: Date.now(),
   });
+});
+
+// Per-session LLM budget lockout. Fires ONCE per session, unlike the
+// per-call `intelligence.error` above: once the budget is spent every lane
+// fails identically forever, and repeating that hundreds of times told the
+// user nothing (the 2026-07-31 session logged it 726 times while the meeting
+// silently ran on with no suggestions). `degraded: true` pins the badge so the
+// state is visible for the rest of the meeting rather than toasting once.
+setLlmBudgetExceededHandler((limit) => {
+  const message = `LLM budget exhausted (${limit}) — suggestions, agenda and coach are stopped for this session.`;
+  debugLog(`[budget] ${message}`);
+  broadcast({ type: 'intelligence.error', source: 'budget', message, at: Date.now(), degraded: true });
 });
 
 // CLI-tier health: the Gemini triage circuit breaker opening/closing. Degraded
