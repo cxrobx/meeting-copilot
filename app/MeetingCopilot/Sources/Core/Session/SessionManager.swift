@@ -264,6 +264,16 @@ final class SessionManager {
                     Task { @MainActor in
                         self?.handleDegraded(reason: "Audio device lost")
                     }
+                },
+                onCaptureWarning: { [weak self] message in
+                    // Surface, don't degrade: one dead track still leaves the
+                    // other one transcribing, so the meeting should keep
+                    // running. The user just needs to know a track is silent
+                    // while they can still do something about it.
+                    Task { @MainActor in
+                        appLog("[Session] Capture warning: \(message)")
+                        self?.surfaceError(message)
+                    }
                 }
             )
         } catch {

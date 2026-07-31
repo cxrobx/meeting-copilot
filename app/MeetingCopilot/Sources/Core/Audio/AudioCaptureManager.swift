@@ -133,14 +133,56 @@ final class AudioCaptureManager: NSObject {
         var inputFormat: AVAudioFormat?
     }
 
+    // MARK: - Capture Health Watchdog State
+
+    // `engine.start()` and `stream.startCapture()` both return successfully
+    // even when the underlying tap never delivers a single buffer. That is
+    // exactly how the 2026-07-31 session recorded a whole meeting with a dead
+    // mic and no warning anywhere: `mic started` logged, then zero tap
+    // callbacks for 100s. The counters below plus `checkCaptureHealth()` turn
+    // that silent failure into a visible one — and, for the mic, into an
+    // automatic restart attempt.
+    private let captureHealth = CaptureHealth()
+    private var healthTimer: Timer?
+    private var healthStartedAt: Date?
+    private var micWatchdogArmedAt: Date?
+    private var micWatchdogRestarts: Int = 0
+    private var warnedMicDead = false
+    private var warnedMeetingSilent = false
+    private var onCaptureWarning: ((String) -> Void)?
+
+    /// How long to wait for the mic tap's FIRST buffer before treating the
+    /// engine as dead. AVAudioEngine legitimately takes a beat to spin up
+    /// (AirPods HFP negotiation is the slow case on this hardware), so this is
+    /// deliberately generous — a false positive costs only a needless restart,
+    /// while too short a window is the bug notes4chris just had to fix.
+    private static let micFirstBufferGraceSec: TimeInterval = 8.0
+    /// Automatic restart attempts before we stop trying and just warn.
+    private static let micWatchdogMaxRestarts: Int = 2
+    /// How long the meeting track may stay digitally silent before warning.
+    /// Long enough to survive a genuinely quiet opening, short enough to still
+    /// be actionable while the meeting is running.
+    private static let meetingSilenceGraceSec: TimeInterval = 25.0
+    private static let healthPollIntervalSec: TimeInterval = 1.0
+
+    /// Output-device name fragments that indicate a virtual / aggregate
+    /// device. These are the usual cause of ScreenCaptureKit handing back
+    /// valid-sized buffers full of zeros (gotcha #12), so both the start-up
+    /// snapshot and the silence watchdog flag them.
+    private static let virtualOutputTokens = [
+        "BlackHole", "Loopback", "Aggregate", "Multi-Output", "Zoom", "Muse", "Pro Tools"
+    ]
+
     // MARK: - Start Capture
 
     func startCapture(
         onChunk: @escaping (Data, TranscriptSegment.AudioSource, AudioChunkMeta) -> Void,
-        onDeviceError: @escaping () -> Void
+        onDeviceError: @escaping () -> Void,
+        onCaptureWarning: @escaping (String) -> Void
     ) async throws {
         self.onAudioChunk = onChunk
         self.onDeviceChangeError = onDeviceError
+        self.onCaptureWarning = onCaptureWarning
         self.micSequence = 0
         self.meetingSequence = 0
 
@@ -216,6 +258,11 @@ final class AudioCaptureManager: NSObject {
             updateDeviceNames()
 
             isCapturing = true
+
+            // Arm last: the watchdog reads `currentInputDevice` /
+            // `currentOutputDevice` for its warnings and guards on
+            // `isCapturing`, so both must already be settled.
+            startCaptureHealthWatchdog()
         } catch {
             await stopCapture()
             throw error
@@ -256,6 +303,15 @@ final class AudioCaptureManager: NSObject {
         chunkTimer?.invalidate()
         chunkTimer = nil
 
+        // Stop the capture-health watchdog. Must happen here as well as via
+        // the isCapturing guard — a live Timer retains its closure and would
+        // keep polling a torn-down engine until the next startCapture.
+        healthTimer?.invalidate()
+        healthTimer = nil
+        healthStartedAt = nil
+        micWatchdogArmedAt = nil
+        captureHealth.resetAll()
+
         // Tear down VAD emitters (after flushPendingAudio has drained them).
         micEmitter?.reset()
         meetingEmitter?.reset()
@@ -295,6 +351,7 @@ final class AudioCaptureManager: NSObject {
 
         onAudioChunk = nil
         onDeviceChangeError = nil
+        onCaptureWarning = nil
     }
 
     /// Keep NSLock acquisition out of the async stop function; Swift 6 warns
@@ -409,6 +466,8 @@ final class AudioCaptureManager: NSObject {
                 self.bufferLock.unlock()
             }
 
+            self.captureHealth.recordMeeting(peak: level)
+
             meetingPeakWindow = max(meetingPeakWindow, level)
             let now = Date()
             if now.timeIntervalSince(meetingPeakLastFlush) >= 1.0 {
@@ -437,8 +496,7 @@ final class AudioCaptureManager: NSObject {
         // Snapshot the output device at capture start — invaluable when the
         // symptom turns out to be output routing (AirPods / aggregate device).
         let outputName = getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultOutputDevice)
-        let suspiciousTokens = ["BlackHole", "Loopback", "Aggregate", "Multi-Output", "Zoom"]
-        let isVirtual = suspiciousTokens.contains { outputName.localizedCaseInsensitiveContains($0) }
+        let isVirtual = Self.virtualOutputTokens.contains { outputName.localizedCaseInsensitiveContains($0) }
         appLog("[AudioCapture] ScreenCaptureKit started. output=\"\(outputName)\" virtual=\(isVirtual) input=\"\(getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultInputDevice))\"")
     }
 
@@ -568,6 +626,8 @@ final class AudioCaptureManager: NSObject {
                         self.bufferLock.unlock()
                     }
 
+                    self.captureHealth.recordMic(peak: localPeak)
+
                     micPeakWindow = max(micPeakWindow, localPeak)
                     let now = Date()
                     if now.timeIntervalSince(micPeakLastFlush) >= 1.0 {
@@ -681,6 +741,156 @@ final class AudioCaptureManager: NSObject {
         }
     }
 
+    // MARK: - Capture Health Watchdog
+
+    private func startCaptureHealthWatchdog() {
+        let now = Date()
+        healthStartedAt = now
+        micWatchdogArmedAt = now
+        micWatchdogRestarts = 0
+        warnedMicDead = false
+        warnedMeetingSilent = false
+        captureHealth.resetAll()
+
+        // Same RunLoop rationale as startChunkTimer(): after the async
+        // ScreenCaptureKit calls we may resume on a thread with no RunLoop.
+        let timer = Timer(timeInterval: Self.healthPollIntervalSec, repeats: true) { [weak self] _ in
+            self?.checkCaptureHealth()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        healthTimer = timer
+    }
+
+    /// Poll the capture counters and act on the two failure modes that
+    /// previously went unnoticed for an entire meeting.
+    ///
+    /// The decisions themselves live in the pure `micVerdict` / `meetingVerdict`
+    /// functions below so they can be unit-tested without timers, devices, or
+    /// a live meeting; this function only performs the resulting side effects.
+    private func checkCaptureHealth() {
+        guard isCapturing else { return }
+        let stats = captureHealth.snapshot()
+        let now = Date()
+
+        // --- Mic: zero buffers at all means the tap never fired. ---
+        if let armedAt = micWatchdogArmedAt {
+            switch Self.micVerdict(
+                buffers: stats.micBuffers,
+                elapsed: now.timeIntervalSince(armedAt),
+                restartsUsed: micWatchdogRestarts
+            ) {
+            case .healthy, .wait:
+                break
+            case .restart:
+                micWatchdogRestarts += 1
+                appLog("[AudioCapture] WATCHDOG mic delivered 0 buffers in \(Int(Self.micFirstBufferGraceSec))s — restarting engine (attempt \(micWatchdogRestarts)/\(Self.micWatchdogMaxRestarts))")
+                // Re-arm BEFORE restarting so the next grace window is measured
+                // against the new engine rather than against capture start.
+                micWatchdogArmedAt = now
+                captureHealth.resetMic()
+                restartMicrophoneCapture(
+                    retriesLeft: Self.micRestartMaxRetries,
+                    backoffMs: Self.micRestartInitialBackoffMs
+                )
+            case .giveUp:
+                guard !warnedMicDead else { break }
+                warnedMicDead = true
+                // Stop re-checking — the restart ladder is exhausted and
+                // repeating the toast would just nag.
+                micWatchdogArmedAt = nil
+                appLog("[AudioCapture] WATCHDOG mic dead after \(Self.micWatchdogMaxRestarts) restarts — giving up (input=\"\(currentInputDevice)\")")
+                onCaptureWarning?(
+                    "Microphone \"\(currentInputDevice)\" is not delivering audio — your side of the meeting is not being transcribed. Try switching the input device in System Settings → Sound."
+                )
+            }
+        }
+
+        // --- Meeting: buffers arriving, but every sample is zero. ---
+        if let startedAt = healthStartedAt, !warnedMeetingSilent {
+            let verdict = Self.meetingVerdict(
+                buffers: stats.meetingBuffers,
+                nonZero: stats.meetingNonZero,
+                elapsed: now.timeIntervalSince(startedAt)
+            )
+            if verdict == .silent {
+                warnedMeetingSilent = true
+                appLog("[AudioCapture] WATCHDOG meeting track silent — \(stats.meetingBuffers) buffers, all zero (output=\"\(currentOutputDevice)\")")
+                onCaptureWarning?(meetingSilenceWarning(outputDevice: currentOutputDevice))
+            }
+        }
+    }
+
+    /// What to do about a mic track that may not have started.
+    enum MicVerdict: Equatable {
+        /// Buffers are arriving — the tap is alive.
+        case healthy
+        /// No buffers yet, but still inside the startup grace window.
+        case wait
+        /// Grace elapsed with zero buffers and restarts still available.
+        case restart
+        /// Grace elapsed with zero buffers and the restart ladder exhausted.
+        case giveUp
+    }
+
+    /// Decide whether a mic tap that reported a successful `engine.start()` is
+    /// actually delivering audio.
+    ///
+    /// Keyed on buffer COUNT, never on peak level: a muted or quiet mic still
+    /// fires the tap and logs `mic peak=0.0000`, and restarting the engine for
+    /// that would be wrong. Only a total absence of callbacks means dead.
+    ///
+    /// Pure so it can be tested without timers or a real device.
+    static func micVerdict(
+        buffers: Int,
+        elapsed: TimeInterval,
+        restartsUsed: Int,
+        grace: TimeInterval = micFirstBufferGraceSec,
+        maxRestarts: Int = micWatchdogMaxRestarts
+    ) -> MicVerdict {
+        if buffers > 0 { return .healthy }
+        if elapsed < grace { return .wait }
+        return restartsUsed < maxRestarts ? .restart : .giveUp
+    }
+
+    /// What to do about a meeting track that is delivering buffers.
+    enum MeetingVerdict: Equatable {
+        /// Real signal has been seen.
+        case healthy
+        /// Nothing conclusive yet — no buffers at all, or still inside grace.
+        case wait
+        /// Buffers are arriving but every sample so far has been zero.
+        case silent
+    }
+
+    /// Decide whether ScreenCaptureKit is delivering real audio or zeros.
+    ///
+    /// Requires `buffers > 0` before it will ever say `.silent`: with no
+    /// buffers at all the problem is the stream, not the routing, and this
+    /// watchdog has nothing useful to say about it.
+    ///
+    /// Pure so it can be tested without a live capture.
+    static func meetingVerdict(
+        buffers: Int,
+        nonZero: Int,
+        elapsed: TimeInterval,
+        grace: TimeInterval = meetingSilenceGraceSec
+    ) -> MeetingVerdict {
+        if nonZero > 0 { return .healthy }
+        if buffers == 0 || elapsed < grace { return .wait }
+        return .silent
+    }
+
+    /// Build the user-facing warning for a digitally-silent meeting track.
+    /// Naming the output device is what makes it self-diagnosing — the same
+    /// reasoning behind notes4chris's `blackholeFallbackWarning`.
+    private func meetingSilenceWarning(outputDevice: String) -> String {
+        let base = "No meeting audio detected — ScreenCaptureKit is delivering silence."
+        if Self.virtualOutputTokens.contains(where: { outputDevice.localizedCaseInsensitiveContains($0) }) {
+            return "\(base) Output is \"\(outputDevice)\", a virtual device, so there is no real audio on it to capture. Switch system output to a physical device."
+        }
+        return "\(base) Output is \"\(outputDevice)\". If you can hear the other side, an audio-routing tool (Loopback / Audio Hijack / BlackHole) is likely intercepting it — quit it and restart the session."
+    }
+
     // MARK: - Device Changes
 
     private func handleOutputDeviceChange() {
@@ -783,6 +993,61 @@ final class AudioCaptureManager: NSObject {
         ) == noErr, let name = nameRef?.takeRetainedValue() else { return "Unknown" }
 
         return name as String
+    }
+}
+
+// MARK: - Capture Health Counters
+
+/// Thread-safe capture counters feeding the health watchdog.
+///
+/// Written from two different audio threads (the AVAudioEngine tap on the I/O
+/// thread, the SCStream delegate on its own sample queue) and read from the
+/// watchdog Timer on the main RunLoop. Cost is one uncontested lock/unlock per
+/// audio buffer — comfortably inside the I/O deadline at our buffer sizes.
+///
+/// The distinction that matters: `buffers` counts callbacks, `nonZero` counts
+/// callbacks carrying actual signal. A dead tap and a zeroed tap are different
+/// failures with different fixes, and only these two counters together can
+/// tell them apart.
+final class CaptureHealth {
+    private let lock = NSLock()
+    private var micBuffers = 0
+    private var micNonZero = 0
+    private var meetingBuffers = 0
+    private var meetingNonZero = 0
+
+    func recordMic(peak: Float) {
+        lock.lock(); defer { lock.unlock() }
+        micBuffers += 1
+        if peak > 0 { micNonZero += 1 }
+    }
+
+    func recordMeeting(peak: Float) {
+        lock.lock(); defer { lock.unlock() }
+        meetingBuffers += 1
+        if peak > 0 { meetingNonZero += 1 }
+    }
+
+    /// All four counters read under one lock, so the watchdog never compares
+    /// a buffer count against a non-zero count from a different instant.
+    func snapshot() -> (micBuffers: Int, micNonZero: Int, meetingBuffers: Int, meetingNonZero: Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (micBuffers, micNonZero, meetingBuffers, meetingNonZero)
+    }
+
+    /// Zero only the mic counters, so a restart is judged on its own merits.
+    func resetMic() {
+        lock.lock(); defer { lock.unlock() }
+        micBuffers = 0
+        micNonZero = 0
+    }
+
+    func resetAll() {
+        lock.lock(); defer { lock.unlock() }
+        micBuffers = 0
+        micNonZero = 0
+        meetingBuffers = 0
+        meetingNonZero = 0
     }
 }
 
