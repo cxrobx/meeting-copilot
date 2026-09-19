@@ -2946,15 +2946,15 @@ const PRESENT_HTML = `<!DOCTYPE html>
     // raw / extracting / empty / error — all show the textarea.
     var readonly = agendaState.kind === 'extracting' ? ' readonly' : '';
     var value = agendaRawSnapshot || '';
-    var textarea = '<textarea id="startAgenda" rows="5" placeholder="Confirm Q1 hiring plan&#10;Review campaign results&#10;Paste notes / a prep doc and click Extract" oninput="onAgendaTextareaInput()"' + readonly + '>' + escapeHtml(value) + '</textarea>';
-    var helper = '<div class="agenda-helper">One item per line, or paste notes / a prep doc and click Extract.</div>';
+    var textarea = '<textarea id="startAgenda" rows="5" placeholder="Confirm Q1 hiring plan&#10;Review campaign results&#10;Or paste rough notes and click Build agenda" oninput="onAgendaTextareaInput()"' + readonly + '>' + escapeHtml(value) + '</textarea>';
+    var helper = '<div class="agenda-helper">One item per line — or paste rough notes and let it build the agenda for you.</div>';
 
     var buttonLabel, disabled = '';
     if (agendaState.kind === 'extracting') {
-      buttonLabel = '<span class="agenda-edit-spinner"></span>Extracting…';
+      buttonLabel = '<span class="agenda-edit-spinner"></span>Building agenda…';
       disabled = ' disabled';
     } else {
-      buttonLabel = 'Extract items from notes';
+      buttonLabel = 'Build agenda from notes';
       if (!(agendaRawSnapshot && agendaRawSnapshot.trim())) disabled = ' disabled';
     }
 
@@ -2962,7 +2962,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     if (agendaState.kind === 'empty') {
       status = '<span class="agenda-edit-status empty">' + escapeHtml(agendaState.message || 'No items found — edit and try again, or start with the raw text.') + '</span>';
     } else if (agendaState.kind === 'error') {
-      status = '<span class="agenda-edit-status error">' + escapeHtml(agendaState.message || 'Extraction failed.') + '</span>';
+      status = '<span class="agenda-edit-status error">' + escapeHtml(agendaState.message || 'Could not build an agenda — edit the notes and try again.') + '</span>';
     }
 
     host.innerHTML = textarea + helper +
@@ -3011,7 +3011,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     }).then(function(res) {
       if (gen !== agendaExtractGen) return; // stale result — ignore
       if (!res.ok || res.data.error) {
-        setAgendaState({ kind: 'error', message: res.data.error || 'Extraction failed' });
+        setAgendaState({ kind: 'error', message: res.data.error || 'Could not build an agenda' });
         return;
       }
       var items = (res.data.items || []).filter(function(s) { return typeof s === 'string' && s.trim(); });
