@@ -61,7 +61,12 @@ cd server && npm start        # Run compiled dist/index.js
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `DEEPGRAM_API_KEY` | No | - | Cloud transcription |
+| `DEEPGRAM_API_KEY` | No | - | Cloud transcription (metered) |
+| `OPENAI_API_KEY` | No | - | **Metered.** Present in `.env`; its presence is what puts the live path on the API |
+| `TYPESAFE_API_KEY` | No | - | **Metered.** Jev gate before the coach's generative call (~$0.000042/call) |
+| `COPILOT_LIVE_LLM_MODE` | No | auto | `cli` forces the live path onto the subscription CLIs |
+| `COPILOT_JEV_INPUT_PER_MILLION` | No | 0.042 | Jev input price for the budget guard |
+| `COPILOT_JEV_OUTPUT_PER_MILLION` | No | 0.42 | Jev output price — unpublished, deliberately pessimistic |
 | `COPILOT_PORT` | No | 17890 | TCP port (the Swift app honors it too via ServerConfig) |
 | `SHARE_TRANSCRIPT` | No | true | Set to `false` to disable shared transcript writing |
 | `SUGGESTION_TTL_MS` | No | 60000 | Legacy default for suggestion TTL |
@@ -70,4 +75,6 @@ cd server && npm start        # Run compiled dist/index.js
 | `COPILOT_ENABLE_HTTP_TRANSCRIBE` | No | - | `1` re-enables the legacy POST /transcribe path |
 | `CXMAIL_DB_PATH` | No | `~/Library/Application Support/com.cxmail.app/cxmail.db` | cxmail DB for start-form meeting auto-fill (read-only) |
 
-> **Settings precedence**: `~/.meeting-copilot/settings.json` (written by the dashboard gear panel via `POST /settings`) **beats env vars**, which beat hardcoded defaults. Env vars remain as back-compat defaults only. NO `ANTHROPIC_API_KEY` is required — all AI calls ride CLIs on user subscriptions, and `claude` spawn sites strip the key from child env so it can never bill the API console.
+> **Settings precedence**: `~/.meeting-copilot/settings.json` (written by the dashboard gear panel via `POST /settings`) **beats env vars**, which beat hardcoded defaults. Env vars remain as back-compat defaults only.
+
+> **Transport reality (corrected 2026-09-19)**: the live path runs on **metered OpenAI**, not the subscription. `runHaikuTriage` / `runSonnetSuggestion` / `runLiveJson` all take the API branch when `LLM_CONFIG.liveTransport !== 'cli'` **and** `isOpenAiApiAvailable()` — and `COPILOT_LIVE_LLM_MODE` is unset while `OPENAI_API_KEY` is present, so that branch is the default. `COPILOT_LIVE_LLM_MODE=cli` forces the subscription CLIs; `COPILOT_DISABLE_PAID_API=1` hard-blocks all three metered providers (OpenAI, Anthropic, Deepgram) plus Jev. **`ANTHROPIC_API_KEY` remains correctly neutralized** — every `claude` spawn site deletes it from the child env, and the API-path Anthropic call count in `server.log` is 0.

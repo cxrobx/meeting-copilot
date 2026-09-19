@@ -138,7 +138,7 @@ describe('CoachMonitor', () => {
     expect(triage).not.toHaveBeenCalled();
   });
 
-  it('drops advice that arrives after the four-second moment deadline', async () => {
+  it('drops advice that arrives after the six-second moment deadline', async () => {
     const pending = defer<string>();
     const monitor = new CoachMonitor({ triage: () => pending.promise });
     const suggestions: CoachSuggestion[] = [];
@@ -152,13 +152,96 @@ describe('CoachMonitor', () => {
     await vi.advanceTimersByTimeAsync(300);
     expect(monitor.evalsRun).toBe(1);
 
-    await vi.advanceTimersByTimeAsync(4_100);
+    await vi.advanceTimersByTimeAsync(6_100);
     pending.resolve(result({ incidentType: 'pressure' }));
     await Promise.resolve();
     await Promise.resolve();
 
     expect(suggestions).toHaveLength(0);
     expect(monitor.getMetrics().staleResults).toBe(1);
+  });
+
+  it('still delivers advice that would have missed the old four-second deadline', async () => {
+    const pending = defer<string>();
+    const monitor = new CoachMonitor({ triage: () => pending.promise });
+    const suggestions: CoachSuggestion[] = [];
+    monitor.on('suggestion', (suggestion: CoachSuggestion) => suggestions.push(suggestion));
+    start(monitor);
+
+    monitor.noteSegment('We need you to commit right now.', 'meeting', {
+      final: true,
+      segmentId: 'pressure-2',
+    });
+    await vi.advanceTimersByTimeAsync(300);
+
+    // 13% of real coach evaluations (15 of 112 on 2026-09-14) died in this band.
+    await vi.advanceTimersByTimeAsync(4_500);
+    pending.resolve(result({ incidentType: 'pressure' }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(suggestions).toHaveLength(1);
+    expect(monitor.getMetrics().staleResults).toBe(0);
+  });
+
+  it('skips the generative call when the gate says the moment is quiet', async () => {
+    const triage = vi.fn().mockResolvedValue(result());
+    const monitor = new CoachMonitor({
+      triage,
+      gate: async () => ({ open: false, reason: 'quiet', worth: 0.1, asked: 0.05, pushback: 0.05, latencyMs: 12 }),
+    });
+    const evals: Array<Record<string, unknown>> = [];
+    monitor.on('eval', (e: Record<string, unknown>) => evals.push(e));
+    start(monitor);
+
+    monitor.noteSegment('We need you to commit right now.', 'meeting', {
+      final: true,
+      segmentId: 'gated-1',
+    });
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(triage).not.toHaveBeenCalled();
+    expect(monitor.gateSavedCalls).toBe(1);
+    expect(evals.some((e) => e.skipped === 'gate')).toBe(true);
+  });
+
+  it('runs the generative call when the gate opens', async () => {
+    const triage = vi.fn().mockResolvedValue(result({ incidentType: 'pressure' }));
+    const monitor = new CoachMonitor({
+      triage,
+      gate: async () => ({ open: true, reason: 'signal', worth: 0.8, asked: 0.9, pushback: 0.2, latencyMs: 9 }),
+    });
+    const suggestions: CoachSuggestion[] = [];
+    monitor.on('suggestion', (s: CoachSuggestion) => suggestions.push(s));
+    start(monitor);
+
+    monitor.noteSegment('We need you to commit right now.', 'meeting', {
+      final: true,
+      segmentId: 'gated-2',
+    });
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(triage).toHaveBeenCalledTimes(1);
+    expect(monitor.gateSavedCalls).toBe(0);
+    expect(suggestions).toHaveLength(1);
+  });
+
+  it('surfaces a priority-4 card that the old floor would have withheld', async () => {
+    const monitor = new CoachMonitor({
+      triage: async () => result({ priority: 4, confidence: 0.58, incidentType: 'pressure' }),
+    });
+    const suggestions: CoachSuggestion[] = [];
+    monitor.on('suggestion', (s: CoachSuggestion) => suggestions.push(s));
+    start(monitor);
+
+    monitor.noteSegment('We need you to commit right now.', 'meeting', {
+      final: true,
+      segmentId: 'p4-1',
+    });
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0]!.priority).toBe(4);
   });
 
   it('runs the newest queued incident after an in-flight evaluation', async () => {

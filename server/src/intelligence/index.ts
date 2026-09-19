@@ -42,7 +42,6 @@ export class IntelligenceEngine extends EventEmitter {
   private evalTimer: ReturnType<typeof setInterval> | null = null;
   private compressionTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
-  private consecutiveNonActionable = 0;
   private evalInFlight = false;
   private evalDirty = false;
   private evalDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -166,7 +165,6 @@ export class IntelligenceEngine extends EventEmitter {
     this.recentWindowHashes = [];
     this.recentActionSuggestions = [];
     this.contextSummaries = [];
-    this.consecutiveNonActionable = 0;
     this.evalsRun = 0;
     this.haikuActionableCount = 0;
     this.sonnetCallCount = 0;
@@ -297,14 +295,14 @@ export class IntelligenceEngine extends EventEmitter {
       clearInterval(this.evalTimer);
     }
 
-    const interval =
-      this.consecutiveNonActionable >= 3
-        ? this.baseEvalIntervalMs * 2
-        : this.baseEvalIntervalMs;
-
+    // No quiet-period backoff. This used to double the interval after 3
+    // non-actionable evals, which slowed the copilot down exactly when a moment
+    // was most likely to slip past unnoticed — a quiet stretch is not evidence
+    // that the next minute is quiet too. Missing a moment costs more than an
+    // ignored card, so the cadence stays flat.
     this.evalTimer = setInterval(() => {
       this.scheduleEval();
-    }, interval);
+    }, this.baseEvalIntervalMs);
   }
 
   private scheduleEval(): void {
@@ -357,16 +355,10 @@ export class IntelligenceEngine extends EventEmitter {
       });
 
       if (!triageResult.actionable || repeatedMoment) {
-        this.consecutiveNonActionable++;
-        if (this.consecutiveNonActionable === 3) {
-          this.resetEvalTimer(); // Switch to backoff
-        }
         return;
       }
 
-      this.consecutiveNonActionable = 0;
       this.haikuActionableCount++;
-      this.resetEvalTimer(); // Back to base interval
 
       // Tier 2: Sonnet suggestion
       this.sonnetCallCount++;

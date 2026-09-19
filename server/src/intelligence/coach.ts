@@ -11,20 +11,33 @@ import {
   type CoachKind,
 } from './prompts/coach.v1.js';
 import type { AgendaStatus } from './agenda.js';
+import { jevMomentGate, type MomentGate } from './moment-gate.js';
 
 const EVAL_INTERVAL_MS = 25_000;
 const MIN_NEW_WORDS_BEFORE_EVAL = 25;
 const WINDOW_TAIL_CHARS = 3_600;
 const MAX_RECENT_TURNS = 10;
 const MAX_TURN_CHARS = 900;
-// A live interruption has a much higher cost than an omitted nice-to-have.
-// Priority 4 is useful post-meeting feedback; only priority 5 earns a realtime
-// card. This keeps the coach focused on recovery rather than facilitation.
-const MIN_PRIORITY = 5;
-const MIN_CONFIDENCE = 0.62;
+// An omitted card costs more than a shown one. Chris's call, 2026-09-19: "I'd
+// rather the cards be noisy and I select the ones I need than they don't
+// trigger enough and I have to manually type the card or miss it completely."
+// A card he ignores costs a glance; a missed one costs him the moment in a live
+// client meeting.
+//
+// This was priority 5 on the opposite reasoning ("a live interruption has a
+// much higher cost than an omitted nice-to-have"), and it showed: across ten
+// recorded sessions the coach computed 112 evaluations in one 40-minute meeting
+// and surfaced 2 cards, withholding 85 of them below these floors.
+const MIN_PRIORITY = 4;
+const MIN_CONFIDENCE = 0.55;
 const MAX_RECENT_SUGGESTIONS = 8;
 const TRIGGER_DEBOUNCE_MS = 250;
-const ADVICE_DEADLINE_MS = 4_000;
+// 13% of coach evaluations (15 of 112 in the 2026-09-14 session) were computed
+// and then binned for crossing this line — pure latency casualties, advice that
+// existed and was thrown away. The Jev gate now spends up to 800ms ahead of the
+// generative call, so 4s would bin more still. 6s keeps advice inside the
+// window where it is still about the moment.
+const ADVICE_DEADLINE_MS = 6_000;
 const INCIDENT_COOLDOWN_MS = 12_000;
 const RECENT_SUGGESTION_MS = 2 * 60_000;
 
@@ -141,6 +154,13 @@ type CoachTriage = (
 export interface CoachEvalDeps {
   triage?: CoachTriage;
   now?: () => number;
+  /**
+   * Cheap typed judgment run BEFORE the generative call, to decide whether the
+   * moment justifies paying for it. Defaults to the Jev gate, which opens
+   * itself whenever Jev is unavailable — so tests and offline runs behave
+   * exactly as they did before this existed.
+   */
+  gate?: MomentGate;
 }
 
 function normalizeIncidentKey(reason: string, text: string): string {
@@ -242,10 +262,15 @@ export class CoachMonitor extends EventEmitter {
 
   private readonly triage: CoachTriage;
   private readonly now: () => number;
+  private readonly gate: MomentGate;
+
+  public gateSkips = 0;
+  public gateSavedCalls = 0;
 
   constructor(deps: CoachEvalDeps = {}) {
     super();
     this.now = deps.now ?? Date.now;
+    this.gate = deps.gate ?? jevMomentGate;
     this.triage = deps.triage ?? (async (prompt, systemPrompt, signal) => {
       const result = await runLiveJson({
         prompt,
@@ -521,6 +546,26 @@ export class CoachMonitor extends EventEmitter {
       triggerSource: trigger.source,
       triggerText: trigger.text,
     });
+
+    // Cheap typed judgment before the expensive generative one. A closed gate
+    // only ever saves a call — it fails open on error, timeout, or an
+    // unavailable Jev, so coaching can never go silent because of it.
+    const verdict = await this.gate(transcriptWindow, signal);
+    if (gen !== this.generation) return;
+    if (!verdict.open) {
+      this.gateSkips++;
+      this.gateSavedCalls++;
+      this.emit('eval', {
+        skipped: 'gate',
+        gateReason: verdict.reason,
+        worth: verdict.worth,
+        asked: verdict.asked,
+        pushback: verdict.pushback,
+        gateLatencyMs: verdict.latencyMs,
+        trigger: trigger.reason,
+      });
+      return;
+    }
 
     const startedAt = this.now();
     this.evalsRun++;

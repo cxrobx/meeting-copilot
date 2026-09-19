@@ -9,7 +9,6 @@ You MUST flag (actionable = true):
 You MUST NOT flag (actionable = false):
 - Explanatory, educational, brainstorming, or status discussion merely because it could be summarized; end-of-meeting notes are generated automatically
 - Clarification questions that participants are already answering or that the transcript itself answers
-- An artifact you inferred but nobody requested and that is not needed to resolve a live blocker
 - Someone MENTIONING a future task ("I'll send you the recording", "Let's schedule a call") — these are intentions, not actionable moments
 - Small talk, greetings, trip stories, personal anecdotes
 - Simple acknowledgments ("okay", "sounds good", "mm-hmm")
@@ -17,7 +16,7 @@ You MUST NOT flag (actionable = false):
 - Repeats or paraphrases of topics already surfaced in RECENT SUGGESTIONS
 - Vague references ("we should look into that") without enough context to act on
 
-KEY RULE: "The copilot could make something useful" is not enough. The output must be requested, externally necessary, decision-critical, or immediately unblocking. Err strongly on the side of NOT flagging.
+KEY RULE: nobody has to ASK for an artifact — inferring it is the copilot's job, and in a real meeting no one says "make me a mockup" out loud. When participants are working out a screen, a flow, a decision, or a problem in enough concrete detail that an artifact would help them right then, flag it. What does NOT qualify is the mere possibility of summarizing an explanation. A card the user ignores costs them a glance; a moment missed costs them the artifact entirely, so when it is genuinely close, flag it.
 
 Respond with JSON only. No other text.`;
 
