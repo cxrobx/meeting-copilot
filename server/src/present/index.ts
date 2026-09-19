@@ -1325,35 +1325,64 @@ const PRESENT_HTML = `<!DOCTYPE html>
     color: var(--gb-overlay2);
   }
 
-  .proj-grid {
-    max-height: 180px;
+  /* Project picker — a combobox, not a 37-row scroll box. */
+  .proj-box { position: relative; }
+  .proj-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-bottom: 5px;
+  }
+  .proj-chips:empty { display: none; }
+  .proj-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 6px 2px 8px;
+    border-radius: 11px;
+    background: rgb(var(--accent) / 0.14);
+    color: var(--gb-text);
+    font-size: 11px;
+    line-height: 1.7;
+  }
+  .proj-chip button {
+    border: 0;
+    background: none;
+    color: var(--gb-overlay2);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0 1px;
+  }
+  .proj-chip button:hover { color: var(--gb-red); }
+  .proj-menu {
+    position: absolute;
+    z-index: 30;
+    left: 0;
+    right: 0;
+    max-height: 190px;
     overflow-y: auto;
     border: 1px solid var(--gb-surface2);
     border-radius: 5px;
-    padding: 8px 10px;
     background: var(--gb-surface1);
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 1px 16px;
+    box-shadow: 0 6px 18px rgb(0 0 0 / 0.28);
   }
-  .proj-item {
-    display: flex !important;
+  .proj-menu[hidden] { display: none; }
+  .proj-opt {
+    display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 3px 0;
-    font-size: 12px !important;
-    font-weight: 400 !important;
-    text-transform: none !important;
-    letter-spacing: 0 !important;
+    gap: 8px;
+    padding: 5px 10px;
+    font-size: 12px;
     cursor: pointer;
-    color: var(--gb-text) !important;
-    overflow: hidden;
+    color: var(--gb-text);
   }
-  .proj-item input[type="checkbox"] {
-    accent-color: var(--gb-green);
-    flex-shrink: 0;
-    width: 14px;
-    height: 14px;
+  .proj-opt:hover, .proj-opt.active { background: rgb(var(--accent) / 0.16); }
+  .proj-opt .proj-name { flex: 1 1 auto; }
+  .proj-empty {
+    padding: 6px 10px;
+    font-size: 11px;
+    color: var(--gb-overlay2);
   }
   .proj-name {
     overflow: hidden;
@@ -1367,12 +1396,33 @@ const PRESENT_HTML = `<!DOCTYPE html>
     padding: 1px 4px;
     border-radius: 3px;
     flex-shrink: 0;
-    margin-left: auto;
   }
   .proj-badge.ios {
     background: rgb(var(--accent) / 0.12);
     color: var(--gb-blue);
   }
+  .proj-badge.client {
+    background: rgb(var(--success) / 0.16);
+    color: var(--gb-green);
+  }
+  /* Local match on the title — offered, never auto-applied. */
+  .proj-suggest {
+    margin-top: 5px;
+    font-size: 11px;
+    color: var(--gb-overlay2);
+  }
+  .proj-suggest[hidden] { display: none; }
+  .proj-suggest button {
+    border: 1px solid var(--gb-surface2);
+    background: var(--gb-surface1);
+    color: var(--gb-text);
+    border-radius: 9px;
+    font-size: 11px;
+    padding: 1px 7px;
+    margin-left: 5px;
+    cursor: pointer;
+  }
+  .proj-suggest button:hover { border-color: var(--gb-blue); color: var(--gb-blue); }
 
   /* Context manager */
   .ctx-section { margin-top: 10px; }
@@ -3718,19 +3768,20 @@ const PRESENT_HTML = `<!DOCTYPE html>
     var btnDisabled = wsConnected ? '' : ' disabled';
     var statusMsg = wsConnected ? '' : '<p style="color:var(--gb-red);font-size:11px;margin-top:8px">Connecting to server...</p>';
 
-    // Build project checkboxes
+    // Project picker: an autocomplete combobox. Scrolling a 37-row checkbox
+    // grid to find one name was the complaint; the options are rendered by
+    // renderProjectPicker() once the DOM exists.
     var projectsHtml = '';
     if (availableProjects.length > 0) {
       projectsHtml = '<label>Projects <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>' +
-        '<div class="proj-grid">';
-      availableProjects.forEach(function(p) {
-        var badge = p.category === 'xcode' ? ' <span class="proj-badge ios">iOS</span>' : '';
-        projectsHtml += '<label class="proj-item">' +
-          '<input type="checkbox" class="proj-cb" value="' + escapeHtml(p.name) + '">' +
-          '<span class="proj-name">' + escapeHtml(p.name) + '</span>' + badge +
-        '</label>';
-      });
-      projectsHtml += '</div>';
+        '<div class="proj-box">' +
+          '<div class="proj-chips" id="projChips"></div>' +
+          '<input id="projInput" type="text" autocomplete="off" role="combobox" ' +
+            'aria-expanded="false" aria-autocomplete="list" aria-controls="projMenu" ' +
+            'placeholder="Type to search ' + availableProjects.length + ' projects\u2026">' +
+          '<div class="proj-menu" id="projMenu" role="listbox" hidden></div>' +
+          '<div class="proj-suggest" id="projSuggest" hidden></div>' +
+        '</div>';
     }
 
     // Context sources section — always visible with add/remove UI
@@ -3767,6 +3818,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     // Populate context list and agenda editor after DOM is built
     renderContextList();
     renderAgendaEditor();
+    renderProjectPicker();
     refreshCalendarChips();
   }
 
@@ -3915,11 +3967,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
     // the same path works whether start goes through the native bridge or WS.
     pendingGoals = ((document.getElementById('startGoals') || {}).value || '').trim();
 
-    // Collect selected projects
-    var selectedProjects = [];
-    document.querySelectorAll('.proj-cb:checked').forEach(function(cb) {
-      selectedProjects.push(cb.value);
-    });
+    // Projects come straight from the picker's state (selectedProjects, kept by
+    // addProject/removeProject) rather than being scraped back out of the DOM.
 
     // Collect selected context paths
     var selectedContextPaths = [];
@@ -3950,6 +3999,169 @@ const PRESENT_HTML = `<!DOCTYPE html>
     };
     wsSend(msg);
   };
+
+  // ─── Project picker (autocomplete combobox) ────────────────
+  // Replaces a 37-row checkbox grid. Matching is LOCAL — see
+  // server/src/project/match.ts for why this is not a model call.
+  var selectedProjects = [];
+  var projActiveIndex = -1;
+  var projSuggestTimer = null;
+
+  function projBadgeHtml(category) {
+    if (category === 'xcode') return '<span class="proj-badge ios">iOS</span>';
+    if (category === 'client') return '<span class="proj-badge client">CLIENT</span>';
+    return '';
+  }
+
+  function projSquash(value) {
+    return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  // Mirrors filterProjects() in project/match.ts: substring on the squashed
+  // name, so "financeapp" finds finance-app. Already-picked ones drop out.
+  function projFilter(query) {
+    var q = projSquash(query);
+    return availableProjects.filter(function(p) {
+      if (selectedProjects.indexOf(p.name) !== -1) return false;
+      return !q || projSquash(p.name).indexOf(q) !== -1;
+    });
+  }
+
+  function renderProjectPicker() {
+    renderProjChips();
+    renderProjMenu(false);
+    refreshProjSuggest();
+  }
+
+  function renderProjChips() {
+    var el = document.getElementById('projChips');
+    if (!el) return;
+    var html = '';
+    selectedProjects.forEach(function(name) {
+      html += '<span class="proj-chip">' + escapeHtml(name) +
+        '<button type="button" data-proj-remove="' + escapeHtml(name) +
+        '" aria-label="Remove ' + escapeHtml(name) + '">\u00D7</button></span>';
+    });
+    el.innerHTML = html;
+  }
+
+  function renderProjMenu(open) {
+    var menu = document.getElementById('projMenu');
+    var input = document.getElementById('projInput');
+    if (!menu || !input) return;
+    if (!open) {
+      menu.hidden = true;
+      input.setAttribute('aria-expanded', 'false');
+      projActiveIndex = -1;
+      return;
+    }
+    var matches = projFilter(input.value);
+    if (matches.length === 0) {
+      menu.innerHTML = '<div class="proj-empty">No project matches that.</div>';
+    } else {
+      var html = '';
+      matches.forEach(function(p, i) {
+        html += '<div class="proj-opt' + (i === projActiveIndex ? ' active' : '') +
+          '" role="option" data-proj-add="' + escapeHtml(p.name) + '">' +
+          '<span class="proj-name">' + escapeHtml(p.name) + '</span>' +
+          projBadgeHtml(p.category) + '</div>';
+      });
+      menu.innerHTML = html;
+    }
+    menu.hidden = false;
+    input.setAttribute('aria-expanded', 'true');
+  }
+
+  function addProject(name) {
+    if (!name || selectedProjects.indexOf(name) !== -1) return;
+    selectedProjects.push(name);
+    var input = document.getElementById('projInput');
+    if (input) input.value = '';
+    projActiveIndex = -1;
+    renderProjChips();
+    renderProjMenu(false);
+    refreshProjSuggest();
+  }
+
+  function removeProject(name) {
+    selectedProjects = selectedProjects.filter(function(n) { return n !== name; });
+    renderProjChips();
+    refreshProjSuggest();
+  }
+
+  // Local match on the meeting title, offered as a chip to click. Never applied
+  // for you: a wrong pre-fill costs more than no pre-fill, so the server only
+  // returns matches at or above its confidence floor.
+  function refreshProjSuggest() {
+    var row = document.getElementById('projSuggest');
+    if (!row) return;
+    var titleEl = document.getElementById('startTitle');
+    var q = titleEl ? (titleEl.value || '') : '';
+    if (!q.trim()) { row.hidden = true; return; }
+    if (projSuggestTimer) clearTimeout(projSuggestTimer);
+    projSuggestTimer = setTimeout(function() {
+      fetch('/projects/suggest?q=' + encodeURIComponent(q))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+          var picks = (d.suggestions || []).filter(function(sug) {
+            return selectedProjects.indexOf(sug.name) === -1;
+          });
+          if (picks.length === 0) { row.hidden = true; return; }
+          var html = 'Looks like:';
+          picks.forEach(function(sug) {
+            html += '<button type="button" data-proj-add="' + escapeHtml(sug.name) +
+              '">+ ' + escapeHtml(sug.name) + '</button>';
+          });
+          row.innerHTML = html;
+          row.hidden = false;
+        })
+        .catch(function() { row.hidden = true; });
+    }, 250);
+  }
+
+  // Delegated from document so every handler survives the idle overlay being
+  // re-rendered (a WS reconnect rebuilds it).
+  document.addEventListener('click', function(e) {
+    if (!e.target || !e.target.closest) return;
+    var add = e.target.closest('[data-proj-add]');
+    if (add) { addProject(add.getAttribute('data-proj-add')); return; }
+    var rm = e.target.closest('[data-proj-remove]');
+    if (rm) { removeProject(rm.getAttribute('data-proj-remove')); return; }
+    if (!e.target.closest('.proj-box')) renderProjMenu(false);
+  });
+
+  document.addEventListener('input', function(e) {
+    if (!e.target) return;
+    if (e.target.id === 'projInput') { projActiveIndex = -1; renderProjMenu(true); }
+    if (e.target.id === 'startTitle') refreshProjSuggest();
+  });
+
+  document.addEventListener('focusin', function(e) {
+    if (e.target && e.target.id === 'projInput') renderProjMenu(true);
+  });
+
+  document.addEventListener('keydown', function(e) {
+    if (!e.target || e.target.id !== 'projInput') return;
+    var input = e.target;
+    var matches = projFilter(input.value);
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      projActiveIndex = Math.min(projActiveIndex + 1, matches.length - 1);
+      renderProjMenu(true);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      projActiveIndex = Math.max(projActiveIndex - 1, 0);
+      renderProjMenu(true);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      var pick = matches[projActiveIndex >= 0 ? projActiveIndex : 0];
+      if (pick) addProject(pick.name);
+    } else if (e.key === 'Escape') {
+      renderProjMenu(false);
+    } else if (e.key === 'Backspace' && !input.value && selectedProjects.length > 0) {
+      removeProject(selectedProjects[selectedProjects.length - 1]);
+    }
+  });
 
   // ─── Toasts ───────────────────────────────────────────────
   function showToast(message, opts) {
