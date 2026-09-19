@@ -37,7 +37,7 @@ const TRIGGER_DEBOUNCE_MS = 250;
 // existed and was thrown away. The Jev gate now spends up to 800ms ahead of the
 // generative call, so 4s would bin more still. 6s keeps advice inside the
 // window where it is still about the moment.
-const ADVICE_DEADLINE_MS = 6_000;
+export const ADVICE_DEADLINE_MS = 6_000;
 const INCIDENT_COOLDOWN_MS = 12_000;
 const RECENT_SUGGESTION_MS = 2 * 60_000;
 

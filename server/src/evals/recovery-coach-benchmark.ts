@@ -9,6 +9,10 @@ import { OpenAIRealtimeWS } from 'openai/realtime/ws';
 
 import { openaiStructuredJson } from '../api/openai.js';
 import { resetLlmBudget } from '../api/budget.js';
+import { MODEL_CONFIG } from '../model-config.js';
+// Imported, not copied: this sat at 4_000 after production moved to 6_000, so
+// the benchmark was scoring `usable` against a deadline the app no longer used.
+import { ADVICE_DEADLINE_MS } from '../intelligence/coach.js';
 import {
   buildCoachPrompt,
   COACH_SCHEMA,
@@ -22,7 +26,7 @@ const USER_ENV_PATH = join(homedir(), '.meeting-copilot', '.env');
 if (existsSync(USER_ENV_PATH)) dotenv.config({ path: USER_ENV_PATH });
 else dotenv.config();
 
-const ADVICE_DEADLINE_MS = 4_000;
+
 const REQUEST_TIMEOUT_MS = 12_000;
 const MAX_OUTPUT_TOKENS = 240;
 const REALTIME_MAX_OUTPUT_TOKENS = Number(
@@ -32,7 +36,10 @@ const DEEPSEEK_MAX_OUTPUT_TOKENS = Number(
   process.env.COPILOT_DEEPSEEK_COACH_MAX_OUTPUT_TOKENS || 512,
 );
 const REALTIME_MODEL = process.env.COPILOT_REALTIME_COACH_MODEL || 'gpt-realtime-2.1-mini';
-const TERRA_MODEL = process.env.COPILOT_COACH_MODEL || 'gpt-5.6-terra';
+// Follow whatever the app actually ships as the coach, so `npm run eval:coach`
+// always scores production. Set COPILOT_COACH_MODEL to A/B another model
+// against the same ten cases (that is how Luna won the seat from Terra).
+const COACH_MODEL = MODEL_CONFIG.coach;
 const DEEPSEEK_MODEL = process.env.COPILOT_DEEPSEEK_COACH_MODEL || 'deepseek-v4-flash';
 
 type ReasoningEffort = 'minimal' | 'low';
@@ -514,8 +521,8 @@ function scoreCase(
 }
 
 class TerraProvider implements Provider {
-  name = 'Terra Responses';
-  model = TERRA_MODEL;
+  name = 'Responses API';
+  model = COACH_MODEL;
   available = Boolean(process.env.OPENAI_API_KEY?.trim());
   skipReason = this.available ? undefined : 'OPENAI_API_KEY not configured';
 
@@ -852,7 +859,10 @@ function providerSummary(result: ProviderResult): Record<string, string | number
     'p50 ms': percentile(latencies, 0.5),
     'p95 ms': percentile(latencies, 0.95),
     'TTFT p50': ttfts.length ? percentile(ttfts, 0.5) : 'n/a',
-    '<4s': percent(result.cases.filter((item) => item.withinDeadline).length, total),
+    [`<${ADVICE_DEADLINE_MS / 1000}s`]: percent(
+      result.cases.filter((item) => item.withinDeadline).length,
+      total,
+    ),
   };
 }
 
