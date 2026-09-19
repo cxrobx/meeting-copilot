@@ -14,6 +14,7 @@ import { cleanupOldSessions } from './session/cleanup.js';
 import { setSharingEnabled, isSharingEnabled, appendTranscript } from './session/shared.js';
 import { getSettings, updateSettings } from './settings.js';
 import { scanProjects } from './project/index.js';
+import { suggestProjects } from './project/match.js';
 import {
   loadContextConfig,
   saveContextConfig,
@@ -258,6 +259,14 @@ export function createRoutes(ctx: RouteContext): Router {
   router.get('/projects', (_req, res) => {
     const projects = scanProjects();
     res.json({ projects });
+  });
+
+  // Which project is this meeting about? Local string matching only — no model
+  // and no network, so the title (which carries client and attendee names)
+  // never leaves the machine. See project/match.ts for why.
+  router.get('/projects/suggest', (req, res) => {
+    const q = typeof req.query.q === 'string' ? req.query.q : '';
+    res.json({ suggestions: suggestProjects(q, scanProjects()) });
   });
 
   // Upcoming meetings from cxmail's invite database (read-only, local).

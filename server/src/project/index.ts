@@ -8,12 +8,19 @@ const execFileAsync = promisify(execFile);
 
 const PROJECTS_DIR = join(homedir(), 'Projects');
 const XCODE_DIR = join(PROJECTS_DIR, 'xcode');
+// Client engagements live OUTSIDE ~/Projects. Leaving this out meant the start
+// form could not offer globex / acme / impact at all — and 5 of the 10 recorded
+// sessions were Globex meetings, so half the real meeting history had no project
+// to attach. Added 2026-09-19.
+const CLIENTS_DIR = join(homedir(), 'clients');
 const BRIEF_MAX_CHARS = 4000;
+
+export type ProjectCategory = 'project' | 'xcode' | 'client';
 
 export interface ProjectInfo {
   name: string;
   path: string;
-  category: 'project' | 'xcode';
+  category: ProjectCategory;
 }
 
 export interface ProjectContext {
@@ -23,40 +30,41 @@ export interface ProjectContext {
   fileTree: string;
 }
 
+/**
+ * Every immediate subdirectory of `dir` that carries a CLAUDE.md, which is what
+ * marks a directory as a real project rather than scratch space.
+ */
+function scanRoot(
+  dir: string,
+  category: ProjectCategory,
+  skip: (name: string) => boolean = () => false,
+): ProjectInfo[] {
+  if (!existsSync(dir)) return [];
+  try {
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !skip(entry.name))
+      .map((entry) => ({ name: entry.name, path: join(dir, entry.name), category }))
+      .filter((info) => existsSync(join(info.path, 'CLAUDE.md')));
+  } catch {
+    return []; // Best effort — an unreadable root must not break the others.
+  }
+}
+
 export function scanProjects(): ProjectInfo[] {
-  const projects: ProjectInfo[] = [];
+  const found = [
+    ...scanRoot(PROJECTS_DIR, 'project', (name) => name === 'xcode'),
+    ...scanRoot(XCODE_DIR, 'xcode'),
+    ...scanRoot(CLIENTS_DIR, 'client'),
+  ];
 
-  // Scan ~/Projects/
-  if (existsSync(PROJECTS_DIR)) {
-    try {
-      for (const entry of readdirSync(PROJECTS_DIR, { withFileTypes: true })) {
-        if (!entry.isDirectory() || entry.name === 'xcode') continue;
-        const dirPath = join(PROJECTS_DIR, entry.name);
-        if (existsSync(join(dirPath, 'CLAUDE.md'))) {
-          projects.push({ name: entry.name, path: dirPath, category: 'project' });
-        }
-      }
-    } catch {
-      // Best effort
-    }
+  // Dedupe by path: a symlinked or nested root could otherwise list one project
+  // twice, and the picker would show two identical-looking rows.
+  const byPath = new Map<string, ProjectInfo>();
+  for (const info of found) {
+    if (!byPath.has(info.path)) byPath.set(info.path, info);
   }
 
-  // Scan ~/Projects/xcode/
-  if (existsSync(XCODE_DIR)) {
-    try {
-      for (const entry of readdirSync(XCODE_DIR, { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue;
-        const dirPath = join(XCODE_DIR, entry.name);
-        if (existsSync(join(dirPath, 'CLAUDE.md'))) {
-          projects.push({ name: entry.name, path: dirPath, category: 'xcode' });
-        }
-      }
-    } catch {
-      // Best effort
-    }
-  }
-
-  return projects.sort((a, b) => a.name.localeCompare(b.name));
+  return [...byPath.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export async function loadProjectContext(name: string): Promise<ProjectContext | null> {
