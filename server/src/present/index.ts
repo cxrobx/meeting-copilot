@@ -2946,8 +2946,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
     // raw / extracting / empty / error — all show the textarea.
     var readonly = agendaState.kind === 'extracting' ? ' readonly' : '';
     var value = agendaRawSnapshot || '';
-    var textarea = '<textarea id="startAgenda" rows="5" placeholder="Confirm Q1 hiring plan&#10;Review campaign results&#10;Or paste rough notes and click Build agenda" oninput="onAgendaTextareaInput()"' + readonly + '>' + escapeHtml(value) + '</textarea>';
-    var helper = '<div class="agenda-helper">One item per line — or paste rough notes and let it build the agenda for you.</div>';
+    var textarea = '<textarea id="startAgenda" rows="5" placeholder="Paste rough notes and click Build agenda&#10;&#10;…or type one agenda item per line" oninput="onAgendaTextareaInput()"' + readonly + '>' + escapeHtml(value) + '</textarea>';
+    var helper = '<div class="agenda-helper">Rough notes are fine — it turns them into tracked agenda items. Or type one item per line.</div>';
 
     var buttonLabel, disabled = '';
     if (agendaState.kind === 'extracting') {
