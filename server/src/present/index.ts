@@ -1392,7 +1392,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     border: 1px solid var(--gb-surface2);
     border-radius: 5px;
     background: var(--gb-surface1);
-    box-shadow: 0 6px 18px rgb(0 0 0 / 0.28);
+    box-shadow: 0 6px 18px rgb(var(--shadow-color) / 0.28);
   }
   .proj-menu[hidden] { display: none; }
   .proj-opt {
