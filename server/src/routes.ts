@@ -223,6 +223,7 @@ export function createRoutes(ctx: RouteContext): Router {
     if (body.monitorDefaults && typeof body.monitorDefaults === 'object') partial.monitorDefaults = body.monitorDefaults;
     if (typeof body.retentionDays === 'number') partial.retentionDays = body.retentionDays;
     if (typeof body.summaryAutoWrite === 'boolean') partial.summaryAutoWrite = body.summaryAutoWrite;
+    if (typeof body.matchVaultAppearance === 'boolean') partial.matchVaultAppearance = body.matchVaultAppearance;
 
     if (Object.keys(partial).length > 0) {
       const next = updateSettings(partial);
@@ -245,7 +246,7 @@ export function createRoutes(ctx: RouteContext): Router {
 
     // Honest response: unknown/no-op fields are reported, not silently acked.
     for (const key of Object.keys(body)) {
-      if (!['evalCadenceMs', 'suggestionTtlMs', 'monitorDefaults', 'retentionDays', 'summaryAutoWrite', 'shareTranscript'].includes(key)) {
+      if (!['evalCadenceMs', 'suggestionTtlMs', 'monitorDefaults', 'retentionDays', 'summaryAutoWrite', 'matchVaultAppearance', 'shareTranscript'].includes(key)) {
         ignored.push(key);
       }
     }

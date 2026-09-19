@@ -11,6 +11,7 @@ import { isOpenAiApiAvailable, openaiFastResearchStream } from '../api/openai.js
 import { isAnthropicApiAvailable, anthropicTriageJson } from '../api/anthropic.js';
 import { claudeSuggest } from '../claude-cli.js';
 import { buildSignalRegexSources, QUESTION_STARTS } from './signals.js';
+import { applyVaultLook, getVaultLook } from './vault-look.js';
 
 // ─── Highlight-to-ask prompts ───────────────────────────────────────────────
 const ASK_SYSTEM: Record<string, string> = {
@@ -107,8 +108,21 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
   registry.on('action.status', onActionStatus);
 
   // ─── GET /present — HTML dashboard ──────────────────────────────────
-  router.get('/present', (_req, res) => {
-    res.type('html').send(PRESENT_HTML);
+  // The vault palette is spliced in before the page is sent, so the dashboard
+  // arrives already in the vault's colours (see present/vault-look.ts). No-store
+  // because the palette can change between loads and WKWebView caches happily.
+  router.get('/present', async (_req, res) => {
+    const look = await getVaultLook();
+    res.set('Cache-Control', 'no-store');
+    res.type('html').send(applyVaultLook(PRESENT_HTML, look));
+  });
+
+  // ─── GET /present/vault-look — the live palette ──────────────────────
+  // The page re-takes this on reconnect and on becoming visible again, so
+  // changing the Obsidian theme mid-meeting reaches an open dashboard.
+  router.get('/present/vault-look', async (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json(await getVaultLook());
   });
 
   // ─── GET /mock — design exploration page (dev only, static data) ─────
@@ -474,12 +488,20 @@ const PRESENT_HTML = `<!DOCTYPE html>
   // Applied before first paint so a light-theme user never sees a dark flash.
   // Inline and dependency-free for that reason, and placed after the two hljs
   // stylesheets so it can disable the one that doesn't match.
+  //
+  // When the server has dressed the page in the vault's palette it has already
+  // written the vault's mode onto <html>; the stored preference does not get to
+  // override it, or a cream dashboard would load with the dark hljs sheet.
   (function () {
-    var t = 'dark';
-    try {
-      var stored = localStorage.getItem('mc-theme');
-      if (stored === 'light' || stored === 'dark') t = stored;
-    } catch (e) { /* private mode — keep the dark default */ }
+    var root = document.documentElement;
+    var vault = root.classList.contains('vault-look');
+    var t = vault ? root.getAttribute('data-theme') : 'dark';
+    if (!vault) {
+      try {
+        var stored = localStorage.getItem('mc-theme');
+        if (stored === 'light' || stored === 'dark') t = stored;
+      } catch (e) { /* private mode — keep the dark default */ }
+    }
     document.documentElement.setAttribute('data-theme', t);
     var light = document.getElementById('hljsLight');
     var dark = document.getElementById('hljsDark');
@@ -529,6 +551,10 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
     --accent:       10 132 255;
     --accent-hover:  8 106 204;
+    /* Text drawn ON an accent fill. White on both family themes; the vault look
+       recomputes it, because a vault's accent is only held to 3:1 on its ground
+       and need not carry white text. */
+    --accent-ink:  255 255 255;
 
     --success: 143 179 136;
     --error:   212 118 106;
@@ -556,6 +582,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
     --accent:       10 132 255;
     --accent-hover:  8 106 204;
+    --accent-ink:  255 255 255;
 
     --success: 125 155 118;
     --error:   196 92 74;
@@ -712,7 +739,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     color: white;
   }
   .state-pill.idle { background: var(--gb-overlay2); }
-  .state-pill.live { background: var(--gb-blue); }
+  .state-pill.live { background: var(--gb-blue); color: rgb(var(--accent-ink)); }
   .state-pill.priming, .state-pill.ending {
     background: var(--accent-soft);
     color: rgb(var(--accent));
@@ -819,9 +846,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   /* Primary affirmative action. Blue (accent), not sage: the family spends
      accent on the thing it wants clicked and keeps --success for STATE. */
-  .btn-green { background: rgb(var(--accent)); color: white; }
+  .btn-green { background: rgb(var(--accent)); color: rgb(var(--accent-ink)); }
   .btn-red { background: var(--gb-red); color: white; }
-  .btn-blue { background: var(--gb-blue); color: white; }
+  .btn-blue { background: var(--gb-blue); color: rgb(var(--accent-ink)); }
   .btn-ghost { background: transparent; border: 1px solid var(--gb-surface2); color: var(--gb-subtext0); }
   .btn-ghost:hover { background: var(--gb-surface1); }
   .btn-ghost-red { background: transparent; border: 1px solid var(--gb-surface2); color: var(--gb-red); }
@@ -1837,7 +1864,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
   /* ─── Mockup ASCII/HTML toggle ─────────────────────────────── */
   .mockup-toggle { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
   .mockup-toggle .btn { font-size: 11px; padding: 3px 10px; }
-  .mockup-toggle .btn.active { background: var(--gb-blue); color: #fff; }
+  .mockup-toggle .btn.active { background: var(--gb-blue); color: rgb(var(--accent-ink)); }
   .mockup-pane { margin: 0; }
   .mockup-frame {
     width: 100%;
@@ -5238,26 +5265,96 @@ const PRESENT_HTML = `<!DOCTYPE html>
   // data-theme on <html> drives every token; the pre-paint script in <head>
   // has already applied the stored choice, so this only has to keep the
   // button label in sync and write changes back.
+  function wearingVault() {
+    return document.documentElement.classList.contains('vault-look');
+  }
+
+  // Syntax highlighting is a separate stylesheet pair — swap which is live.
+  function syncHljs(mode) {
+    var light = document.getElementById('hljsLight');
+    var dark = document.getElementById('hljsDark');
+    if (light) light.disabled = (mode !== 'light');
+    if (dark) dark.disabled = (mode === 'light');
+  }
+
   function syncThemeBtn() {
     var btn = document.getElementById('themeBtn');
     if (!btn) return;
+    var vault = wearingVault();
     var dark = document.documentElement.getAttribute('data-theme') !== 'light';
     // Label shows the destination, not the current state.
-    btn.textContent = dark ? 'Light' : 'Dark';
+    btn.textContent = vault ? 'Vault' : (dark ? 'Light' : 'Dark');
+    btn.disabled = vault;
+    btn.title = vault
+      ? 'Following the Obsidian vault\\u2019s appearance \\u2014 turn off Match vault appearance in Settings to choose'
+      : 'Switch between light and dark';
   }
 
   window.toggleTheme = function() {
+    // While the vault drives the palette there is nothing to toggle; the switch
+    // for that lives in Settings, as it does in Onyx.
+    if (wearingVault()) return;
     var next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
     document.documentElement.setAttribute('data-theme', next);
-    // Syntax highlighting is a separate stylesheet pair — swap which is live.
-    var light = document.getElementById('hljsLight');
-    var dark = document.getElementById('hljsDark');
-    if (light) light.disabled = (next !== 'light');
-    if (dark) dark.disabled = (next === 'light');
+    syncHljs(next);
     try { localStorage.setItem('mc-theme', next); } catch (e) { /* non-fatal */ }
     syncThemeBtn();
   };
   syncThemeBtn();
+
+  // ─── Vault look ───────────────────────────────────────────
+  // The server dressed this page at first paint. This only has to notice a
+  // LATER change — the Obsidian theme flipped, or Match vault appearance was
+  // switched — and swap the palette in place, keyed on the revision so an
+  // unchanged look costs nothing. Called on (re)connect and on regaining
+  // visibility; never on a timer, because nothing here changes on its own.
+  function applyVaultLook(look) {
+    var root = document.documentElement;
+    var style = document.getElementById('mcVaultLook');
+    var meta = document.querySelector('meta[name="mc-vault-revision"]');
+    if (look && look.css && look.mode) {
+      if (!style) {
+        style = document.createElement('style');
+        style.id = 'mcVaultLook';
+        document.head.appendChild(style);
+      }
+      style.textContent = look.css;
+      root.classList.add('vault-look');
+      root.setAttribute('data-theme', look.mode);
+      syncHljs(look.mode);
+    } else {
+      if (style) style.remove();
+      root.classList.remove('vault-look');
+      // Back to the remembered preference, or the dark default.
+      var stored = 'dark';
+      try {
+        var saved = localStorage.getItem('mc-theme');
+        if (saved === 'light' || saved === 'dark') stored = saved;
+      } catch (e) { /* private mode */ }
+      root.setAttribute('data-theme', stored);
+      syncHljs(stored);
+    }
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.name = 'mc-vault-revision';
+      document.head.appendChild(meta);
+    }
+    meta.content = (look && look.revision) || '';
+    syncThemeBtn();
+  }
+
+  window.refreshVaultLook = function() {
+    return fetch('/present/vault-look').then(function(r) { return r.json(); }).then(function(look) {
+      var meta = document.querySelector('meta[name="mc-vault-revision"]');
+      var current = meta ? meta.content : '';
+      if (((look && look.revision) || '') === current) return;
+      applyVaultLook(look);
+    }).catch(function() { /* server unreachable — keep the palette we have */ });
+  };
+
+  document.addEventListener('visibilitychange', function() {
+    if (!document.hidden) window.refreshVaultLook();
+  });
 
   // ─── Stage View ───────────────────────────────────────────
   // Full-screen presentation mode: agenda dots, a large teleprompter, and
@@ -5844,6 +5941,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
           '<label class="settings-check" style="margin-top:4px"><input type="checkbox" id="setFactcheck"' + (s.monitorDefaults && s.monitorDefaults.factcheck ? ' checked' : '') + '> Fact-check (extra cost while on)</label></div>' +
         '<div class="settings-field"><label>Summaries</label>' +
           '<label class="settings-check"><input type="checkbox" id="setAutoWrite"' + (s.summaryAutoWrite ? ' checked' : '') + '> Auto-save summaries to ~/Documents/CX/Meetings</label></div>' +
+        '<div class="settings-field"><label>Appearance</label>' +
+          '<label class="settings-check"><input type="checkbox" id="setVaultLook"' + (s.matchVaultAppearance ? ' checked' : '') + '> Match vault appearance (the Obsidian theme, via Onyx)</label>' +
+          '<div class="settings-hint">Wears the palette Onyx derives from your vault\\u2019s theme. Off, or with Onyx not running and nothing cached, the dashboard uses its own light/dark themes.</div></div>' +
         '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">' +
           '<button class="btn btn-green" id="settingsSave">Save</button>' +
         '</div>';
@@ -5857,13 +5957,19 @@ const PRESENT_HTML = `<!DOCTYPE html>
             factcheck: document.getElementById('setFactcheck').checked,
           },
           summaryAutoWrite: document.getElementById('setAutoWrite').checked,
+          matchVaultAppearance: document.getElementById('setVaultLook').checked,
         };
         fetch('/settings', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         }).then(function(r) { return r.json(); }).then(function(res) {
-          if (res && res.success) { showToast('Settings saved'); close(); }
+          if (res && res.success) {
+            // Appearance is the one setting you can see change — apply it now
+            // rather than on the next load.
+            if (window.refreshVaultLook) window.refreshVaultLook();
+            showToast('Settings saved'); close();
+          }
           else { showToast('Could not save settings', { error: true }); }
         }).catch(function() {
           showToast('Could not save settings \\u2014 server unreachable', { error: true });
@@ -6112,6 +6218,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
     ws.onopen = function() {
       wsRetries = 0;
       statusDot.className = 'status-dot connected';
+      // A reconnect means the server may have restarted, or been away long
+      // enough for the vault's theme to have moved. Cheap when nothing changed.
+      if (window.refreshVaultLook) window.refreshVaultLook();
       // Enable start button if on idle screen (respects agenda extraction state)
       refreshStartButton();
       var connMsg = idleOverlay.querySelector('p[style*="red"]');

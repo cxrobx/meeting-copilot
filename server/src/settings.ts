@@ -20,6 +20,12 @@ export interface CopilotSettings {
   retentionDays: number;
   /** Auto-write meeting summaries to ~/Documents/CX/Meetings. */
   summaryAutoWrite: boolean;
+  /**
+   * Wear the Obsidian vault's appearance, as Onyx does — the palette Onyx
+   * derives from the vault's theme, taken from its /api/vault-look. Off, or with
+   * no palette to be had, the dashboard wears its own CX family tokens.
+   */
+  matchVaultAppearance: boolean;
 }
 
 // Computed per call so tests can point COPILOT_SETTINGS_DIR at a temp dir.
@@ -54,6 +60,7 @@ function defaults(): CopilotSettings {
     monitorDefaults: { coach: true, factcheck: false },
     retentionDays: envNumber('RETENTION_DAYS') ?? 90,
     summaryAutoWrite: true,
+    matchVaultAppearance: true,
   };
 }
 
@@ -80,6 +87,8 @@ function sanitize(raw: Partial<CopilotSettings>): CopilotSettings {
         ? clamp(Math.round(raw.retentionDays), CLAMPS.retentionDays)
         : base.retentionDays,
     summaryAutoWrite: typeof raw.summaryAutoWrite === 'boolean' ? raw.summaryAutoWrite : base.summaryAutoWrite,
+    matchVaultAppearance:
+      typeof raw.matchVaultAppearance === 'boolean' ? raw.matchVaultAppearance : base.matchVaultAppearance,
   };
   return merged;
 }
