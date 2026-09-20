@@ -9,6 +9,12 @@ struct WebDashboardView: View {
     var body: some View {
         WebViewWrapper(sessionManager: sessionManager)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The panel is borderless (.fullSizeContentView), but a hosting
+            // view still insets its content by the titlebar's safe area —
+            // which leaves exactly the 19pt band of dark window background
+            // the borderless panel exists to get rid of. The page paints that
+            // strip itself and keeps its own controls clear of it.
+            .ignoresSafeArea()
     }
 }
 
@@ -39,6 +45,12 @@ private struct WebViewWrapper: NSViewRepresentable {
                 },
                 stopSession: function() {
                   window.webkit.messageHandlers.\(bridgeMessageName).postMessage({ action: 'stopSession' });
+                },
+                setAppearance: function(theme) {
+                  window.webkit.messageHandlers.\(bridgeMessageName).postMessage({
+                    action: 'appearance',
+                    theme: theme === 'light' ? 'light' : 'dark'
+                  });
                 },
                 pickPath: function(options) {
                   options = options || {};
@@ -219,6 +231,13 @@ private struct WebViewWrapper: NSViewRepresentable {
                     )
                 case "stopSession":
                     self.sessionManager.stopSessionFromWeb()
+                case "appearance":
+                    // The panel has no titlebar of its own to speak of, but its
+                    // appearance still drives the traffic lights, sheets and
+                    // native scrollers — keep them on the page's palette.
+                    let light = (body["theme"] as? String) == "light"
+                    self.webView?.window?.appearance =
+                        NSAppearance(named: light ? .aqua : .darkAqua)
                 case "pickPath":
                     let requestId = (body["requestId"] as? String) ?? ""
                     let kind = (body["kind"] as? String) ?? "folder"

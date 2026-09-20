@@ -43,7 +43,13 @@ final class FloatingPanelController {
 
         let panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: defaultSize),
-            styleMask: [.titled, .closable, .resizable, .utilityWindow],
+            // .fullSizeContentView puts the web dashboard under the titlebar so
+            // the page paints edge to edge — without it a transparent titlebar
+            // still reserves a 19pt strip that draws the window's own (dark)
+            // background above a cream page, which is the black band the app
+            // used to wear. The page clears that strip itself: see the
+            // `.native` header rules in server/src/present.
+            styleMask: [.titled, .closable, .resizable, .utilityWindow, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -52,11 +58,15 @@ final class FloatingPanelController {
         panel.isFloatingPanel = false
         panel.hidesOnDeactivate = false
         panel.titlebarAppearsTransparent = true
+        panel.titleVisibility = .hidden
         panel.title = "Meeting Copilot"
         panel.isMovableByWindowBackground = true
         panel.minSize = minSize
         panel.animationBehavior = .utilityWindow
         panel.isReleasedWhenClosed = false
+        // Dark until the page says otherwise — the dashboard reports its theme
+        // (and the vault look's mode) through the bridge, so the traffic lights
+        // and any native chrome match the palette the page is actually wearing.
         panel.appearance = NSAppearance(named: .darkAqua)
         // Without .moveToActiveSpace, re-fronting a panel that lives on
         // another Space happens invisibly over there — the menubar toggle

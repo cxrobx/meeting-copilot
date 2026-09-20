@@ -507,6 +507,17 @@ const PRESENT_HTML = `<!DOCTYPE html>
     var dark = document.getElementById('hljsDark');
     if (light) light.disabled = (t !== 'light');
     if (dark) dark.disabled = (t === 'light');
+
+    // Inside the Meeting Copilot app the panel is borderless — a transparent,
+    // full-size-content titlebar, so this page owns every pixel including the
+    // 19pt strip the window still keeps for dragging and the traffic lights.
+    // The class (set here, at first paint, so the header never jumps) is what
+    // the .native rules below key off. Outside the app — a plain browser for
+    // debugging — nothing changes.
+    if (window.__copilotNativeBridge) {
+      root.classList.add('native');
+      try { window.__copilotNativeBridge.setAppearance(t); } catch (e) { /* older app build */ }
+    }
   })();
 <\/script>
 <style>
@@ -687,6 +698,16 @@ const PRESENT_HTML = `<!DOCTYPE html>
     background: var(--gb-base);
     z-index: 100;
     height: 50px;
+  }
+
+  /* Borderless in the app: the panel's titlebar is transparent and the page
+     paints under it (FloatingPanelController). That top 19pt strip still
+     hit-tests to the window — it is how the panel is dragged, and the traffic
+     lights sit in it out to x=46 — so the header grows to put its own controls
+     below the strip and starts after the lights. */
+  .native .header {
+    height: 62px;
+    padding: 26px 20px 10px 58px;
   }
 
   .header-left {
@@ -2524,6 +2545,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
     padding: 18px 26px;
     flex-shrink: 0;
   }
+  /* Stage covers the whole panel, traffic lights included — same clearance. */
+  .native .stage-top { padding: 26px 26px 18px 58px; }
   .stage-rec {
     width: 9px; height: 9px;
     border-radius: 50%;
@@ -5502,6 +5525,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
       : 'Switch between light and dark';
   }
 
+  // Borderless panel: nothing native is left to repaint but the traffic lights,
+  // sheets and scrollers — push the page's mode at them whenever it changes.
+  function syncNativeAppearance(mode) {
+    if (!hasNativeBridge() || !window.__copilotNativeBridge.setAppearance) return;
+    try { window.__copilotNativeBridge.setAppearance(mode); } catch (e) { /* non-fatal */ }
+  }
+
   window.toggleTheme = function() {
     // While the vault drives the palette there is nothing to toggle; the switch
     // for that lives in Settings, as it does in Onyx.
@@ -5509,6 +5539,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     var next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
     document.documentElement.setAttribute('data-theme', next);
     syncHljs(next);
+    syncNativeAppearance(next);
     try { localStorage.setItem('mc-theme', next); } catch (e) { /* non-fatal */ }
     syncThemeBtn();
   };
@@ -5534,6 +5565,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       root.classList.add('vault-look');
       root.setAttribute('data-theme', look.mode);
       syncHljs(look.mode);
+      syncNativeAppearance(look.mode);
     } else {
       if (style) style.remove();
       root.classList.remove('vault-look');
@@ -5545,6 +5577,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       } catch (e) { /* private mode */ }
       root.setAttribute('data-theme', stored);
       syncHljs(stored);
+      syncNativeAppearance(stored);
     }
     if (!meta) {
       meta = document.createElement('meta');
