@@ -9,6 +9,7 @@ import {
   unfoldIcs,
   cleanTitle,
   cleanDescription,
+  icsDescription,
   resolveEventTime,
 } from '../calendar/cxmail.js';
 
@@ -178,6 +179,54 @@ describe('ICS helpers', () => {
     // cxmail sometimes stores only the first physical ICS line of the marker.
     expect(cleanDescription('-::~:~::~:~:~:~:~:~:~:~:~:~')).toBe('');
     expect(cleanDescription('Real agenda\n-::~:~::~:~')).toBe('Real agenda');
+  });
+
+  // The 2026-09-21 Winslow invite, byte for byte: a Blockit footer plus the
+  // Google Meet block, folded mid-URL. The start form showed the first
+  // physical line raw — literal "\n" and a cut-off <a> tag.
+  const BLOCKIT_ICS = [
+    'BEGIN:VEVENT',
+    'DESCRIPTION:\\n____________________\\nSent via <a href="https://www.blockit.c',
+    ' om">Blockit AI</a> ⚡️\\n\\n-::~:~::~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:',
+    ' ~:~:~:~:~:~:~:~:~:~:~:~:~:~:~::~:~::-\\nJoin with Google Meet: https://meet.',
+    ' google.com/xyz-abcd-efg\\nOr dial: (US) +1 555-010-0199 PIN: 000000000#\\n',
+    ' \\nPlease do not edit this section.\\n-::~:~::~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~',
+    ' :~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~::~:~::-',
+    'LOCATION:https://meet.google.com/xyz-abcd-efg',
+    'END:VEVENT',
+  ].join('\r\n');
+
+  it('icsDescription reads the full folded property, not the first line', () => {
+    const raw = icsDescription(unfoldIcs(BLOCKIT_ICS));
+    expect(raw).toContain('Blockit AI</a>');
+    expect(raw).toContain('Please do not edit this section.');
+  });
+
+  it('a scheduling-bot invite with only boilerplate cleans to empty', () => {
+    expect(cleanDescription(icsDescription(unfoldIcs(BLOCKIT_ICS))!)).toBe('');
+    // The truncated first line cxmail stores in its column cleans to empty too.
+    expect(cleanDescription('\\n____________________\\nSent via <a href="https://www.blockit.c')).toBe('');
+  });
+
+  it('cleanDescription unescapes ICS text and keeps a real agenda', () => {
+    const desc = 'Agenda:\\n- pilot scope\\, timeline\\n- pricing\\; terms\\n\\n-::~:~::-\\nJoin with Google Meet\\n-::~:~::-';
+    expect(cleanDescription(desc)).toBe('Agenda:\n- pilot scope, timeline\n- pricing; terms');
+  });
+
+  it('cleanDescription turns HTML into text and keeps link labels', () => {
+    const html = '<p>Topics:</p><ul><li>Q3 <b>roadmap</b></li><li>See <a href="https://x.co/doc">the brief</a></li></ul>&amp; more';
+    expect(cleanDescription(html)).toBe('Topics:\n- Q3 roadmap\n- See the brief\n& more');
+  });
+
+  it('keeps an agenda line that merely mentions a scheduling tool', () => {
+    expect(cleanDescription('Sent via Blockit: discuss how we book demos')).toBe(
+      'Sent via Blockit: discuss how we book demos',
+    );
+  });
+
+  it('icsDescription ignores a VALARM reminder when the event has no description', () => {
+    const ics = 'BEGIN:VEVENT\r\nSUMMARY:x\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:This is an event reminder\r\nEND:VALARM\r\nEND:VEVENT';
+    expect(icsDescription(unfoldIcs(ics))).toBeNull();
   });
 
   it('resolveEventTime handles UTC, TZID, and garbage', () => {

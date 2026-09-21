@@ -24,6 +24,8 @@ import {
 } from './context/index.js';
 import { extractAgendaItemsFromNotes } from './intelligence/agenda.js';
 import { getUpcomingMeetings } from './calendar/cxmail.js';
+import { prepRequestFromBody } from './prep/gather.js';
+import { runMeetingPrep } from './prep/agent.js';
 import type { ContextItemConfig } from './context/index.js';
 
 interface RouteContext {
@@ -341,6 +343,51 @@ export function createRoutes(ctx: RouteContext): Router {
       const message = err instanceof Error ? err.message : String(err);
       console.error('[Agenda] Extraction failed:', message);
       res.status(502).json({ error: 'Extraction failed — try again or edit manually' });
+    }
+  });
+
+  // Pre-meeting prep: the user's own records (email, past sessions, vault
+  // notes) + a web-research agent → a brief and a suggested agenda. User-
+  // initiated from the start form; runs on the subscription CLI. Streams
+  // NDJSON so the form can show what the agent is doing:
+  //   {"type":"progress","message":"Searching: …"} … then
+  //   {"type":"result", brief, agenda, sources, mode, stats} or {"type":"error", message}
+  router.post('/meeting/prep', async (req, res) => {
+    const request = prepRequestFromBody(req.body);
+    if (!request) {
+      res.status(400).json({ error: 'Add a title, attendees or notes to prep from' });
+      return;
+    }
+    res.status(200);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.flushHeaders();
+    const send = (event: Record<string, unknown>) => {
+      if (!res.writableEnded) res.write(JSON.stringify(event) + '\n');
+    };
+    // `res` close, not `req` close: the JSON body is already consumed, so
+    // `req` has closed by now. A closed response before we end it = the user
+    // cancelled or navigated away — stop the agent.
+    const ctl = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) ctl.abort();
+    });
+    try {
+      const result = await runMeetingPrep(request, {
+        signal: ctl.signal,
+        aboutMe: getSettings().aboutMe,
+        onProgress: (message) => send({ type: 'progress', message }),
+      });
+      console.log(`[Prep] ${result.mode} prep: ${result.agenda.length} items, ${result.sources.length} sources`);
+      send({ type: 'result', ...result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message !== 'Aborted') {
+        console.error('[Prep] failed:', message);
+        send({ type: 'error', message });
+      }
+    } finally {
+      if (!res.writableEnded) res.end();
     }
   });
 

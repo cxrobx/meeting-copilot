@@ -160,7 +160,9 @@ export function getUpcomingMeetings(opts: UpcomingOptions = {}): UpcomingMeeting
       }
       return null;
     };
-    const description = pick((r) => r.description) || '';
+    // cxmail's `description` column holds only the first physical ICS line,
+    // still escaped — read the full property out of the raw invite first.
+    const description = pick((r) => icsDescription(unfoldIcs(r.raw_ics || ''))) || pick((r) => r.description) || '';
     const location = pick((r) => r.location);
     const attendees: MeetingAttendee[] = [];
     const seenEmails = new Set<string>();
@@ -305,8 +307,62 @@ export function cleanTitle(summary: string | null): string {
   return cleaned || 'Untitled meeting';
 }
 
-/** Strip Google Calendar's "-::~:~:: ... ::~:~::-" boilerplate block. */
+/**
+ * The event's own DESCRIPTION from an unfolded ICS, still ICS-escaped (the
+ * same form as cxmail's column — cleanDescription unescapes both). VALARM
+ * blocks are dropped first: their DESCRIPTION ("This is an event reminder")
+ * would otherwise stand in for an event that has none.
+ */
+export function icsDescription(unfoldedIcs: string): string | null {
+  const withoutAlarms = unfoldedIcs.replace(/^BEGIN:VALARM[\s\S]*?^END:VALARM\r?$/gm, '');
+  const m = withoutAlarms.match(/^DESCRIPTION(?:;[^:\r\n]*)?:(.*)$/m);
+  if (!m) return null;
+  const value = m[1].replace(/\r$/, '').trim();
+  return value || null;
+}
+
+/** RFC 5545 TEXT unescaping: \\n, \\, \\; and \\\\. */
+export function unescapeIcsText(text: string): string {
+  return text.replace(/\\([nN,;\\])/g, (_, c: string) => (c === 'n' || c === 'N' ? '\n' : c));
+}
+
+/** Invites are often HTML (Google, Outlook, scheduling bots). Keep the words. */
+function htmlToText(text: string): string {
+  // `$` too: cxmail's truncated column can end inside an unclosed tag.
+  if (!/<[a-z!/][^>]*(>|$)/i.test(text)) return text;
+  return text
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, '\n')
+    .replace(/<li[^>]*>/gi, '- ')
+    .replace(/<a\b[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href: string, inner: string) => {
+      const label = inner.replace(/<[^>]+>/g, '').trim();
+      return label || href;
+    })
+    .replace(/<[^>]+>/g, '')
+    .replace(/<[a-z!/][^>]*$/i, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+// Footers scheduling tools append to every invite they send. Deliberately
+// narrow: a whole line must match, so a real agenda line mentioning a tool
+// survives.
+const SCHEDULER_FOOTER_LINES = [
+  /^_{5,}$/,                                                      // "____________________" rule
+  /^(sent|scheduled|booked|powered) (via|with|by|using)( [\w .-]{1,40})?[^\w]*$/i, // "Sent via Blockit AI ⚡️"
+];
+
+/**
+ * Turn a raw invite description into readable notes: unescape ICS text, drop
+ * HTML, strip Google Calendar's "-::~:~:: ... ::~:~::-" block and scheduling
+ * tool footers. An invite that is only boilerplate comes back empty.
+ */
 export function cleanDescription(description: string): string {
+  description = htmlToText(unescapeIcsText(description));
   const marker = /-::~[:~]*::-/g;
   const markers = [...description.matchAll(marker)];
   let cleaned = description;
@@ -323,9 +379,12 @@ export function cleanDescription(description: string): string {
     .split('\n')
     .filter((line) => {
       const bare = line.replace(/\s/g, '');
-      return !(bare && /^[-:~]+$/.test(bare));
+      if (bare && /^[-:~]+$/.test(bare)) return false;
+      const trimmed = line.trim();
+      return !SCHEDULER_FOOTER_LINES.some((re) => re.test(trimmed));
     })
     .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
   return cleaned.length > 2000 ? cleaned.slice(0, 2000) + '…' : cleaned;
 }

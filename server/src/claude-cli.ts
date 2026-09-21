@@ -312,7 +312,14 @@ export async function claudeSuggest(
   systemPrompt: string,
   signal?: AbortSignal,
   allowedTools?: string[],
-  options?: { onDelta?: (text: string) => void; model?: string },
+  options?: {
+    onDelta?: (text: string) => void;
+    /** Each tool call the agent makes (e.g. WebSearch + its query), as it makes it. */
+    onToolUse?: (name: string, input: Record<string, unknown>) => void;
+    model?: string;
+    /** Tool-using calls default to 8 turns. */
+    maxTurns?: number;
+  },
 ): Promise<string> {
   const model = options?.model ?? MODEL_CONFIG.worker;
 
@@ -334,7 +341,7 @@ export async function claudeSuggest(
     }
   }
 
-  const maxTurns = allowedTools?.length ? '8' : '1';
+  const maxTurns = allowedTools?.length ? String(options?.maxTurns ?? 8) : '1';
 
   const args = [
     '--print',
@@ -444,6 +451,19 @@ export async function claudeSuggest(
           options?.onDelta?.(chunk);
         } catch {
           // Callback errors must not kill the stream
+        }
+        return;
+      }
+
+      // Completed assistant turns carry the tool calls the agent chose.
+      if (evt?.type === 'assistant' && Array.isArray(evt.message?.content) && options?.onToolUse) {
+        for (const block of evt.message.content) {
+          if (block?.type !== 'tool_use' || typeof block.name !== 'string') continue;
+          try {
+            options.onToolUse(block.name, block.input && typeof block.input === 'object' ? block.input : {});
+          } catch {
+            // Callback errors must not kill the stream
+          }
         }
         return;
       }

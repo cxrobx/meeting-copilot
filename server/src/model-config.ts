@@ -15,6 +15,8 @@ export const MODEL_CONFIG = {
   haiku: process.env.COPILOT_HAIKU_MODEL || 'claude-haiku-4-5-20251001',
   suggestion: process.env.COPILOT_SUGGEST_MODEL || process.env.COPILOT_SUGGESTION_MODEL || 'claude-sonnet-5',
   worker: process.env.COPILOT_WORKER_MODEL || 'claude-sonnet-5',
+  // Pre-meeting prep agent (prep/agent.ts) — web research on the subscription CLI.
+  prep: process.env.COPILOT_PREP_MODEL || 'claude-sonnet-5',
   review: process.env.COPILOT_REVIEW_MODEL || 'claude-opus-5',
 } as const;
 

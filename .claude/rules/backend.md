@@ -24,6 +24,7 @@ server/src/
 ├── persistent-claude.ts # Warm `claude` session pool for tool-less calls
 ├── settings.ts        # ~/.meeting-copilot/settings.json (cadence/TTL/monitors/retention)
 ├── calendar/          # Upcoming meetings read-only from cxmail's invite DB (start-form auto-fill)
+├── prep/              # "Prep this meeting": gather.ts (email/sessions/vault, no model) → agent.ts (web research)
 ├── transcription/     # Transcription providers (whisper/parakeet, deepgram, dedup, stitcher)
 ├── intelligence/      # Eval loop (triage→suggest), agenda, coach, factcheck, prompts
 ├── workers/           # Research, FastResearch, Summary, Analysis, Mockup, CodeGen, Review

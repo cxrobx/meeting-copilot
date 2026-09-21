@@ -26,6 +26,12 @@ export interface CopilotSettings {
    * no palette to be had, the dashboard wears its own CX family tokens.
    */
   matchVaultAppearance: boolean;
+  /**
+   * Who the user is, for meeting prep's "where do we overlap" research. Empty
+   * means the built-in profile in prep/agent.ts — kept empty by default so a
+   * save never freezes that default into settings.json.
+   */
+  aboutMe: string;
 }
 
 // Computed per call so tests can point COPILOT_SETTINGS_DIR at a temp dir.
@@ -35,6 +41,8 @@ function settingsDir(): string {
 function settingsPath(): string {
   return join(settingsDir(), 'settings.json');
 }
+
+const ABOUT_ME_MAX_CHARS = 2_000;
 
 const CLAMPS = {
   evalCadenceMs: { min: 10_000, max: 60_000 },
@@ -61,6 +69,7 @@ function defaults(): CopilotSettings {
     retentionDays: envNumber('RETENTION_DAYS') ?? 90,
     summaryAutoWrite: true,
     matchVaultAppearance: true,
+    aboutMe: '',
   };
 }
 
@@ -89,6 +98,7 @@ function sanitize(raw: Partial<CopilotSettings>): CopilotSettings {
     summaryAutoWrite: typeof raw.summaryAutoWrite === 'boolean' ? raw.summaryAutoWrite : base.summaryAutoWrite,
     matchVaultAppearance:
       typeof raw.matchVaultAppearance === 'boolean' ? raw.matchVaultAppearance : base.matchVaultAppearance,
+    aboutMe: typeof raw.aboutMe === 'string' ? raw.aboutMe.trim().slice(0, ABOUT_ME_MAX_CHARS) : base.aboutMe,
   };
   return merged;
 }

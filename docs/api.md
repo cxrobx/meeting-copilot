@@ -53,6 +53,7 @@
 | GET | `/sessions/:id/export?format=` | Export markdown/JSON |
 | DELETE | `/sessions/:id`, POST `/sessions/delete` | Delete session(s) |
 | POST | `/agenda/extract` | LLM agenda extraction from pasted notes |
+| POST | `/meeting/prep` | Pre-meeting prep: email/past-session/vault context + a web-research agent (subscription CLI) → brief + agenda. Body `{ title?, attendees?, notes?, meeting? }` (`meeting` = a `/calendar/upcoming` entry). Streams NDJSON: `{type:"progress",message}`… then `{type:"result",brief,agenda,sources,mode,stats}` or `{type:"error",message}`. Closing the response cancels the agent |
 | GET | `/present` | The dashboard (HTML) |
 | GET | `/present/actions` / `/present/transcript` / `/present/sessions` | Dashboard data (live or `?session=<id>` replay) |
 | GET | `/present/events` | SSE fallback (replay only; suggested/running/completed) |

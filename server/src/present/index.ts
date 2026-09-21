@@ -1249,6 +1249,60 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
   .agenda-edit-status.error { color: var(--gb-red); }
   .agenda-edit-status.empty { color: var(--gb-peach); }
+  /* Meeting prep: live agent progress + the resulting brief. */
+  .prep-progress {
+    margin-top: 6px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1.6;
+    color: var(--gb-subtext0);
+  }
+  .prep-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .prep-line:last-child { color: var(--gb-text); }
+  .prep-elapsed {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--gb-subtext0);
+    font-variant-numeric: tabular-nums;
+  }
+  .prep-brief {
+    margin-top: 10px;
+    border: 1px solid var(--gb-surface1);
+    border-radius: 8px;
+    background: var(--gb-mantle);
+    padding: 8px 12px;
+  }
+  .prep-brief summary {
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--gb-overlay2);
+  }
+  .prep-brief-meta { font-weight: 400; text-transform: none; letter-spacing: 0; margin-left: 6px; }
+  .prep-brief-body {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--gb-text);
+    max-height: 340px;
+    overflow-y: auto;
+    margin-top: 6px;
+  }
+  .prep-brief-body h3 {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--gb-subtext0);
+    margin: 10px 0 3px;
+  }
+  .prep-brief-body h3:first-child { margin-top: 2px; }
+  .prep-brief-body ul { margin: 0; padding-left: 16px; }
+  .prep-brief-body li { margin: 2px 0; }
+  .prep-brief-sources { font-size: 10px; line-height: 1.6; margin-top: 8px; color: var(--gb-subtext0); }
+  .prep-brief-sources a, .prep-brief-body a { color: var(--gb-blue); text-decoration: none; }
+  .prep-brief-sources a:hover, .prep-brief-body a:hover { text-decoration: underline; }
   .agenda-edit-spinner {
     display: inline-block;
     width: 10px;
@@ -2990,8 +3044,76 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
   function setAgendaState(next) {
     agendaState = next;
+    if (next.kind !== 'extracting') stopPrepTimer();
     renderAgendaEditor();
     refreshStartButton();
+  }
+
+  // Meeting prep (POST /meeting/prep): the calendar meeting the form was
+  // filled from (its attendees carry email addresses), the last result, and
+  // a 1s ticker for the elapsed counter while the agent works.
+  var appliedMeeting = null;
+  var prepResult = null;
+  var prepTimer = null;
+
+  function startPrepTimer(startedAt) {
+    stopPrepTimer();
+    prepTimer = setInterval(function() {
+      var el = document.getElementById('prepElapsed');
+      if (el) el.textContent = Math.round((Date.now() - startedAt) / 1000) + 's';
+    }, 1000);
+  }
+
+  function stopPrepTimer() {
+    if (prepTimer) { clearInterval(prepTimer); prepTimer = null; }
+  }
+
+  function escapeAttr(s) { return escapeHtml(String(s)).replace(/"/g, '&quot;'); }
+
+  function renderPrepBrief() {
+    var host = document.getElementById('prepBrief');
+    if (!host) return;
+    if (!prepResult || !prepResult.brief) { host.innerHTML = ''; return; }
+    var st = prepResult.stats || {};
+    var plural = function(n, w) { return (n || 0) + ' ' + w + (n === 1 ? '' : 's'); };
+    var meta = (prepResult.mode === 'web' ? 'researched' : 'from your records only — web research didn\u2019t finish') +
+      ' \u00b7 ' + plural(st.emails, 'email') + (st.pastMeetings ? ' \u00b7 ' + plural(st.pastMeetings, 'past meeting') : '') +
+      (st.vaultNotes ? ' \u00b7 ' + plural(st.vaultNotes, 'note') : '');
+    var sources = (prepResult.sources || []).filter(function(x) {
+      return x && typeof x.url === 'string' && /^https?:\\/\\//.test(x.url);
+    }).map(function(x) {
+      return '<a href="' + escapeAttr(x.url) + '" target="_blank" rel="noopener">' + escapeHtml(x.title || x.url) + '</a>';
+    }).join(' &middot; ');
+    host.innerHTML = '<details class="prep-brief" open>' +
+      '<summary>Prep brief<span class="prep-brief-meta">' + escapeHtml(meta) + '</span></summary>' +
+      '<div class="prep-brief-body">' + renderMarkdown(prepResult.brief) + '</div>' +
+      (sources ? '<div class="prep-brief-sources">Sources: ' + sources + '</div>' : '') +
+    '</details>';
+  }
+
+  // The server streams NDJSON — one JSON event per line.
+  function readNdjson(body, onEvent) {
+    var reader = body.getReader();
+    var decoder = new TextDecoder();
+    var buf = '';
+    function emit(line) {
+      line = line.trim();
+      if (!line) return;
+      var evt;
+      try { evt = JSON.parse(line); } catch (e) { return; }
+      onEvent(evt);
+    }
+    function pump() {
+      return reader.read().then(function(chunk) {
+        if (chunk.done) { emit(buf); return; }
+        buf += decoder.decode(chunk.value, { stream: true });
+        var lines = buf.split('\\n');
+        buf = lines.pop();
+        lines.forEach(emit);
+        return pump();
+      });
+    }
+    return pump();
   }
 
   function refreshStartButton() {
@@ -3046,16 +3168,23 @@ const PRESENT_HTML = `<!DOCTYPE html>
     // raw / extracting / empty / error — all show the textarea.
     var readonly = agendaState.kind === 'extracting' ? ' readonly' : '';
     var value = agendaRawSnapshot || '';
-    var textarea = '<textarea id="startAgenda" rows="5" placeholder="Paste rough notes and click Build agenda&#10;&#10;…or type one agenda item per line" oninput="onAgendaTextareaInput()"' + readonly + '>' + escapeHtml(value) + '</textarea>';
-    var helper = '<div class="agenda-helper">Rough notes are fine — it turns them into tracked agenda items. Or type one item per line.</div>';
+    var textarea = '<textarea id="startAgenda" rows="5" placeholder="Your notes or agenda items (optional)&#10;&#10;…then Prep this meeting, or type one item per line" oninput="onAgendaTextareaInput()"' + readonly + '>' + escapeHtml(value) + '</textarea>';
+    var helper = '<div class="agenda-helper">Prep reads your email with the attendees, researches them and their companies, and drafts a tracked agenda \u2014 anything you type here comes first.</div>';
 
-    var buttonLabel, disabled = '';
+    var buttonLabel, disabled = '', cancel = '', progress = '';
     if (agendaState.kind === 'extracting') {
-      buttonLabel = '<span class="agenda-edit-spinner"></span>Building agenda…';
+      buttonLabel = '<span class="agenda-edit-spinner"></span>' + (agendaState.prep ? 'Prepping\u2026' : 'Building agenda\u2026');
       disabled = ' disabled';
+      if (agendaState.prep) {
+        cancel = '<button type="button" class="btn btn-ghost" onclick="revertToRawAgenda()">Cancel</button>' +
+          '<span class="prep-elapsed" id="prepElapsed">' + Math.round((Date.now() - agendaState.startedAt) / 1000) + 's</span>';
+        var lines = (agendaState.lines || []).slice(-5);
+        progress = '<div class="prep-progress">' + lines.map(function(l) {
+          return '<div class="prep-line">' + escapeHtml(l) + '</div>';
+        }).join('') + '</div>';
+      }
     } else {
-      buttonLabel = 'Build agenda from notes';
-      if (!(agendaRawSnapshot && agendaRawSnapshot.trim())) disabled = ' disabled';
+      buttonLabel = 'Prep this meeting';
     }
 
     var status = '';
@@ -3067,9 +3196,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
     host.innerHTML = textarea + helper +
       '<div class="agenda-edit-actions">' +
-        '<button type="button" class="btn btn-ghost" id="extractAgendaBtn" onclick="extractAgendaFromNotes()"' + disabled + '>' + buttonLabel + '</button>' +
-        status +
-      '</div>';
+        '<button type="button" class="btn btn-ghost" id="extractAgendaBtn" onclick="prepMeeting()"' + disabled + '>' + buttonLabel + '</button>' +
+        cancel + status +
+      '</div>' + progress;
   }
 
   window.onAgendaTextareaInput = function() {
@@ -3077,11 +3206,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     // Only flip to 'raw' when we're exiting a terminal state. When already
     // 'raw' we just update the button's disabled flag without a full re-render
     // so focus and caret are preserved.
-    if (agendaState.kind === 'raw') {
-      var btn = document.getElementById('extractAgendaBtn');
-      if (btn) btn.disabled = !agendaRawSnapshot.trim();
-      return;
-    }
+    if (agendaState.kind === 'raw') return;
     if (agendaState.kind === 'empty' || agendaState.kind === 'error') {
       setAgendaState({ kind: 'raw' });
     }
@@ -3124,6 +3249,79 @@ const PRESENT_HTML = `<!DOCTYPE html>
       if (gen !== agendaExtractGen) return; // aborted or superseded
       if (err && err.name === 'AbortError') return;
       setAgendaState({ kind: 'error', message: 'Network error — is the server running?' });
+    });
+  };
+
+  // One click: the server gathers the user's email / past sessions / vault
+  // notes about these attendees, then an agent researches them on the web and
+  // drafts a brief + agenda. With nothing but notes to go on, this is just the
+  // notes extraction above.
+  window.prepMeeting = function() {
+    var notes = currentTextareaValue();
+    var title = ((document.getElementById('startTitle') || {}).value || '').trim();
+    var attendees = ((document.getElementById('startAttendees') || {}).value || '').trim();
+    if (!title && !attendees && !appliedMeeting) {
+      if (notes.trim()) { window.extractAgendaFromNotes(); return; }
+      agendaRawSnapshot = notes;
+      setAgendaState({ kind: 'error', message: 'Add a title or attendees \u2014 or pick a meeting above \u2014 so there is something to prep from.' });
+      return;
+    }
+    agendaRawSnapshot = notes;
+
+    if (agendaAbortController) {
+      try { agendaAbortController.abort(); } catch (e) {}
+    }
+    agendaAbortController = new AbortController();
+    var gen = ++agendaExtractGen;
+    var startedAt = Date.now();
+    var lines = ['Starting\u2026'];
+    var result = null, failure = null;
+
+    prepResult = null;
+    renderPrepBrief();
+    setAgendaState({ kind: 'extracting', prep: true, lines: lines, startedAt: startedAt });
+    startPrepTimer(startedAt);
+
+    fetch('/meeting/prep', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: title, attendees: attendees, notes: notes.trim(), meeting: appliedMeeting }),
+      signal: agendaAbortController.signal,
+    }).then(function(r) {
+      if (!r.ok || !r.body) {
+        return r.json().catch(function() { return {}; }).then(function(d) {
+          failure = d.error || ('Prep failed (' + r.status + ')');
+        });
+      }
+      return readNdjson(r.body, function(evt) {
+        if (gen !== agendaExtractGen) return;
+        if (evt.type === 'progress' && evt.message) {
+          lines = lines.concat([evt.message]);
+          setAgendaState({ kind: 'extracting', prep: true, lines: lines, startedAt: startedAt });
+        } else if (evt.type === 'result') {
+          result = evt;
+        } else if (evt.type === 'error') {
+          failure = evt.message || 'Prep failed';
+        }
+      });
+    }).then(function() {
+      if (gen !== agendaExtractGen) return; // cancelled or superseded
+      if (failure || !result) {
+        setAgendaState({ kind: 'error', message: failure ? 'Prep failed \u2014 ' + failure : 'Prep ended without a result \u2014 try again.' });
+        return;
+      }
+      prepResult = result;
+      renderPrepBrief();
+      var items = (result.agenda || []).filter(function(x) { return typeof x === 'string' && x.trim(); });
+      if (items.length === 0) {
+        setAgendaState({ kind: 'empty', message: 'No agenda items came back \u2014 the brief below still has the research.' });
+        return;
+      }
+      setAgendaState({ kind: 'extracted', items: items });
+    }).catch(function(err) {
+      if (gen !== agendaExtractGen) return;
+      if (err && err.name === 'AbortError') return;
+      setAgendaState({ kind: 'error', message: 'Network error \u2014 is the server running?' });
     });
   };
 
@@ -3792,6 +3990,12 @@ const PRESENT_HTML = `<!DOCTYPE html>
     var m = upcomingMeetings[i];
     if (!m) return;
 
+    if (appliedMeeting !== m) {
+      prepResult = null; // a brief about someone else's meeting
+      renderPrepBrief();
+    }
+    appliedMeeting = m;
+
     var titleInput = document.getElementById('startTitle');
     if (titleInput) titleInput.value = m.title;
 
@@ -3810,7 +4014,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
     appliedMeetingUid = m.eventUid || m.title;
     renderCalendarChips();
-    showToast('Prefilled from \\u201C' + m.title + '\\u201D');
+    showToast('Prefilled from \\u201C' + m.title + '\\u201D \\u2014 Prep this meeting to research it');
   };
 
   function showIdleState() {
@@ -3848,6 +4052,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
         '<label>Title</label><input id="startTitle" placeholder="Weekly sync, 1:1, etc.">' +
         '<label>Agenda <span style="font-weight:400;text-transform:none;letter-spacing:0">(tracked live)</span></label>' +
         '<div id="agendaEditor"></div>' +
+        '<div id="prepBrief"></div>' +
         '<label>Attendees</label><input id="startAttendees" placeholder="Chris, Alex, Sam">' +
         '<label>Your Goals <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional · private, coach only)</span></label>' +
         '<textarea id="startGoals" rows="2" placeholder="What do you want out of this meeting? Positions, asks, red lines…"></textarea>' +
@@ -3868,6 +4073,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     // Populate context list and agenda editor after DOM is built
     renderContextList();
     renderAgendaEditor();
+    renderPrepBrief();
     renderProjectPicker();
     refreshCalendarChips();
   }
@@ -4016,6 +4222,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
     // Goals ride a separate meeting.goals message once the session is live, so
     // the same path works whether start goes through the native bridge or WS.
     pendingGoals = ((document.getElementById('startGoals') || {}).value || '').trim();
+    // The brief belongs to this form; don't let it reappear on the next one.
+    prepResult = null;
+    appliedMeeting = null;
 
     // Projects come straight from the picker's state (selectedProjects, kept by
     // addProject/removeProject) rather than being scraped back out of the DOM.
