@@ -17,6 +17,10 @@ All notable changes to Meeting Copilot will be documented in this file.
   run from `/ship`), health-checks the installed build, and rolls back on
   failure.
 
+### Fixed
+
+- Website links open in the default browser instead of replacing the native dashboard, including new-tab links. Intentional navigation cancellations no longer trigger dashboard reloads, and native bridge messages are restricted to the dashboard's main frame.
+
 ### Reliability and latency overhaul (2026-07-28)
 
 - Fixed child-process EOF CPU spinning, stale restart races, WebSocket receive/reconnect task leaks, and WKWebView key-monitor leaks.

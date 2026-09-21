@@ -1,5 +1,5 @@
 import SwiftUI
-import WebKit
+@preconcurrency import WebKit
 
 /// Wraps WKWebView to display the web dashboard at /present — the app's one
 /// and only session UI (transcript, approvals, results, start/stop form).
@@ -80,6 +80,7 @@ private struct WebViewWrapper: NSViewRepresentable {
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         webView.isInspectable = true
         webView.autoresizingMask = [.width, .height]
         // Don't load immediately — wait for server to be ready
@@ -134,6 +135,7 @@ private struct WebViewWrapper: NSViewRepresentable {
         }
         webView.configuration.userContentController.removeScriptMessageHandler(forName: bridgeMessageName)
         webView.navigationDelegate = nil
+        webView.uiDelegate = nil
         webView.stopLoading()
     }
 
@@ -141,7 +143,8 @@ private struct WebViewWrapper: NSViewRepresentable {
         Coordinator(sessionManager: sessionManager)
     }
 
-    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
+        private let navigationPolicy = DashboardNavigationPolicy(dashboardURL: dashboardURL)
         let sessionManager: SessionManager
         weak var webView: WKWebView?
         var zoomLevel: Int = 100
@@ -209,6 +212,9 @@ private struct WebViewWrapper: NSViewRepresentable {
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.name == bridgeMessageName,
+                  message.frameInfo.isMainFrame,
+                  let sourceURL = message.frameInfo.request.url,
+                  navigationPolicy.isDashboard(sourceURL),
                   let body = message.body as? [String: Any],
                   let action = body["action"] as? String else { return }
 
@@ -286,12 +292,64 @@ private struct WebViewWrapper: NSViewRepresentable {
             task.resume()
         }
 
+        // MARK: - Link routing
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            switch navigationPolicy.decision(for: navigationAction.request.url,
+                                             targetIsMainFrame: navigationAction.targetFrame?.isMainFrame) {
+            case .allow:
+                // Dashboard routes and sandboxed previews retain their existing frames.
+                decisionHandler(.allow)
+            case .cancel:
+                decisionHandler(.cancel)
+            case .openExternally:
+                // Includes ordinary links, redirects, and target="_blank" / window.open.
+                // Cancel first so opening the browser never replaces the dashboard.
+                decisionHandler(.cancel)
+                if let url = navigationAction.request.url { openOutsideDashboard(url) }
+            }
+        }
+
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                     for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            // Fallback for popup requests delivered through the UI delegate.
+            if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
+                openOutsideDashboard(url)
+            }
+            return nil
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                     decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+            // Check the final URL too, before a server redirect can commit a new page.
+            switch navigationPolicy.decision(for: navigationResponse.response.url,
+                                             targetIsMainFrame: navigationResponse.isForMainFrame) {
+            case .allow:
+                decisionHandler(.allow)
+            case .cancel:
+                decisionHandler(.cancel)
+            case .openExternally:
+                decisionHandler(.cancel)
+                if let url = navigationResponse.response.url { openOutsideDashboard(url) }
+            }
+        }
+
+        private func openOutsideDashboard(_ url: URL) {
+            guard navigationPolicy.destination(for: url) != .blocked else { return }
+            if !NSWorkspace.shared.open(url) {
+                pushError("Could not open the link in its default app.")
+            }
+        }
+
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            guard !DashboardNavigationPolicy.isCancelledNavigation(error) else { return }
             print("[WebDashboard] Navigation failed: \(error.localizedDescription)")
             retryLoad(webView: webView)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            guard !DashboardNavigationPolicy.isCancelledNavigation(error) else { return }
             print("[WebDashboard] Provisional navigation failed: \(error.localizedDescription)")
             retryLoad(webView: webView)
         }
