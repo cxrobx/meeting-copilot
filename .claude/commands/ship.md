@@ -1,61 +1,70 @@
 ---
-description: Build, sign, install & relaunch the Meeting Copilot app
+description: Test, package, verify & install the Meeting Copilot app (runs scripts/ship.sh)
 ---
 
 # Ship Meeting Copilot
 
-Rebuild the SwiftUI menubar app + Node server, sign, install to /Applications, and relaunch.
+Rebuild the SwiftUI menubar app + Node server, verify the signed bundle, replace
+`/Applications/Meeting Copilot.app`, relaunch, and health-check it.
 Standing rule: always rebuild before relaunching after code changes.
 
 Working directory: the repository root
 
-`./scripts/build-app.sh` does the heavy lifting (build server → `swift build -c release` → assemble
-`.app` → codesign → install to `/Applications` → copy to `dist/`). It does NOT quit a running app
-first and it `rm -rf`s the installed bundle, so quit before building.
+**`./scripts/ship.sh` is the source of truth; this command only drives it.** Never
+hand-roll the install to get past a failure. The guards and the rollback are the
+whole point, so report the failure instead.
+
+What `ship.sh` does, in order:
+1. Refuses to start if a meeting is active (`/health` → `session`), and checks
+   again after packaging, since a meeting can start during the build.
+2. Runs the release tests: server `npm test` pinned to the runtime Node (the
+   `better-sqlite3` ABI, gotcha #14), then `swift test`.
+3. Packages with `build-app.sh` (into `build/` and `dist/`; it does not install),
+   then runs `verify-app.sh --require-developer-id`. That checks the bundle
+   contents, the version, the Info.plist usage descriptions, the libwhisper
+   linkage, the model sizes and the Developer ID signature.
+4. Quits the running app, stages a copy in `/Applications`, verifies the copy,
+   swaps it in, and keeps the old app as a backup.
+5. Launches the new app and waits up to 45 s for `/health`. If the launch or
+   health check fails, or the script is interrupted, it **restores the previous
+   app automatically**.
 
 ## Steps
 
-Run in order. Stop and report if any step fails.
-
-1. **Preflight** — the build aborts if vendored assets or models are missing. Confirm they exist:
+1. **Preflight.** The build aborts if vendored assets or models are missing:
    ```bash
    test -f server/vendor/js/marked.min.js || echo "MISSING: run ./scripts/vendor-assets.sh"
    test -f ~/.meeting-copilot/models/ggml-silero-v5.1.2.bin || echo "MISSING VAD: run ./scripts/setup.sh"
    ```
    If either is missing, run the named script first.
 
-2. **Quit the running app + orphaned children** (safe — targets only this app's processes):
+2. **Ship.** It takes a few minutes, so give it a 10-minute timeout:
    ```bash
-   osascript -e 'if application "Meeting Copilot" is running then quit application "Meeting Copilot"' 2>/dev/null || true
-   sleep 1
-   pkill -f "Meeting Copilot.app" 2>/dev/null || true
-   pkill -f "meeting-copilot/server" 2>/dev/null || true
-   pkill -f whisper-server 2>/dev/null || true
-   sleep 1
+   ./scripts/ship.sh --yes
    ```
+   `--yes` replaces the interactive `Replace …? [y/N]` prompt, which cannot be
+   answered without a TTY. Chris invoking `/ship` **is** that confirmation, so
+   only pass `--yes` from this command or when he has explicitly asked to ship.
 
-3. **Build + sign + install** (installs to `/Applications` and copies to `dist/`):
-   ```bash
-   ./scripts/build-app.sh
-   ```
-   Watch the tail: it verifies `libwhisper` install-name rewrite and that `better-sqlite3` loads under
-   the runtime Node (ABI check). A `-` (ad-hoc) signature line means TCC (Screen Recording / Mic) will
-   be re-prompted next launch; a `Developer ID Application` line means grants persist.
+   Failures to stop and report on, never work around:
+   - `A meeting is active`: tell Chris. Do not quit the app for him.
+   - `health endpoint is unreachable`: the app is running but its server is
+     down, so the script cannot prove no meeting is live. Ask Chris before
+     quitting it (Recovery Playbook A in `.claude/rules/gotchas.md`).
+   - Test or `verify-app.sh` failures: report the output. Nothing was installed.
+   - `previous installation was restored`: the new build failed to launch or to
+     become healthy. Read `~/.meeting-copilot/app.log` and `server.log`.
 
-4. **Relaunch**:
-   ```bash
-   open "/Applications/Meeting Copilot.app"
-   ```
+3. **Report** from the tail of the output (`=== Ship Complete ===`): the
+   version, that the signature is `Developer ID`, and that the app came up
+   healthy.
 
-5. **Verify beyond the build** — the app (LSUIElement, no dock icon) spawns the Node server, which
-   listens on :17890 with a `/health` endpoint. Give ProcessSupervisor a few seconds, then:
-   ```bash
-   pgrep -fl "Meeting Copilot.app" || echo "APP NOT RUNNING"
-   sleep 6
-   curl -sf http://localhost:17890/health && echo "  server OK" || echo "  server /health FAILED"
-   ```
-   The menu-bar icon should appear. If `/health` fails, check `~/.meeting-copilot/server.log` and
-   `~/.meeting-copilot/app.log` (see `.claude/rules/gotchas.md` Recovery Playbook).
+## Notes
 
-Report: which signing identity was used (ad-hoc vs Developer ID), whether the app process is running,
-and whether `/health` returned 200.
+- **Do not `pkill whisper-server`.** notes4chris may share it (Recovery Playbook B).
+  `ship.sh` quits only this app, and `ProcessSupervisor` cleans up its own children.
+- **Signing:** `ship.sh` requires a Developer ID signature, which keeps the TCC
+  grants (Screen Recording, Microphone, System Audio Recording) valid across
+  ships. An ad-hoc build would lose them, so the script rejects one.
+- **Package only, no install:** `./scripts/build-app.sh` builds `dist/Meeting Copilot.app`.
+- The version comes from `VERSION`; bump it there, never in `Info.plist`.
