@@ -8,6 +8,15 @@ All notable changes to Meeting Copilot will be documented in this file.
 
 - Both sides of phone calls handed off from an iPhone, and of FaceTime calls, are transcribed. Meeting audio now comes from a Core Audio process tap (macOS 14.2+), which hears the `avconferenced` call daemon that ScreenCaptureKit cannot see; ScreenCaptureKit remains the automatic fallback and the `meetingAudioSource=sck` rollback. The app asks for System Audio Recording permission on the first session.
 
+### Packaging
+
+- Added a CX-family-style shipping workflow: `VERSION` is authoritative,
+  `build-app.sh` packages without touching `/Applications`, `verify-app.sh`
+  validates the bundle/runtime/signature and the Info.plist usage descriptions,
+  and `ship.sh` blocks active meetings, asks before replacement (`--yes` when
+  run from `/ship`), health-checks the installed build, and rolls back on
+  failure.
+
 ### Reliability and latency overhaul (2026-07-28)
 
 - Fixed child-process EOF CPU spinning, stale restart races, WebSocket receive/reconnect task leaks, and WKWebView key-monitor leaks.

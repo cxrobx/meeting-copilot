@@ -61,8 +61,17 @@ cd server && npm start         # Run compiled
 cd app/MeetingCopilot && swift test     # Unit tests
 cd app/MeetingCopilot && swift build    # Debug build
 cd app/MeetingCopilot && swift run      # Run debug
-./scripts/build-app.sh                   # Release .app bundle → build/
+./scripts/build-app.sh                   # Signed release .app → dist/ (no install)
+./scripts/verify-app.sh                  # Verify the packaged app
+./scripts/ship.sh                        # Test, package, confirm, install, relaunch
 ```
+
+`VERSION` is the single source for `CFBundleShortVersionString` and
+`CFBundleVersion`. `build-app.sh` never modifies `/Applications`; use
+`ship.sh` when the package is ready. Shipping refuses to continue during an
+active meeting, requires a Developer ID signature so macOS audio permissions
+survive the update, verifies the staged and installed bundles, and restores the
+previous app automatically if the new build does not become healthy.
 
 ### Spike
 

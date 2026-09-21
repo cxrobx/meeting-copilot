@@ -63,6 +63,7 @@ cd app/MeetingCopilot && swift build
 cd server && npm run dev                 # Dev with tsx (hot reload)
 cd app/MeetingCopilot && swift build     # Build Swift app
 ./scripts/build-app.sh                   # Release .app bundle
+./scripts/ship.sh                        # Test, package, verify, and safely install
 ./scripts/replay.sh                      # Test with fixtures
 ```
 

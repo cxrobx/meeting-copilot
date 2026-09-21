@@ -65,7 +65,8 @@ cd app/MeetingCopilot && swift build
 ./scripts/start.sh                       # Launch server + whisper-server
 cd server && npm run dev                 # Dev with tsx (hot reload)
 cd app/MeetingCopilot && swift build     # Build Swift app
-./scripts/build-app.sh                   # Release .app bundle
+./scripts/build-app.sh                   # Package signed .app → dist/ (does not install)
+./scripts/ship.sh                        # Test, package, verify, confirm, install + relaunch
 ./scripts/replay.sh                      # Test with text fixtures
 ./scripts/replay-audio.sh <dir> --speed 4 --auto-approve  # Test with real audio
 open "/Applications/Meeting Copilot.app" # Launch packaged app

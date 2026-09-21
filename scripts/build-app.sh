@@ -7,8 +7,19 @@ APP_NAME="Meeting Copilot"
 BUNDLE_ID="com.christopherrobinson.meeting-copilot"
 BUILD_DIR="$PROJECT_DIR/build"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
+VERSION_FILE="$PROJECT_DIR/VERSION"
 
-echo "=== Building $APP_NAME ==="
+if [ ! -f "$VERSION_FILE" ]; then
+  echo "ERROR: VERSION file not found at $VERSION_FILE" >&2
+  exit 1
+fi
+APP_VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+  echo "ERROR: VERSION must use numeric dotted notation (for example 0.1.0): $APP_VERSION" >&2
+  exit 1
+fi
+
+echo "=== Packaging $APP_NAME $APP_VERSION ==="
 echo ""
 
 # ── Pin Node ─────────────────────────────────────────────────────────────
@@ -43,7 +54,7 @@ mkdir -p "$BUILD_DIR"
 
 # ── Step 1: Build Node.js server ─────────────────────────────────────────
 
-echo "[1/6] Building Node.js server..."
+echo "[1/5] Building Node.js server..."
 cd "$PROJECT_DIR/server"
 npm ci --silent
 npx tsc
@@ -60,7 +71,7 @@ echo "  Installed production dependencies"
 # ── Step 2: Build Swift binary ───────────────────────────────────────────
 
 echo ""
-echo "[2/6] Building Swift app (release)..."
+echo "[2/5] Building Swift app (release)..."
 cd "$PROJECT_DIR/app/MeetingCopilot"
 swift build -c release --quiet 2>&1
 SWIFT_BIN="$(swift build -c release --show-bin-path)/MeetingCopilot"
@@ -69,7 +80,7 @@ echo "  Built: $SWIFT_BIN"
 # ── Step 3: Assemble .app bundle ─────────────────────────────────────────
 
 echo ""
-echo "[3/6] Assembling app bundle..."
+echo "[3/5] Assembling app bundle..."
 
 # Create bundle structure
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
@@ -143,11 +154,8 @@ if [ -f "$ICON_PNG" ]; then
   echo "  Copied app icon (png)"
 fi
 
-# Copy .env if it exists (for API keys)
-if [ -f "$PROJECT_DIR/server/.env" ]; then
-  cp "$PROJECT_DIR/server/.env" "$APP_BUNDLE/Contents/Resources/server/"
-  echo "  Copied .env"
-fi
+# Runtime configuration belongs in ~/.meeting-copilot/.env. Never copy a
+# repository-local .env into a distributable app bundle.
 
 # Bundle the Parakeet sidecar script — the DEFAULT transcription backend.
 # ProcessSupervisor runs it via `uv run` at launch; uv resolves the script's
@@ -224,13 +232,13 @@ PLIST
 # Insert bundle ID (use variable)
 cat >> "$APP_BUNDLE/Contents/Info.plist" << EOF
     <string>$BUNDLE_ID</string>
+    <key>CFBundleVersion</key>
+    <string>$APP_VERSION</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$APP_VERSION</string>
 EOF
 
 cat >> "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
@@ -273,7 +281,7 @@ echo "  Bundle assembled: $APP_BUNDLE"
 #   3. Fallback: ad-hoc (expect permissions to be re-prompted each rebuild)
 
 echo ""
-echo "[4/6] Code signing..."
+echo "[4/5] Code signing..."
 
 resolve_identity() {
   if [ -n "${CODESIGN_IDENTITY:-}" ]; then
@@ -320,37 +328,25 @@ else
   echo "  Signed with: $SIGN_IDENTITY"
 fi
 
-# ── Step 5: Install to /Applications ─────────────────────────────────────
+# ── Step 5: Verify and copy to dist/ ────────────────────────────────────
 
 echo ""
-echo "[5/6] Installing to /Applications..."
+echo "[5/5] Verifying package and creating dist/ copy..."
 
-DEST="/Applications/$APP_NAME.app"
-if [ -d "$DEST" ]; then
-  echo "  Removing existing installation..."
-  rm -rf "$DEST"
-fi
+"$SCRIPT_DIR/verify-app.sh" "$APP_BUNDLE"
 
-cp -R "$APP_BUNDLE" "$DEST"
-echo "  Installed: $DEST"
-
-# Cleanup staging
+# Cleanup staging before copying the final distributable.
 rm -rf "$PROD_STAGING"
-
-# ── Step 6: Copy to dist/ ───────────────────────────────────────────────
-
-echo ""
-echo "[6/6] Creating dist/ copy..."
 
 DIST_DIR="$PROJECT_DIR/dist"
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
-cp -R "$APP_BUNDLE" "$DIST_DIR/"
+ditto "$APP_BUNDLE" "$DIST_DIR/$APP_NAME.app"
+"$SCRIPT_DIR/verify-app.sh" "$DIST_DIR/$APP_NAME.app"
 echo "  Copied to: $DIST_DIR/$APP_NAME.app"
 
 echo ""
-echo "=== Build Complete ==="
+echo "=== Package Complete ==="
 echo ""
-echo "  $APP_NAME is now in /Applications."
-echo "  Also available at: dist/$APP_NAME.app"
-echo "  Launch it from Spotlight or /Applications."
+echo "  Package: dist/$APP_NAME.app"
+echo "  Install: ./scripts/ship.sh"
