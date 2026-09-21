@@ -5,7 +5,7 @@ AI agent that activates during meetings to generate live research, mockups, and 
 ## Architecture
 
 Two-process design:
-- **SwiftUI Menubar App** (`app/MeetingCopilot/`) — audio capture (ScreenCaptureKit + AVAudioEngine), WKWebView dashboard, process supervision
+- **SwiftUI Menubar App** (`app/MeetingCopilot/`) — audio capture (Core Audio process tap + AVAudioEngine; ScreenCaptureKit fallback), WKWebView dashboard, process supervision
 - **Node.js Local Server** (`server/`) — transcription, intelligence eval, worker execution, session storage, web dashboard
 
 Communication: WebSocket over localhost:17890. Browser connects as additional WS client alongside Swift app.
@@ -42,7 +42,7 @@ cd app/MeetingCopilot && swift build
 
 ## Key Decisions
 
-- **Audio**: ScreenCaptureKit (meeting) + AVAudioEngine (mic), 16kHz mono PCM
+- **Audio**: Core Audio process tap (meeting — hears phone and FaceTime calls too; ScreenCaptureKit fallback) + AVAudioEngine (mic), 16kHz mono PCM
 - **Transcription**: whisper-server local (default), Deepgram cloud (optional)
 - **Intelligence**: Gemini Flash triage (15s cadence) → Sonnet suggestions. Fallback: Haiku → GPT 5.4 Mini
 - **Workers**: Research, Summary, Analysis, Mockup, CodeGen (all implemented)
@@ -95,6 +95,7 @@ Full list in `.claude/rules/architecture.md`.
 
 ## Recent Learnings
 
+- 2026-09-21: **Calls handed off from an iPhone (and FaceTime calls) were only half transcribed** — the other party is played by `avconferenced`, a system daemon that ScreenCaptureKit's app list never shows. Meeting audio now comes from a Core Audio process tap (tap-only aggregate, `.unmuted`), with ScreenCaptureKit as the fallback. It needs the System Audio Recording grant, and a missing one shows up as silent zeros, not an error. Full landmine list: gotcha #20.
 - 2026-06-17: **A live `ANTHROPIC_API_KEY` in `~/.meeting-copilot/.env` silently billed the API console (~19M tokens in one day), NOT the subscription** — corrects the earlier note below that the env key is "ignored." The server `dotenv`-loads that file into `process.env`, and `claude-cli.ts` / `persistent-claude.ts` spawned `claude` with `{ ...process.env }`, so the CLI **inherited the key and preferred it over OAuth**, billing every triage (haiku) + suggest (sonnet) + worker call to the API even though the `[LLM] …=cli (subscription)` banner claimed otherwise. The CLI login here is OAuth/subscription (`~/.claude.json` `oauthAccount`, no `apiKeyHelper`), so **with no key in env the CLI falls back to the subscription (free).** The "ignored" finding was only true while the key was *dead* (401 → OAuth fallback); a *live* key is used. Two fixes: (1) commented `ANTHROPIC_API_KEY` out of `~/.meeting-copilot/.env`; (2) all three `claude` spawn sites now `delete env.ANTHROPIC_API_KEY` + `delete env.ANTHROPIC_AUTH_TOKEN`, so the CLI can never bill an API key even if one is set for the SDK paths (`api/anthropic.ts`). For a hard zero-API-spend run, set `COPILOT_DISABLE_PAID_API=1`. Verify after any change: a stripped-env `claude -p` call still returns (subscription works), and the Anthropic API console shows no new haiku/sonnet streaming rows during a session.
 - 2026-06-17: **Headless `claude` CLI was slow because it loaded the user's entire MCP fleet (~27 servers) on every spawn** — ~6.7s CPU/call, and concurrent spawns thrashed (agenda latency blew to 45s, starving realtime suggestions). Two fixes in `server/src/claude-cli.ts`: (1) `--strict-mcp-config` on every `claude` spawn cuts CPU to ~0.66s and keeps subscription/OAuth auth (verified the dead `ANTHROPIC_API_KEY` in env is ignored — CLI uses OAuth); (2) `server/src/persistent-claude.ts` keeps one warm `claude --input-format stream-json` session per (model, systemPrompt) — cold ~2.9s → warm ~1.5s — recycled every 5 turns to bound context, idle-disposed after 120s, disposed on shutdown (SIGTERM→SIGKILL). `claudeChat`/`claudeSuggest` use it transparently for tool-less calls with cold-spawn fallback; tool-using workers stay cold. Tune via `COPILOT_WARM_SESSION_TURNS` / `COPILOT_WARM_SESSION_IDLE_MS` / `COPILOT_DISABLE_WARM_SESSIONS`. **Note:** the `--bare` flag (1.5s cold) is NOT usable here — it bypasses the keychain and forces `ANTHROPIC_API_KEY` (the dead key).
 - 2026-06-17: Meeting Copilot's per-call `claude` spawns were firing the user's global Stop hook (`~/.claude/hooks/notify-stop.sh` → `afplay`) 20+×/min. Server now sets `MEETING_COPILOT=1` (also in `~/.meeting-copilot/.env`); the user's `notify-stop.sh` / `notify-bash-complete.sh` `exit 0` when it's set. Interactive sessions still ding.

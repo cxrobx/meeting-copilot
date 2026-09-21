@@ -26,7 +26,7 @@ app/MeetingCopilot/
 
 ## Audio Capture
 
-- **Meeting audio**: ScreenCaptureKit — captures system audio from meeting apps
+- **Meeting audio**: Core Audio process tap (`SystemAudioTap`, macOS 14.2+) — every process's output, including the `avconferenced` / `callservicesd` daemons that play phone and FaceTime calls. ScreenCaptureKit per-app capture is the fallback (`meetingAudioSource=sck`). Gotcha #20
 - **Microphone**: AVAudioEngine — captures user's mic input
 - **Format**: 16kHz mono PCM (required by transcription pipeline)
 - Both streams are mixed/interleaved before sending to server

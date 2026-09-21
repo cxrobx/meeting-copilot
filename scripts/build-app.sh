@@ -245,6 +245,8 @@ cat >> "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <string>Meeting Copilot needs screen recording access to capture meeting audio from your computer.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Meeting Copilot needs microphone access to capture your voice during meetings.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Meeting Copilot records system audio so it can transcribe the other side of meetings and phone calls.</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright 2026 Christopher Robinson</string>
     <key>NSAppTransportSecurity</key>

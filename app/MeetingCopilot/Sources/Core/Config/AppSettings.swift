@@ -16,6 +16,34 @@ enum AppSettings {
         static let vadThreshold = "vadThreshold"
         static let vadMinSilenceMs = "vadMinSilenceMs"
         static let vadMaxUtteranceSec = "vadMaxUtteranceSec"
+        static let meetingAudioSource = "meetingAudioSource"
+    }
+
+    /// Where the meeting (other-side) track comes from.
+    enum MeetingAudioSource: String {
+        /// Core Audio process tap — hears every process, including the call
+        /// daemons ScreenCaptureKit cannot see (phone / FaceTime calls).
+        case processTap = "tap"
+        /// ScreenCaptureKit per-app filter — the pre-2026-09-21 path.
+        case screenCaptureKit = "sck"
+    }
+
+    /// Meeting-audio backend. Defaults to the process tap; macOS < 14.2 or a
+    /// tap that fails to start falls back to ScreenCaptureKit automatically.
+    /// Rollback without a rebuild:
+    /// `defaults write com.christopherrobinson.meeting-copilot meetingAudioSource sck`
+    /// (or launch with `MC_MEETING_AUDIO=sck`). Read at `startCapture`, so a
+    /// change takes effect on the next session.
+    static var meetingAudioSource: MeetingAudioSource {
+        if let env = ProcessInfo.processInfo.environment["MC_MEETING_AUDIO"],
+           let source = MeetingAudioSource(rawValue: env.lowercased()) {
+            return source
+        }
+        if let stored = UserDefaults.standard.string(forKey: Key.meetingAudioSource),
+           let source = MeetingAudioSource(rawValue: stored.lowercased()) {
+            return source
+        }
+        return .processTap
     }
 
     /// Whether the VAD-driven chunk emitter is active. When false, falls

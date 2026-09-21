@@ -4,6 +4,10 @@ All notable changes to Meeting Copilot will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Both sides of phone calls handed off from an iPhone, and of FaceTime calls, are transcribed. Meeting audio now comes from a Core Audio process tap (macOS 14.2+), which hears the `avconferenced` call daemon that ScreenCaptureKit cannot see; ScreenCaptureKit remains the automatic fallback and the `meetingAudioSource=sck` rollback. The app asks for System Audio Recording permission on the first session.
+
 ### Reliability and latency overhaul (2026-07-28)
 
 - Fixed child-process EOF CPU spinning, stale restart races, WebSocket receive/reconnect task leaks, and WKWebView key-monitor leaks.

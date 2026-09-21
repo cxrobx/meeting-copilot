@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 14 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 20 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -25,6 +25,7 @@ Organized by category. 14 items + recovery playbook, condensed format. Original 
 | 17 | TranscriptSegment.duration is deprecated — use audioDurationSec / transcriptionLatencyMs | Backend |
 | 18 | AVAudioEngine input device-change crashes — installTap NSException → SIGABRT | Frontend |
 | 19 | Silero VAD Metal graph aborts on pre-M5 Apple Silicon | Frontend |
+| 20 | Phone / FaceTime calls invisible to ScreenCaptureKit — meeting track is a Core Audio process tap | Environment |
 | — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
@@ -161,6 +162,22 @@ this default.
 **Pattern**: `app/MeetingCopilot/Sources/Core/Audio/VADProbe.swift`,
 `app/MeetingCopilot/Tests/RealAudioVADTests.swift`.
 
+### 20. Phone / FaceTime Calls Are Invisible to ScreenCaptureKit — Meeting Track Is a Core Audio Process Tap
+**Symptom**: On an iPhone call handed off to the Mac, or a FaceTime call, only your side is transcribed: `meeting peak=0.0000` for the whole call while `mic peak` moves.
+**Cause**: The remote party is played by system daemons, not an app: `avconferenced` (confirmed on a live Continuity call, 2026-09-21, macOS 14.5, AirPods) and `callservicesd`. `SCShareableContent.applications` never lists them, so the per-app SCK filter (#12's workaround) cannot include them. Apple does not block this: nothing in the SDK headers, entitlements, or sandbox profiles excludes call audio, and the only gate is the System Audio Recording check (`kTCCServiceAudioCapture`) on the capturing app.
+**Solution** (applied 2026-09-21): `SystemAudioTap` — `CATapDescription(monoGlobalTapButExcludeProcesses: [own process])`, `.unmuted`, a private **tap-only** aggregate device, IOProc → `AVAudioConverter` → 16 kHz mono → the same sink SCK uses (`ingestMeetingSamples`). It is the default backend; SCK is the automatic fallback when the tap fails to start or macOS is older than 14.2.
+**Landmines**:
+- **Tap-only aggregate — never add the output device as a subdevice.** A subdevice that has input streams (headsets, the Teams/Zoom virtual devices) puts its mic in the IOProc's buffer list ahead of the tap, i.e. your voice on the meeting track. Measured: buffers `[2ch + 1ch]` with ZoomAudioDevice as subdevice, `[1ch]` tap-only.
+- **`.unmuted` only.** `.mutedWhenTapped` on `avconferenced` mutes the call itself and makes the remote party hear themselves (FineTune #113).
+- **A missing `NSAudioCaptureUsageDescription` means silent zeros, `noErr`, and no prompt.** `verify-app.sh` refuses a bundle without it. A *denied* grant looks identical and no API reads it, so the 25 s all-zero watchdog names the permission when the tap is the backend.
+- **The grant is keyed to the code signature.** The Developer ID build persists across rebuilds; an ad-hoc build re-prompts every time (seen with the CallTapProbe spike).
+- **AirPods drop to a call sample rate without the default output device changing** (tap callbacks fell 86/s → 47/s when the call connected). The tap re-reads the aggregate's nominal rate every second and snaps to the measured rate after two consecutive >25% mismatches — grep app.log for `[SystemAudioTap] reported rate changed` / `RATE MISMATCH`.
+- `AudioDeviceStart` blocks while the first-run permission prompt is up, so `start()` runs off the main thread.
+- macOS 26.0 / 26.0.1 had an Apple bug that silenced FaceTime/Phone capture (fixed in 26.1).
+- On laptop speakers the mic also hears the remote party, so their lines land on both tracks (`dedup.ts` only trims chunk-boundary overlap). Headphones for calls.
+**Rollback**: `defaults write com.christopherrobinson.meeting-copilot meetingAudioSource sck` (next session), or launch with `MC_MEETING_AUDIO=sck`.
+**Pattern**: `app/MeetingCopilot/Sources/Core/Audio/SystemAudioTap.swift`, `AudioCaptureManager.startMeetingAudioCapture()`, `app/MeetingCopilot/Tests/SystemAudioTapTests.swift`.
+
 ### 11. WKWebView Needs Health Polling Before Loading Localhost
 **Symptom**: Blank white panel on app launch
 **Cause**: WKWebView loads `/present` before the Node server finishes starting. Failed navigation shows blank page, `reload()` does nothing after failed provisional navigation.
@@ -197,7 +214,8 @@ Relaunch the app. `ProcessSupervisor.cleanupOrphans()` also targets :17890 on it
 ```
 grep "peak=" ~/.meeting-copilot/app.log | tail -20
 ```
-- `meeting peak=0.0000` consistently → gotcha #12. Identify ARK.driver:
+- First check which backend ran: `grep -E "Process tap started|falling back to ScreenCaptureKit|ScreenCaptureKit started" ~/.meeting-copilot/app.log | tail -3`. With the process tap (default since 2026-09-21), `meeting peak=0.0000` while the other side is audibly talking means the System Audio Recording permission is missing or denied → gotcha #20, not ARK.
+- `meeting peak=0.0000` consistently on the ScreenCaptureKit backend → gotcha #12. Identify ARK.driver:
   ```
   sudo sample coreaudiod 5 2>&1 | grep -i ARK.driver
   sudo launchctl list | grep rogueamoeba

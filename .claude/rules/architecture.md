@@ -9,7 +9,7 @@
 | AI Triage | Gemini 3 Flash Preview → Haiku 4.5 → GPT 5.4 Mini (fallback chain via CLIs) |
 | AI Suggest | Claude Sonnet 4.6 (via `claude --print`) |
 | Database | better-sqlite3 per-session SQLite |
-| Audio | ScreenCaptureKit (meeting) + AVAudioEngine (mic) |
+| Audio | Core Audio process tap (meeting, macOS 14.2+; ScreenCaptureKit fallback) + AVAudioEngine (mic) — see gotcha #20 |
 | Transcription | whisper-server local (default), Deepgram cloud (optional) |
 | Dashboard | Web UI at `/present` in WKWebView — CX family tokens (shared with cxmail/cxtasks/cxnotes), dark default + light toggle |
 

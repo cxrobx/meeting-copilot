@@ -56,6 +56,18 @@ final class AudioCaptureManager: NSObject {
 
     private var scStream: SCStream?
     private var systemAudioDelegate: SystemAudioDelegate?
+    // `SystemAudioTap` is macOS 14.2+ and stored properties cannot carry
+    // `@available`, so it is held type-erased and cast inside availability checks.
+    private var systemTap: AnyObject?
+    private var pendingTapRestart: DispatchWorkItem?
+    /// Which backend is feeding the meeting track this session. Drives the
+    /// silence-warning wording and whether output-device changes rebuild the tap.
+    private(set) var meetingBackend: AppSettings.MeetingAudioSource = .screenCaptureKit
+    // Per-second meeting peak log state. Touched only from whichever capture
+    // thread is live (SCK sample queue or the tap's IO queue) — one at a time.
+    // Ignored by Observation: they change ~90×/s on an audio thread.
+    @ObservationIgnored private var meetingPeakWindow: Float = 0.0
+    @ObservationIgnored private var meetingPeakLastFlush = Date()
     private var audioEngine: AVAudioEngine?
     private var audioConverter: AVAudioConverter?
     private var routeObserver: AudioRouteObserver?
@@ -233,8 +245,8 @@ final class AudioCaptureManager: NSObject {
         }
 
         do {
-            // Start system audio capture via ScreenCaptureKit
-            try await startSystemAudioCapture()
+            // Start meeting (other-side) audio: process tap, or ScreenCaptureKit
+            try await startMeetingAudioCapture()
 
             // Start microphone capture via AVAudioEngine
             try startMicrophoneCapture()
@@ -298,6 +310,8 @@ final class AudioCaptureManager: NSObject {
         // teardown and resurrect the engine.
         pendingMicRestart?.cancel()
         pendingMicRestart = nil
+        pendingTapRestart?.cancel()
+        pendingTapRestart = nil
 
         // Stop chunk timer
         chunkTimer?.invalidate()
@@ -319,7 +333,11 @@ final class AudioCaptureManager: NSObject {
         meetingEmitter = nil
         vadActive = false
 
-        // Stop system audio
+        // Stop system audio (whichever backend was live)
+        if #available(macOS 14.2, *), let tap = systemTap as? SystemAudioTap {
+            tap.stop()
+        }
+        systemTap = nil
         if let stream = scStream {
             try? await stream.stopCapture()
             scStream = nil
@@ -394,6 +412,98 @@ final class AudioCaptureManager: NSObject {
         }
     }
 
+    // MARK: - Meeting Audio
+
+    /// Start the meeting track on the configured backend. The process tap is
+    /// the default because it is the only path that hears phone and FaceTime
+    /// calls (gotcha #20); any failure to start it falls back to
+    /// ScreenCaptureKit rather than failing the session.
+    private func startMeetingAudioCapture() async throws {
+        meetingPeakWindow = 0.0
+        meetingPeakLastFlush = Date()
+        if AppSettings.meetingAudioSource == .processTap {
+            if #available(macOS 14.2, *) {
+                do {
+                    try await startProcessTapCapture()
+                    meetingBackend = .processTap
+                    return
+                } catch {
+                    appLog("[AudioCapture] process tap failed to start (\(error.localizedDescription)) — falling back to ScreenCaptureKit")
+                }
+            } else {
+                appLog("[AudioCapture] process tap needs macOS 14.2+ — using ScreenCaptureKit")
+            }
+        }
+        try await startSystemAudioCapture()
+        meetingBackend = .screenCaptureKit
+    }
+
+    @available(macOS 14.2, *)
+    private func startProcessTapCapture() async throws {
+        let tap = SystemAudioTap { [weak self] samples, peak in
+            self?.ingestMeetingSamples(samples, int16: nil, peak: peak)
+        }
+        // AudioDeviceStart blocks while macOS shows the first-run System
+        // Audio Recording prompt, so keep it off the caller's thread.
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    try tap.start()
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+        systemTap = tap
+        let outputName = getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultOutputDevice)
+        appLog("[AudioCapture] Process tap started. output=\"\(outputName)\" input=\"\(getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultInputDevice))\"")
+    }
+
+    /// Single sink for meeting-track samples from either backend: feeds the
+    /// VAD emitter (or the fixed-timer Int16 buffer), the health counters, the
+    /// per-second peak log, and the level meter. Called on the live backend's
+    /// capture thread. `int16` is ScreenCaptureKit's precomputed quantization;
+    /// the tap passes nil and it is computed only if the timer path needs it.
+    private func ingestMeetingSamples(_ samples: [Float], int16: Data?, peak: Float) {
+        if let emitter = meetingEmitter {
+            emitter.ingest(samples: samples)
+        } else {
+            let pcmData = int16 ?? Self.quantize(samples)
+            bufferLock.lock()
+            if meetingPCMBuffer.isEmpty {
+                // Wall clock of the oldest sample = now - duration of what we're about to append.
+                let appendDuration = Double(pcmData.count) / Self.bytesPerSecond
+                meetingBufferAudioStart = Date().addingTimeInterval(-appendDuration)
+            }
+            meetingPCMBuffer.append(pcmData)
+            bufferLock.unlock()
+        }
+
+        captureHealth.recordMeeting(peak: peak)
+
+        meetingPeakWindow = max(meetingPeakWindow, peak)
+        let now = Date()
+        if now.timeIntervalSince(meetingPeakLastFlush) >= 1.0 {
+            appLog("[AudioCapture] meeting peak=\(String(format: "%.4f", meetingPeakWindow))")
+            meetingPeakWindow = 0.0
+            meetingPeakLastFlush = now
+        }
+
+        Task { @MainActor in
+            self.audioLevel = peak
+        }
+    }
+
+    private static func quantize(_ samples: [Float]) -> Data {
+        var data = Data(capacity: samples.count * MemoryLayout<Int16>.size)
+        for sample in samples {
+            let value = Int16(sample * Float(Int16.max))
+            withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        }
+        return data
+    }
+
     // MARK: - System Audio (ScreenCaptureKit)
 
     private func startSystemAudioCapture() async throws {
@@ -445,41 +555,10 @@ final class AudioCaptureManager: NSObject {
         config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
         config.showsCursor = false
 
-        var meetingPeakWindow: Float = 0.0
-        var meetingPeakLastFlush = Date()
+        // Samples go through the same sink as the process tap: VAD emitter or
+        // timer buffer, health counters, per-second peak log, level meter.
         let delegate = SystemAudioDelegate { [weak self] pcmData, floatSamples, level in
-            guard let self = self else { return }
-
-            // VAD path: feed the raw Float32 samples directly to the emitter.
-            // Skip the legacy Int16 buffer entirely — the emitter owns its
-            // own pre-roll ring and will emit on speech boundaries.
-            if let emitter = self.meetingEmitter {
-                emitter.ingest(samples: floatSamples)
-            } else {
-                self.bufferLock.lock()
-                if self.meetingPCMBuffer.isEmpty {
-                    // Wall clock of the oldest sample = now - duration of what we're about to append.
-                    let appendDuration = Double(pcmData.count) / Self.bytesPerSecond
-                    self.meetingBufferAudioStart = Date().addingTimeInterval(-appendDuration)
-                }
-                self.meetingPCMBuffer.append(pcmData)
-                self.bufferLock.unlock()
-            }
-
-            self.captureHealth.recordMeeting(peak: level)
-
-            meetingPeakWindow = max(meetingPeakWindow, level)
-            let now = Date()
-            if now.timeIntervalSince(meetingPeakLastFlush) >= 1.0 {
-                appLog("[AudioCapture] meeting peak=\(String(format: "%.4f", meetingPeakWindow))")
-                meetingPeakWindow = 0.0
-                meetingPeakLastFlush = now
-            }
-
-            // Update audio level on main thread
-            Task { @MainActor in
-                self.audioLevel = level
-            }
+            self?.ingestMeetingSamples(floatSamples, int16: pcmData, peak: level)
         }
         self.systemAudioDelegate = delegate
 
@@ -815,7 +894,7 @@ final class AudioCaptureManager: NSObject {
             if verdict == .silent {
                 warnedMeetingSilent = true
                 appLog("[AudioCapture] WATCHDOG meeting track silent — \(stats.meetingBuffers) buffers, all zero (output=\"\(currentOutputDevice)\")")
-                onCaptureWarning?(meetingSilenceWarning(outputDevice: currentOutputDevice))
+                onCaptureWarning?(Self.meetingSilenceWarning(outputDevice: currentOutputDevice, backend: meetingBackend))
             }
         }
     }
@@ -883,7 +962,15 @@ final class AudioCaptureManager: NSObject {
     /// Build the user-facing warning for a digitally-silent meeting track.
     /// Naming the output device is what makes it self-diagnosing — the same
     /// reasoning behind notes4chris's `blackholeFallbackWarning`.
-    private func meetingSilenceWarning(outputDevice: String) -> String {
+    ///
+    /// The tap has a different failure: it hears every process whatever the
+    /// output device, so routing is not the suspect — a denied System Audio
+    /// Recording permission is, because macOS hands a denied tap zeros with
+    /// no error (gotcha #20).
+    static func meetingSilenceWarning(outputDevice: String, backend: AppSettings.MeetingAudioSource) -> String {
+        if backend == .processTap {
+            return "No meeting audio detected — the system audio tap is delivering silence. If you can hear the other side, Meeting Copilot is probably missing System Audio Recording permission: enable it in System Settings → Privacy & Security, then restart the session."
+        }
         let base = "No meeting audio detected — ScreenCaptureKit is delivering silence."
         if Self.virtualOutputTokens.contains(where: { outputDevice.localizedCaseInsensitiveContains($0) }) {
             return "\(base) Output is \"\(outputDevice)\", a virtual device, so there is no real audio on it to capture. Switch system output to a physical device."
@@ -897,7 +984,26 @@ final class AudioCaptureManager: NSObject {
         let newName = getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultOutputDevice)
         appLog("[AudioCapture] Output device changed -> \"\(newName)\"")
         updateDeviceNames()
-        // ScreenCaptureKit handles output device changes automatically.
+        // ScreenCaptureKit handles output device changes automatically. The
+        // tap is device-independent too, but a rebuild costs ~100 ms of audio
+        // and guarantees a fresh aggregate on the new route — debounced like
+        // the mic, since AirPods fire a burst of route events.
+        guard isCapturing, meetingBackend == .processTap else { return }
+        pendingTapRestart?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isCapturing else { return }
+            if #available(macOS 14.2, *), let tap = self.systemTap as? SystemAudioTap {
+                do {
+                    try tap.start()
+                    appLog("[AudioCapture] process tap rebuilt after output change")
+                } catch {
+                    appLog("[AudioCapture] process tap rebuild failed: \(error.localizedDescription)")
+                    self.onCaptureWarning?("Meeting audio stopped after the output device changed — restart the session to recover the other side of the call.")
+                }
+            }
+        }
+        pendingTapRestart = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.micRestartDebounce, execute: work)
     }
 
     private func handleInputDeviceChange() {
