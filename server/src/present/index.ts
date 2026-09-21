@@ -1972,6 +1972,25 @@ const PRESENT_HTML = `<!DOCTYPE html>
   .card-body th, .card-body td { border: 1px solid var(--gb-surface2); padding: 5px 10px; text-align: left; }
   .card-body th { background: var(--gb-surface1); font-weight: 600; color: var(--gb-text); }
   .card-body input[type="checkbox"] { accent-color: var(--gb-green); margin-right: 5px; }
+  /* Summary + self-review read like the vault note they become, so they wear
+     the vault's heading hues (the Solarized ramp the HTML Artifact Kit measured
+     from Obsidian: ~/.claude/docs/html-design/style.css) and ink body text.
+     Research / analysis cards stay monochrome per the rule above. */
+  .card-doc .card-body { --doc-h1: #DC322F; --doc-h2: #CB4B16; --doc-h3: #859900; --doc-h4: #2AA198; --doc-h5: #8B8FDE; --doc-h6: #6C71C4; color: var(--gb-text); line-height: 1.6; }
+  [data-theme="dark"] .card-doc .card-body { --doc-h1: #F078A0; --doc-h2: #E6C37D; --doc-h3: #82EB82; --doc-h4: #72E0D6; --doc-h5: #9A8DF7; --doc-h6: #C592DE; }
+  .card-doc .card-body h1 { color: var(--doc-h1); font-size: 19px; margin-top: 18px; }
+  .card-doc .card-body h2 { color: var(--doc-h2); font-size: 17px; margin-top: 22px; margin-bottom: 8px; }
+  .card-doc .card-body h3 { color: var(--doc-h3); font-size: 15px; margin-top: 16px; }
+  .card-doc .card-body h4 { color: var(--doc-h4); font-size: 13px; }
+  .card-doc .card-body h5 { color: var(--doc-h5); font-size: 13px; font-weight: 600; }
+  .card-doc .card-body h6 { color: var(--doc-h6); font-size: 13px; font-weight: 600; }
+  .card-doc .card-body p.doc-subhead { color: var(--doc-h3); font-size: 14px; margin: 14px 0 6px; }
+  .card-doc .card-body p.doc-subhead strong { color: inherit; }
+  .card-doc .card-body li::marker { color: var(--gb-text); }
+  .card-doc .card-body em { color: var(--gb-subtext0); }
+  .card.card-arrive { animation: card-arrive 1.6s ease-out; }
+  @keyframes card-arrive { 0%, 30% { box-shadow: 0 0 0 2px rgb(var(--accent) / 0.55); } 100% { box-shadow: 0 0 0 2px rgb(var(--accent) / 0); } }
+  @media (prefers-reduced-motion: reduce) { .card.card-arrive { animation: none; } }
 
   .card-trigger {
     font-size: 11px;
@@ -3716,6 +3735,26 @@ const PRESENT_HTML = `<!DOCTYPE html>
     if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
   }
 
+  // ─── Post-meeting hand-off ──────────────────────────────────
+  // When a meeting ends, open its saved record (summary + self-review, read from
+  // the session's own DB) instead of leaving the live view up. The live view can
+  // be empty: if the socket drops during wrap-up the finished cards are never
+  // delivered, and /present/actions has no live session to read them from.
+  // Once per session: "← Back" returns to /present, which the server still
+  // reports as archived — that has to land on a fresh setup form, not bounce.
+  var ENDED_KEY = 'mc-ended-shown';
+  function endedSummaryShown(id) {
+    try { return sessionStorage.getItem(ENDED_KEY) === id; } catch (e) { return false; }
+  }
+  function openEndedSummary(id) {
+    if (isReplay || !id || endedSummaryShown(id)) return false;
+    // No working sessionStorage means no loop guard — stay put rather than risk
+    // trapping the user between Back and the redirect.
+    try { sessionStorage.setItem(ENDED_KEY, id); } catch (e) { return false; }
+    window.location.href = '/present?session=' + encodeURIComponent(id) + '&ended=1';
+    return true;
+  }
+
   // ─── Ending watchdog ───────────────────────────────────────
   // Safety net so the UI can never strand on "Ending…". If the server's terminal
   // 'archived' broadcast never arrives within ENDING_WATCHDOG_MS, force the
@@ -3730,6 +3769,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
         sessionState = 'archived';
         stopTimer();
         clearAgenda();
+        if (openEndedSummary(sessionId)) return;
         updateUI();
       }
     }, ENDING_WATCHDOG_MS);
@@ -5564,7 +5604,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
     var existing = actionCards.get(action.id);
 
     var card = document.createElement('div');
-    card.className = 'card' + (action.state === 'running' && !isReplay ? ' running' : action.state === 'suggested' ? ' suggested' : '');
+    card.className = 'card' + (action.type === 'summary' || action.type === 'review' ? ' card-doc' : '') +
+      (action.state === 'running' && !isReplay ? ' running' : action.state === 'suggested' ? ' suggested' : '');
     card.id = 'action-' + action.id;
 
     var typeClass = action.state === 'failed' ? 'failed' : action.type;
@@ -5638,6 +5679,15 @@ const PRESENT_HTML = `<!DOCTYPE html>
     }
 
     card.innerHTML = header + body;
+    // Summaries write sub-headings as a paragraph that is all bold
+    // ("**Backgrounds and rapport**") rather than ###; mark those so they take
+    // the vault's h3 hue instead of reading as black body text.
+    if (card.classList.contains('card-doc')) {
+      card.querySelectorAll('.card-body p').forEach(function(p) {
+        var b = p.children.length === 1 && p.firstElementChild.tagName === 'STRONG' ? p.firstElementChild : null;
+        if (b && b.textContent.trim() === p.textContent.trim()) p.classList.add('doc-subhead');
+      });
+    }
     if (existing) {
       // State update — re-render in place so cards don't jump mid-read.
       existing.replaceWith(card);
@@ -6754,6 +6804,13 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
       switch (msg.type) {
         case 'session.state':
+          // Back from the post-meeting summary: the server still says archived
+          // for the meeting just reviewed. Treat it as idle so the setup form
+          // shows (and a later reconnect can't wipe a half-filled form).
+          if (msg.state === 'archived' && msg.sessionId && endedSummaryShown(msg.sessionId)) {
+            if (sessionState !== 'idle') window.newMeeting();
+            break;
+          }
           sessionState = msg.state;
           sessionId = msg.sessionId || sessionId;
           // Adopt the server's authoritative start time whenever it sends one.
@@ -6786,6 +6843,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
             // doesn't sit in the TOC after the meeting ends.
             stopTimer();
             clearAgenda();
+            if (openEndedSummary(sessionId)) break;
           } else if (msg.state === 'idle') {
             // Hard reset for a new meeting (user clicked "New Meeting").
             stopTimer();
@@ -6934,6 +6992,22 @@ const PRESENT_HTML = `<!DOCTYPE html>
     };
   }
 
+  // Arriving straight from a meeting that just ended: the end-of-meeting summary
+  // is the LAST summary card (replay is chronological, below every research
+  // card). Open its scroll box to full height, bring it into view and flash it.
+  function focusFinalSummary(actions) {
+    var last = null;
+    actions.forEach(function(a) { if (a.type === 'summary' && a.state === 'completed') last = a; });
+    var card = last && document.getElementById('action-' + last.id);
+    if (!card) return;
+    var box = card.querySelector('.card-scroll');
+    if (box) box.style.height = 'auto';
+    setTimeout(function() {
+      card.scrollIntoView({ block: 'start' });
+      card.classList.add('card-arrive');
+    }, 50);
+  }
+
   // ─── SSE Fallback (for replay or if WS unavailable) ───────
   function connectSSE() {
     var source = new EventSource('/present/events');
@@ -6958,6 +7032,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       .then(function(data) {
         if (data.actions && data.actions.length > 0) {
           data.actions.forEach(renderAction);
+          if (params.get('ended') === '1') focusFinalSummary(data.actions);
         }
         headerTitle.innerHTML = '<span style="cursor:pointer;color:var(--gb-blue);margin-right:8px" onclick="window.location.href=\\'/present\\'">&larr; Back</span> Session Replay';
       });
