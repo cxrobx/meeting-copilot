@@ -7,7 +7,7 @@ import dotenv from 'dotenv';
 
 import { isOpenAiApiAvailable } from '../api/openai.js';
 import { resetLlmBudget } from '../api/budget.js';
-import { MODEL_CONFIG } from '../model-config.js';
+import { LLM_CONFIG, MODEL_CONFIG } from '../model-config.js';
 // The real worker, not a copy of its prompt: this scores what the ⚡ Fast
 // button ships, including the Claude fallback when the OpenAI call fails.
 import { FastResearchWorker, FAST_RESEARCH_SYSTEM } from '../workers/fast-research.js';
@@ -203,9 +203,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const label = provider === 'luna' ? MODEL_CONFIG.fastResearch : `${claudeModel} (claude CLI)`;
+  // With COPILOT_LIVE_LLM_MODE=cli the worker skips OpenAI and answers with
+  // Haiku through the claude CLI, so label (and don't call metered) that run.
+  const workerOnCli = provider === 'luna' && LLM_CONFIG.liveTransport === 'cli';
+  const label = provider === 'claude'
+    ? `${claudeModel} (claude CLI)`
+    : workerOnCli ? `${MODEL_CONFIG.haiku} (claude CLI, COPILOT_LIVE_LLM_MODE=cli)` : MODEL_CONFIG.fastResearch;
   console.log(`Fast-research accuracy eval · ${label} + web search · ${cases.length} cases × ${runs} run(s)`);
-  console.log(provider === 'luna'
+  console.log(provider === 'luna' && !workerOnCli
     ? 'METERED: every case is a live OpenAI call with web search. Questions are synthetic; no meeting content is sent.'
     : 'Subscription: every case is a cold `claude` CLI spawn with WebSearch/WebFetch. Questions are synthetic.');
 
