@@ -19,8 +19,29 @@ type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
 // per-session dollar ceiling in budget.ts, so stale-high numbers trip the
 // killswitch early rather than merely mis-reporting.
 // Sol is unchanged; `service_tier: "fast"` (which replaced Priority
-// Processing) would bill Sol at 2x these rates, but no call site sets it.
+// Processing) bills Sol at 2x these rates.
+//
+// Opt-in priority processing. OpenAI accepts `service_tier: "fast"` on Luna and
+// reports it back as billed `priority` (probed 2026-09-21). Unset = the
+// default tier. Read per call so an eval can A/B it without a restart.
+function serviceTier(): string | undefined {
+  const tier = (process.env.COPILOT_OPENAI_SERVICE_TIER ?? '').trim();
+  return tier && tier !== 'default' ? tier : undefined;
+}
+
+// Priority bills at 2x (the Sol rate above; not re-checked for Luna). Applied
+// to the budget so the ceiling stays pessimistic when the tier is on.
+function tierMultiplier(): number {
+  return serviceTier() ? 2 : 1;
+}
+
 function tokenPrices(model: string): { input: number; output: number } {
+  const m = tierMultiplier();
+  const base = baseTokenPrices(model);
+  return { input: base.input * m, output: base.output * m };
+}
+
+function baseTokenPrices(model: string): { input: number; output: number } {
   if (model.includes('gpt-5.6-luna')) return { input: 0.2, output: 1.2 };
   if (model.includes('gpt-5.6-terra')) return { input: 2, output: 12 };
   if (model.includes('gpt-5.6-sol') || model === 'gpt-5.6') return { input: 5, output: 30 };
@@ -86,6 +107,7 @@ export async function openaiStructuredJson(
         },
       },
       reasoning: { effort: options.reasoningEffort ?? 'none' },
+      ...(serviceTier() ? { service_tier: serviceTier() as any } : {}),
       ...(options.maxOutputTokens
         ? { max_output_tokens: options.maxOutputTokens }
         : {}),
@@ -168,6 +190,7 @@ export async function openaiFastResearchStream(params: {
       ],
       stream: true,
       reasoning: { effort: 'low' },
+      ...(serviceTier() ? { service_tier: serviceTier() as any } : {}),
     },
     { signal: params.signal, maxRetries: 0 },
   );
