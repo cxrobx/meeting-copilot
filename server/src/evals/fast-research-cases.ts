@@ -54,6 +54,8 @@ export const HEDGE_PATTERN = new RegExp(
     // A labelled estimate is a hedge; a stated figure still trips mustNotInclude.
     String.raw`\bbest (?:current |available )?estimate\b`,
     String.raw`\bcould (?:differ|change|vary)\b`,
+    // Re-attribution: "this figure comes from Fellow's survey, not a Gartner study".
+    String.raw`\bnot (?:a|an|from (?:a |an |the )?)\s*(?:\w+\s+){0,2}(?:study|report|survey|research)\b`,
     String.raw`(?:unable|impossible|not possible) to (?:find|locate|confirm|verify|predict|know|say)`,
     String.raw`(?:does|did|has|have|is|was)(?:n't| not| never) (?:exist|acquire|buy|bought|purchase|been|a real|an actual|enacted|passed|publicly)`,
     String.raw`\bnever (?:acquired|bought|purchased|existed|happened|been)`,
@@ -242,6 +244,19 @@ export function gradeAnswer(testCase: ResearchCase, rawAnswer: string): GradeRes
   const hedged = HEDGE_PATTERN.test(answer);
 
   if (!answer.trim()) return { grade: 'wrong', reasons: ['empty answer'] };
+
+  // On a trap, the prompt's contract is "say you can't find it FIRST, then
+  // offer the closest real thing". A first sentence that declines (and does
+  // not itself assert the forbidden claim) clears alternative figures that
+  // follow it. Seen live: "I couldn't verify a Gartner finding… The closest
+  // Gartner 2025 figure I found is 54%…", cited to gartner.com.
+  if (testCase.kind === 'trap' && forbidden.length > 0) {
+    // A sentence can end inside a closing quote: `…note-takers.” The closest…`
+    const first = answer.split(/(?<=[.!?]["”')\]]?)\s+/)[0] ?? '';
+    const firstDeclines = HEDGE_PATTERN.test(first)
+      && !(testCase.mustNotInclude ?? []).some((re) => re.test(first));
+    if (firstDeclines) return { grade: 'correct', reasons: ['declined first; later figure offered as an alternative'] };
+  }
   if (forbidden.length > 0) return { grade: 'wrong', reasons };
 
   if (testCase.kind === 'trap') {

@@ -12,6 +12,7 @@ import { LLM_CONFIG, MODEL_CONFIG } from '../model-config.js';
 // button ships, including the Claude fallback when the OpenAI call fails.
 import { FastResearchWorker, FAST_RESEARCH_SYSTEM } from '../workers/fast-research.js';
 import { claudeSuggest } from '../claude-cli.js';
+import { checkAttributions, extractUrlSources } from '../workers/citations.js';
 import { CASES, gradeAnswer, type Grade, type ResearchCase } from './fast-research-cases.js';
 
 const USER_ENV_PATH = join(homedir(), '.meeting-copilot', '.env');
@@ -34,6 +35,8 @@ interface RunResult {
   totalMs: number;
   sources: number;
   fellBack: boolean;
+  /** Named sources the attribution check flagged as uncited. */
+  flagged: string[];
   answer: string;
   error?: string;
 }
@@ -64,13 +67,13 @@ function parseArgs(): Args {
   return parsed;
 }
 
-const URL_RE = /https?:\/\/[^\s)\]}"'<>]+/g;
-
 /** What the worker returns, reduced to what the grader and the table need. */
 interface Answer {
   success: boolean;
+  /** The answer alone, without the citation footer the worker appends. */
   findings: string;
   sources: number;
+  flagged: string[];
   error?: string;
 }
 
@@ -82,8 +85,13 @@ function lunaAnswerer(): Answerer {
     const result = await worker.execute({ query, _onDelta: onDelta }, signal);
     return {
       success: result.success,
-      findings: result.success ? String(result.data?.findings ?? '') : '',
+      // `answer` is the text before the footer: a footer source title could
+      // otherwise contain the very words a key looks for.
+      findings: result.success ? String(result.data?.answer ?? result.data?.findings ?? '') : '',
       sources: Array.isArray(result.data?.sources) ? result.data.sources.length : 0,
+      flagged: Array.isArray(result.data?.unverifiedAttributions)
+        ? result.data.unverifiedAttributions.map((u: { source: string }) => u.source)
+        : [],
       error: result.success ? undefined : (result.error ?? result.summary),
     };
   };
@@ -97,9 +105,16 @@ function claudeAnswerer(model: string): Answerer {
         model,
       });
       // No structured citations on this path; count the URLs it surfaced.
-      return { success: true, findings: text, sources: new Set(text.match(URL_RE) ?? []).size };
+      // Same citation step the workers run, so this path is scored alike.
+      const sources = extractUrlSources(text);
+      return {
+        success: true,
+        findings: text,
+        sources: sources.length,
+        flagged: checkAttributions(text, sources).map((u) => u.source),
+      };
     } catch (error) {
-      return { success: false, findings: '', sources: 0, error: error instanceof Error ? error.message : String(error) };
+      return { success: false, findings: '', sources: 0, flagged: [], error: error instanceof Error ? error.message : String(error) };
     }
   };
 }
@@ -130,7 +145,7 @@ async function runCase(answerer: Answerer, testCase: ResearchCase): Promise<RunR
     const totalMs = Math.round(performance.now() - started);
     // Grade the answer, not the appended citation block: a source title can
     // contain the very words the key looks for.
-    const answer = result.findings.split('\n\n---\n**Sources**')[0] ?? '';
+    const answer = result.findings;
     const graded = result.success
       ? gradeAnswer(testCase, answer)
       : { grade: 'wrong' as Grade, reasons: [`worker failed: ${result.error}`] };
@@ -141,6 +156,7 @@ async function runCase(answerer: Answerer, testCase: ResearchCase): Promise<RunR
       ttftMs,
       totalMs,
       sources: result.sources,
+      flagged: result.flagged,
       fellBack: answer.startsWith(FALLBACK_MARKER),
       answer,
       error: result.error,
@@ -154,10 +170,11 @@ function printResult(r: RunResult): void {
   const mark = r.grade === 'correct' ? '✓' : r.grade === 'hedged' ? '~' : '✗';
   const ttft = r.ttftMs === null ? '   —' : String(r.ttftMs).padStart(5);
   const slow = r.totalMs > SLOW_MS ? ' SLOW' : '';
+  const flag = r.flagged.length ? ` ⚠ unverified: ${r.flagged.join(', ')}` : '';
   const fb = r.fellBack ? ' FALLBACK' : '';
   console.log(
     `${mark} ${r.caseId.padEnd(30)} ${r.kind.padEnd(5)} ${r.grade.padEnd(7)} `
-      + `ttft ${ttft}ms  total ${String(r.totalMs).padStart(6)}ms  src ${r.sources}${slow}${fb}`,
+      + `ttft ${ttft}ms  total ${String(r.totalMs).padStart(6)}ms  src ${r.sources}${slow}${fb}${flag}`,
   );
   if (r.grade !== 'correct') {
     for (const reason of r.reasons) console.log(`    · ${reason}`);
@@ -185,6 +202,10 @@ function printSummary(results: RunResult[], label: string): void {
   console.log(`  ttft  p50/p95     ${percentile(ttfts, 50)} / ${percentile(ttfts, 95)} ms`);
   console.log(`  total p50/p95     ${percentile(totals, 50)} / ${percentile(totals, 95)} ms   (worst ${Math.max(0, ...totals)} ms)`);
   console.log(`  no sources cited  ${results.filter((r) => r.sources === 0).length}`);
+  // How often the attribution check would put a warning on the card. On a
+  // trap that is the check working; on a correct fact it is noise.
+  const flagged = results.filter((r) => r.flagged.length > 0);
+  console.log(`  ⚠ unverified      ${flagged.length}${flagged.length ? ` (${flagged.map((r) => r.caseId).join(', ')})` : ''}`);
   const fellBack = results.filter((r) => r.fellBack).length;
   if (fellBack > 0) console.log(`  FELL BACK         ${fellBack} — those answers are Claude's, not ${label}'s`);
 }

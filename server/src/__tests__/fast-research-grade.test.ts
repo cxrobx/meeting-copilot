@@ -128,6 +128,30 @@ describe('fast-research grader', () => {
     expect(g.grade).toBe('wrong');
   });
 
+  it('passes a trap that declines first, then offers a real alternative (live answer, inline-link prompt)', () => {
+    const g = gradeAnswer(
+      byId('nonexistent-gartner-study'),
+      'I couldn’t verify a Gartner finding specifically phrased as “meetings changed by AI note-takers.” The closest Gartner 2025 figure I found is that **54% of enterprises had deployed at least one AI meeting tool**, but that measures adoption. ([Gartner](https://www.gartner.com/en/documents/6753534))',
+    );
+    expect(g.grade).toBe('correct');
+  });
+
+  it('passes a figure re-attributed to its real source (live answer)', () => {
+    const g = gradeAnswer(
+      byId('nonexistent-gartner-study'),
+      '**84%** of respondents said they changed what they said when an AI note-taker was present. Note: this figure comes from **Fellow.ai’s 2025 survey**, not a Gartner study.',
+    );
+    expect(g.grade).toBe('correct');
+  });
+
+  it('still fails a figure asserted in the first sentence, even with a hedge in it', () => {
+    const g = gradeAnswer(
+      byId('nonexistent-gartner-study'),
+      'The Gartner study found 37% of meetings were changed, though I could not verify the methodology. It may be outdated.',
+    );
+    expect(g.grade).toBe('wrong');
+  });
+
   it('treats an empty answer as wrong', () => {
     expect(gradeAnswer(byId('fdic-limit'), '   ').grade).toBe('wrong');
   });

@@ -1,5 +1,6 @@
 import { claudeSuggest } from '../claude-cli.js';
 import type { Worker, WorkerCapabilities, WorkerResult } from './types.js';
+import { checkAttributions, citationFooter, extractUrlSources } from './citations.js';
 
 export class ResearchWorker implements Worker {
   public readonly name = 'research';
@@ -47,7 +48,13 @@ If context from the meeting is provided, use it to tailor your research to what 
         : `Research query: ${query}`;
 
       const onDelta = params._onDelta as ((text: string) => void) | undefined;
-      const text = await claudeSuggest(userContent, systemPrompt, signal, ['WebSearch', 'WebFetch'], { onDelta });
+      const answer = await claudeSuggest(userContent, systemPrompt, signal, ['WebSearch', 'WebFetch'], { onDelta });
+      // Same output shape and attribution check as Fast research (see
+      // citations.ts). The prompt is deliberately untouched: there is no eval
+      // for this worker, so a prompt change here could not be measured.
+      const sources = extractUrlSources(answer);
+      const unverifiedAttributions = checkAttributions(answer, sources);
+      const text = `${answer}${citationFooter(sources, unverifiedAttributions)}`;
 
       if (signal.aborted) {
         return {
@@ -60,7 +67,7 @@ If context from the meeting is provided, use it to tailor your research to what 
 
       return {
         success: true,
-        data: { query, findings: text },
+        data: { query, answer, findings: text, sources, unverifiedAttributions },
         summary: `Research completed for: ${query}`,
         artifacts: [
           {
