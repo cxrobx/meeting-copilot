@@ -10,6 +10,8 @@ const BASE_DIR = join(homedir(), '.meeting-copilot', 'sessions');
 export interface SessionRecord {
   id: string;
   title: string;
+  /** Free-text roster captured at session.start; '' when none was given. */
+  attendees: string;
   startedAt: number;
   endedAt: number | null;
   state: 'active' | 'paused' | 'ended';
@@ -151,6 +153,7 @@ export class SessionStore {
     return {
       id: this.sessionId,
       title,
+      attendees: attendees ?? '',
       startedAt: now,
       endedAt: null,
       state: 'active',

@@ -782,6 +782,11 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
               transcript: fullTranscript,
               scope: 'full',
               title: session?.title,
+              // The note's filename is stamped from the meeting's own start
+              // time, not "now" — otherwise a call that runs past midnight
+              // refreshes onto a second file under tomorrow's date.
+              startedAt: session?.startedAt,
+              attendees: session?.attendees,
             },
             new AbortController().signal,
           );
@@ -920,6 +925,10 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
                 transcript: fullTranscript,
                 scope: 'full',
                 title: session?.title,
+                // Both already live on the session record; without them the
+                // filename falls back to "now" and drops the counterpart.
+                startedAt: session?.startedAt,
+                attendees: session?.attendees,
               },
             }, { force: true, system: true });
             if (summaryAction) {

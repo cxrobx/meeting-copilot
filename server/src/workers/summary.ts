@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { claudeSuggest } from '../claude-cli.js';
 import { getSettings } from '../settings.js';
+import { buildMeetingFilename, formatMeetingDate } from './filename.js';
 import type { Worker, WorkerCapabilities, WorkerResult } from './types.js';
 
 export class SummaryWorker implements Worker {
@@ -27,6 +28,8 @@ export class SummaryWorker implements Worker {
     const scope = (params.scope as string) ?? 'full';
     const focus = params.focus as string | undefined;
     const title = params.title as string | undefined;
+    const startedAt = params.startedAt as number | string | undefined;
+    const attendees = params.attendees as string | undefined;
 
     if (!transcript) {
       return {
@@ -88,17 +91,19 @@ Be concise but thorough. Focus on substance, not filler.`;
         };
       }
 
-      const dateStr = new Date().toISOString().slice(0, 10);
+      // Local time, from the meeting's own start — NEVER toISOString(), which
+      // renders UTC and rolls an evening ET meeting onto the next day.
+      const dateStr = formatMeetingDate(startedAt);
 
       // Auto-write to ~/Documents/CX/Meetings only when enabled in settings —
       // the artifact below is returned (and persisted with the session) either way.
       let filePath: string | null = null;
       if (getSettings().summaryAutoWrite) {
-        const sanitizedTitle = (title ?? 'meeting')
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, '-')
-          .replace(/^-|-$/g, '');
-        const filename = `${dateStr}-${sanitizedTitle}.md`;
+        // `<CATEGORY> <Who|Topic> <MM.DD.YY>.md` — see ~/Documents/CX/CLAUDE.md.
+        // Stays in `Meetings/`: routing the note to a client folder would mean
+        // widening this worker's write sandbox to the whole vault, and
+        // notes4chris already owns filing.
+        const filename = buildMeetingFilename({ title, attendees, startedAt });
 
         const meetingsDir = join(homedir(), 'Documents', 'CX', 'Meetings');
         await mkdir(meetingsDir, { recursive: true });

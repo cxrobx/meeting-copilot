@@ -91,6 +91,7 @@ Full list in `.claude/rules/architecture.md`.
 | `.claude/rules/backend.md` | Node.js server patterns | Path: `server/**` |
 | `docs/README.md` | Documentation index | On demand |
 | `docs/api.md` | WebSocket & REST API reference | On demand |
+5. **NEVER `toISOString()` for a filename date** — it renders UTC, so any meeting after ~20:00 ET is stamped with tomorrow. Vault notes use `<CATEGORY> <Who|Topic> <MM.DD.YY>.md` in **local** time, from the session's own `startedAt` (not "now"). Helpers: `server/src/workers/filename.ts`; convention: `~/Documents/CX/CLAUDE.md`; mirror: `notes4chris/services/summariser.js`
 | `docs/setup.md` | Environment & deployment | On demand |
 | `CHANGELOG.md` | Version history | On demand |
 
