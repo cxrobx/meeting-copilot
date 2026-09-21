@@ -1384,35 +1384,40 @@ const PRESENT_HTML = `<!DOCTYPE html>
     font-size: 12px;
   }
   .review-md blockquote p { margin: 0; }
+  /* Each item is its own wrapping block: no nested scroll box, whole
+     questions visible, room between rows. \`.idle-form\` in the selectors
+     because \`.idle-form textarea\` would otherwise out-rank these. */
   .agenda-editor-list {
-    border: 1px solid var(--gb-surface2);
-    border-radius: 5px;
-    background: var(--gb-surface1);
-    padding: 4px;
-    max-height: 260px;
-    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
   .agenda-editor-row {
     display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 2px;
+    align-items: flex-start;
+    gap: 6px;
   }
-  .agenda-editor-row + .agenda-editor-row { margin-top: 2px; }
-  .agenda-editor-input {
+  .idle-form .agenda-editor-input {
     flex: 1 1 auto;
+    display: block;
     font-family: var(--font-sans);
-    font-size: 11px;
-    padding: 5px 8px;
+    font-size: 12px;
+    line-height: 1.5;
+    padding: 9px 12px;
     border: 1px solid var(--gb-surface2);
-    border-radius: 4px;
-    background: var(--gb-base);
+    border-radius: 6px;
+    background: var(--gb-surface0);
     color: var(--gb-text);
     outline: none;
+    resize: none;
+    overflow: hidden;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
-  .agenda-editor-input:focus { border-color: var(--gb-blue); }
+  .idle-form .agenda-editor-input:focus { border-color: var(--gb-blue); }
   .agenda-editor-remove {
     flex: 0 0 auto;
+    margin-top: 7px; /* level with the first line of text */
     width: 22px; height: 22px;
     border: none; background: transparent;
     color: var(--gb-overlay2);
@@ -3136,11 +3141,35 @@ const PRESENT_HTML = `<!DOCTYPE html>
     var inputs = document.querySelectorAll('.agenda-editor-input');
     var out = [];
     for (var i = 0; i < inputs.length; i++) {
-      var v = inputs[i].value.trim();
+      var v = inputs[i].value.replace(/\\s+/g, ' ').trim(); // one agenda line per item
       if (v) out.push(v);
     }
     return out;
   }
+
+  // Agenda items are textareas that grow to fit, so a long question wraps
+  // instead of being cut off. scrollHeight is 0 while the form is hidden —
+  // leave rows="1" in charge then rather than collapsing the box.
+  window.autosizeAgendaItem = function(el) {
+    el.style.height = 'auto';
+    if (!el.scrollHeight) { el.style.height = ''; return; }
+    el.style.height = (el.scrollHeight + el.offsetHeight - el.clientHeight) + 'px';
+  };
+
+  function autosizeAgendaItems() {
+    var inputs = document.querySelectorAll('.agenda-editor-input');
+    for (var i = 0; i < inputs.length; i++) window.autosizeAgendaItem(inputs[i]);
+  }
+  window.addEventListener('resize', autosizeAgendaItems);
+
+  // Enter would split one item into two lines — and collectAgendaString
+  // joins items with newlines, so it would silently become two items.
+  window.agendaItemKeydown = function(e) {
+    if (e.key === 'Enter' && !e.isComposing) {
+      e.preventDefault();
+      e.target.blur();
+    }
+  };
 
   function renderAgendaEditor() {
     var host = document.getElementById('agendaEditor');
@@ -3151,7 +3180,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       var listHtml = '<div class="agenda-editor-list" id="agendaItemList">';
       for (var i = 0; i < items.length; i++) {
         listHtml += '<div class="agenda-editor-row">' +
-          '<input type="text" class="agenda-editor-input" value="' + escapeHtml(items[i]) + '">' +
+          '<textarea class="agenda-editor-input" rows="1" oninput="autosizeAgendaItem(this)" onkeydown="agendaItemKeydown(event)">' + escapeHtml(items[i]) + '</textarea>' +
           '<button type="button" class="agenda-editor-remove" onclick="removeAgendaItem(' + i + ')" title="Remove">×</button>' +
         '</div>';
       }
@@ -3162,6 +3191,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
           '<button type="button" class="btn btn-ghost" onclick="revertToRawAgenda()">Start over with raw text</button>' +
           '<span class="agenda-editor-count">' + items.length + ' item' + (items.length === 1 ? '' : 's') + '</span>' +
         '</div>';
+      autosizeAgendaItems();
       return;
     }
 
