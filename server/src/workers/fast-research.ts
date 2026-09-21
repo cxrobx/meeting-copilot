@@ -5,7 +5,7 @@ import {
   type FastResearchSource,
 } from '../api/openai.js';
 import type { Worker, WorkerCapabilities, WorkerResult } from './types.js';
-import { MODEL_CONFIG } from '../model-config.js';
+import { LLM_CONFIG, MODEL_CONFIG } from '../model-config.js';
 
 // Exported so `npm run eval:research` scores alternative models against the
 // exact prompt this worker ships, not a copy that drifts.
@@ -73,7 +73,9 @@ export class FastResearchWorker implements Worker {
       let text: string;
       let sources: FastResearchSource[] = [];
 
-      if (isOpenAiApiAvailable()) {
+      // `COPILOT_LIVE_LLM_MODE=cli` is the documented subscription-only switch;
+      // this worker used to ignore it and bill OpenAI whenever a key was set.
+      if (LLM_CONFIG.liveTransport !== 'cli' && isOpenAiApiAvailable()) {
         try {
           const result = await openaiFastResearchStream({
             systemPrompt,

@@ -26,6 +26,7 @@ import { CoachMonitor, type CoachSuggestion } from './intelligence/coach.js';
 import { WorkerRegistry } from './workers/registry.js';
 import { ResearchWorker } from './workers/research.js';
 import { FastResearchWorker } from './workers/fast-research.js';
+import { routeSuggestedType } from './intelligence/suggested-type.js';
 import { SummaryWorker } from './workers/summary.js';
 import { MockupWorker } from './workers/mockup.js';
 import { CodeGenWorker } from './workers/codegen.js';
@@ -1369,7 +1370,7 @@ intelligence.onPartialSuggestion(({ id, partial, final, done }) => {
         params = partial.params;
       }
       const action = registry.suggestStreaming(id, {
-        type: partial.type,
+        type: routeSuggestedType(partial.type),
         title: partial.title,
         description: partial.description,
         triggerQuote: partial.triggerQuote,
@@ -1409,6 +1410,10 @@ intelligence.onPartialSuggestion(({ id, partial, final, done }) => {
     injectedSuggestionIds.delete(id);
     return;
   }
+
+  // Same routing as the streaming card, or finalizeStreaming would flip the
+  // card's type back to `research` when the full suggestion lands.
+  final.type = routeSuggestedType(final.type) as typeof final.type;
 
   if (!injectedSuggestionIds.has(id)) {
     injectWorkerContext(final.params, final.triggerQuote);

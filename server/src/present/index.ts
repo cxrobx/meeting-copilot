@@ -3883,7 +3883,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       '</div>' +
       '<input class="quick-actions-input" id="quickPrompt" placeholder="Topic or prompt (optional)...">' +
       '<div class="quick-actions-row">' +
-        '<button class="btn btn-ghost" onclick="triggerAction(\\'fast-research\\')" title="Haiku, streaming">\u26A1 Fast</button>' +
+        '<button class="btn btn-ghost" onclick="triggerAction(\\'fast-research\\')" title="Quick answer with web search, in seconds (GPT-5.6 Luna, a cent or two)">\u26A1 Fast</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'research\\')">Research</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'summary\\')">Summary</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'analysis\\')">Analysis</button>' +

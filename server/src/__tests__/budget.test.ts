@@ -108,4 +108,19 @@ describe('per-session LLM budget', () => {
     expect(snap.requests).toBe(0);
     expect(snap.estimatedDollars).toBe(0);
   });
+
+  it('counts per-call fees (web search) toward the dollar ceiling, not the token one', () => {
+    // A searched fast-research answer: ~17k tokens of mostly search content,
+    // plus two billed searches. The fee is most of its cost.
+    recordLlmUsage({
+      inputTokens: 16_942,
+      outputTokens: 220,
+      inputDollarsPerMillion: 0.2,
+      outputDollarsPerMillion: 1.2,
+      extraDollars: 2 * 0.01,
+    });
+    const snap = getLlmBudgetSnapshot();
+    expect(snap.tokens).toBe(17_162);
+    expect(snap.estimatedDollars).toBeCloseTo(0.0036528 + 0.02, 6);
+  });
 });

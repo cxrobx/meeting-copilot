@@ -90,11 +90,14 @@ export function recordLlmUsage(params: {
   outputTokens: number;
   inputDollarsPerMillion: number;
   outputDollarsPerMillion: number;
+  /** Per-call fees that are not tokens, e.g. OpenAI's per-search charge. */
+  extraDollars?: number;
 }): void {
   tokens += params.inputTokens + params.outputTokens;
   estimatedDollars +=
     (params.inputTokens * params.inputDollarsPerMillion
-      + params.outputTokens * params.outputDollarsPerMillion) / 1_000_000;
+      + params.outputTokens * params.outputDollarsPerMillion) / 1_000_000
+    + (params.extraDollars ?? 0);
 }
 
 export function getLlmBudgetSnapshot() {

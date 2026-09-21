@@ -27,6 +27,12 @@ function tokenPrices(model: string): { input: number; output: number } {
   return { input: 2, output: 10 };
 }
 
+// OpenAI bills the web_search tool per call, separately from tokens. $0.01 is
+// what it cost when this was written and has not been re-checked against the
+// pricing page — override it rather than trusting it. Pessimistic on purpose,
+// like the token prices above: a high number trips the ceiling early.
+const WEB_SEARCH_DOLLARS_PER_CALL = Number(process.env.COPILOT_OPENAI_WEB_SEARCH_PER_CALL || 0.01);
+
 function getClient(): OpenAI {
   if (!cachedClient) cachedClient = new OpenAI();
   return cachedClient;
@@ -169,6 +175,8 @@ export async function openaiFastResearchStream(params: {
   const sources: FastResearchSource[] = [];
   const seenUrls = new Set<string>();
   let accumulated = '';
+  let usage: OpenAI.Responses.ResponseUsage | undefined;
+  let searches = 0;
 
   for await (const event of stream) {
     if (event.type === 'response.output_text.delta') {
@@ -197,11 +205,28 @@ export async function openaiFastResearchStream(params: {
           }
         }
       }
+    } else if (event.type === 'response.completed') {
+      usage = event.response.usage;
+      searches = event.response.output.filter((o) => o.type === 'web_search_call').length;
     }
   }
 
+  // Until 2026-09-21 this path called beginLlmRequest() but never recorded
+  // usage, so fast research was invisible to the per-session dollar ceiling.
+  // It now runs for every approved research suggestion, so it has to count.
+  // Measured: ~4.5k input tokens of tool overhead even with no search, up to
+  // ~17k with two searches — and each search is billed per call on top.
+  const prices = tokenPrices(FAST_RESEARCH_MODEL);
+  recordLlmUsage({
+    inputTokens: usage?.input_tokens ?? 0,
+    outputTokens: usage?.output_tokens ?? 0,
+    inputDollarsPerMillion: Number(process.env.COPILOT_OPENAI_INPUT_PER_MILLION || prices.input),
+    outputDollarsPerMillion: Number(process.env.COPILOT_OPENAI_OUTPUT_PER_MILLION || prices.output),
+    extraDollars: searches * WEB_SEARCH_DOLLARS_PER_CALL,
+  });
+
   const elapsed = Date.now() - started;
   const ttft = firstTokenAt > 0 ? firstTokenAt - started : -1;
-  log('api/openai', `${tag} model=${FAST_RESEARCH_MODEL} ttftMs=${ttft} totalMs=${elapsed} sources=${sources.length} chars=${accumulated.length}`);
+  log('api/openai', `${tag} model=${FAST_RESEARCH_MODEL} ttftMs=${ttft} totalMs=${elapsed} sources=${sources.length} chars=${accumulated.length} in=${usage?.input_tokens ?? 0} out=${usage?.output_tokens ?? 0} searches=${searches}`);
   return { text: accumulated, sources };
 }
