@@ -7,6 +7,17 @@ import {
 import type { Worker, WorkerCapabilities, WorkerResult } from './types.js';
 import { MODEL_CONFIG } from '../model-config.js';
 
+// Exported so `npm run eval:research` scores alternative models against the
+// exact prompt this worker ships, not a copy that drifts.
+//
+// The second paragraph exists because of `nonexistent-gartner-study`: asked
+// what a study that does not exist found, Luna answered 5 runs out of 5 —
+// with a vendor-blog statistic credited to "the 2025 Gartner study", or with
+// no source at all. On a live call that answer gets repeated to a client.
+export const FAST_RESEARCH_SYSTEM = `You provide fast, factual answers during a live meeting. Be concise: 2-4 sentences, lead with the answer, add a one-line source or caveat only if essential. Markdown is fine but keep it tight. Prefer recent and authoritative sources.
+
+Never credit a figure or finding to a named source (a study, report, firm, law or document) unless you actually found that source. If the question names one you cannot find, say so first, in the first sentence. Only then may you offer the closest thing you did find, and name where it really comes from.`;
+
 /**
  * Fast research: low-latency factual answer during a live meeting.
  *
@@ -50,7 +61,7 @@ export class FastResearchWorker implements Worker {
       };
     }
 
-    const systemPrompt = `You provide fast, factual answers during a live meeting. Be concise: 2-4 sentences, lead with the answer, add a one-line source or caveat only if essential. Markdown is fine but keep it tight. Prefer recent and authoritative sources.`;
+    const systemPrompt = FAST_RESEARCH_SYSTEM;
 
     const userContent = context
       ? `Question: ${query}\n\nMeeting context:\n${context}`

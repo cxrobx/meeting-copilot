@@ -48,9 +48,12 @@ export const HEDGE_PATTERN = new RegExp(
     String.raw`no (?:public|reliable|official|verifiable|credible|such|record|evidence|indication|publicly)`,
     // "can't" is c-a-n-'t, so `can(?:n't)` would only ever match "cann't".
     String.raw`(?:couldn't|could not|can't|cannot|can not) (?:find|locate|confirm|verify|predict|know|say)`,
-    String.raw`no one (?:can|could|knows)`,
+    String.raw`(?:no one|nobody) (?:can|could|knows)`,
     String.raw`(?:does|do)(?:n't| not) (?:appear|seem) to (?:be|exist|have)`,
     String.raw`not (?:a )?certain(?:ty)?\b`,
+    // A labelled estimate is a hedge; a stated figure still trips mustNotInclude.
+    String.raw`\bbest (?:current |available )?estimate\b`,
+    String.raw`\bcould (?:differ|change|vary)\b`,
     String.raw`(?:unable|impossible|not possible) to (?:find|locate|confirm|verify|predict|know|say)`,
     String.raw`(?:does|did|has|have|is|was)(?:n't| not| never) (?:exist|acquire|buy|bought|purchase|been|a real|an actual|enacted|passed|publicly)`,
     String.raw`\bnever (?:acquired|bought|purchased|existed|happened|been)`,

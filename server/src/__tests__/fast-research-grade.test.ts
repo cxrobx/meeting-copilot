@@ -93,6 +93,11 @@ describe('fast-research grader', () => {
       byId('future-rate'),
       'No one can know precisely, but the **latest Fed projection suggests about 4.1%** for the federal funds rate at the end of 2027.',
     ).grade).toBe('correct');
+    // Sonnet 5's phrasing, same run day.
+    expect(gradeAnswer(
+      byId('future-rate'),
+      '**Nobody can know this yet, but the best estimate is a target range of about 4.00%–4.50%.**',
+    ).grade).toBe('correct');
     expect(gradeAnswer(
       byId('future-rate'),
       '**Best current estimate: about 4.1%** in June 2027. That is a forecast, not a certainty; the Fed’s September 2026 projection put the 2027 year-end median at 4.1%.',

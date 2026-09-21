@@ -884,7 +884,11 @@ async function runProvider(provider: Provider): Promise<ProviderResult> {
         : `(unparseable: ${result.rawSnippet || 'empty'})`;
       console.log(
         `${mark} ${testCase.id.padEnd(25)} ${String(result.latencyMs).padStart(5)}ms`
-        + ` · ${advice}${result.issues.length ? ` · ${result.issues.join('; ')}` : ''}`,
+        + ` · ${advice}${result.issues.length ? ` · ${result.issues.join('; ')}` : ''}`
+        // A usable case can still miss the strict schema (the production
+        // parser defaults the field). Name the field, or the Schema column
+        // is a percentage nobody can act on.
+        + (!result.schemaValid && result.error ? ` · ${result.error}` : ''),
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
