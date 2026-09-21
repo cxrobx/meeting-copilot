@@ -53,10 +53,23 @@ cd app/MeetingCopilot && swift build
 ## Environment
 
 - `DEEPGRAM_API_KEY` — optional, for cloud transcription
+- `OPENAI_API_KEY` — **metered.** Present in `~/.meeting-copilot/.env`, and the live path prefers it
+- `TYPESAFE_API_KEY` — **metered.** Jev gate in front of the coach's generative call
 - `COPILOT_PORT` — TCP port (default: 17890; honored by BOTH server and app via `ServerConfig`)
-- `COPILOT_DISABLE_PAID_API=1` — hard zero-API-spend mode (CLIs/subscription only)
+- `COPILOT_LIVE_LLM_MODE=cli` — force the live path onto the subscription CLIs
+- `COPILOT_DISABLE_PAID_API=1` — hard zero-API-spend mode (CLIs/subscription only); also disables Jev
 - User-tunable settings live in `~/.meeting-copilot/settings.json` (dashboard gear panel → `POST /settings`; beats env vars)
-- No API keys required — all AI calls use headless CLIs (`claude`, `gemini`, `codex`) via user subscriptions
+
+> **The live path is METERED, not subscription.** This said "no API keys required — all
+> AI calls use headless CLIs via user subscriptions" until 2026-09-19, and it had been
+> wrong since at least 2026-07-28: `server.log` holds 789 metered OpenAI calls between
+> then and 2026-09-14 (~$1 total). `intelligence/index.ts` takes the API branch whenever
+> `liveTransport !== 'cli'` **and** an `OPENAI_API_KEY` is present — both true by default.
+> This is deliberate (the `db9ab7c` budget guard exists to cap exactly this spend), but it
+> is not the subscription. Anthropic spend is separately zero: the June fix strips
+> `ANTHROPIC_API_KEY` from every `claude` child env and `grep -c '\[api/anthropic\]'` is 0.
+> Per-call cost: Terra coach $0.0027 · Luna triage $0.00047 · Jev $0.000042.
+> For a genuinely subscription-only run, set `COPILOT_LIVE_LLM_MODE=cli`.
 
 ## Golden Commands
 
