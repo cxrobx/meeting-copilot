@@ -42,6 +42,8 @@ function tokenPrices(model: string): { input: number; output: number } {
 }
 
 function baseTokenPrices(model: string): { input: number; output: number } {
+  if (model.includes('gpt-6-luna')) return { input: 0.1, output: 0.5 };
+  if (model.includes('gpt-6-sol')) return { input: 2, output: 10 };
   if (model.includes('gpt-5.6-luna')) return { input: 0.2, output: 1.2 };
   if (model.includes('gpt-5.6-terra')) return { input: 2, output: 12 };
   if (model.includes('gpt-5.6-sol') || model === 'gpt-5.6') return { input: 5, output: 30 };

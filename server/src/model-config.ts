@@ -1,6 +1,6 @@
 export const MODEL_CONFIG = {
-  triage: process.env.COPILOT_TRIAGE_MODEL || 'gpt-5.6-luna',
-  agenda: process.env.COPILOT_AGENDA_MODEL || 'gpt-5.6-luna',
+  triage: process.env.COPILOT_TRIAGE_MODEL || 'gpt-6-luna',
+  agenda: process.env.COPILOT_AGENDA_MODEL || 'gpt-6-luna',
   agendaReconcile: process.env.COPILOT_AGENDA_RECONCILE_MODEL || 'gpt-5.6-terra',
   // Luna, not Terra. `npm run eval:coach`, 3 runs each on the 10 frozen cases:
   // identical quality (100/100 score, 100% decision/schema/quality on every
@@ -9,9 +9,10 @@ export const MODEL_CONFIG = {
   // `usable` mark twice, both times by missing the deadline rather than by
   // giving bad advice. Luna's worst p95 over the same runs was 3.3s. That tail
   // is the same thing that binned 13% of real coach evaluations as stale.
-  coach: process.env.COPILOT_COACH_MODEL || 'gpt-5.6-luna',
+  // gpt-6-luna since 2026-09-22: same eval, 100/100 again, p95 1.9s.
+  coach: process.env.COPILOT_COACH_MODEL || 'gpt-6-luna',
   geminiTriage: process.env.COPILOT_GEMINI_TRIAGE_MODEL || 'gemini-3.5-flash-lite',
-  fastResearch: process.env.COPILOT_RESEARCH_MODEL || 'gpt-5.6-luna',
+  fastResearch: process.env.COPILOT_RESEARCH_MODEL || 'gpt-6-luna',
   haiku: process.env.COPILOT_HAIKU_MODEL || 'claude-haiku-4-5-20251001',
   suggestion: process.env.COPILOT_SUGGEST_MODEL || process.env.COPILOT_SUGGESTION_MODEL || 'claude-sonnet-5',
   worker: process.env.COPILOT_WORKER_MODEL || 'claude-sonnet-5',
