@@ -38,6 +38,7 @@ import { DebugHandler } from './debug/index.js';
 import { cleanupOldSessions, cleanStalePresence } from './session/cleanup.js';
 import { writePresence, removePresence, appendTranscript, setSharingEnabled } from './session/shared.js';
 import { createPresentRouter } from './present/index.js';
+import { END_OF_MEETING_SUMMARY_DESCRIPTION } from './present/replay-actions.js';
 import { createRoutes } from './routes.js';
 import { scanProjects, loadProjectContext, formatProjectBrief } from './project/index.js';
 import type { ProjectContext } from './project/index.js';
@@ -238,6 +239,11 @@ let lastSessionId: string | null = null;
 let rollingSummaryId: string | null = null;
 let rollingSummaryTimer: ReturnType<typeof setInterval> | null = null;
 let rollingSummaryWordCount = 0;
+// The refresh in flight, if any. session.stop aborts it: a refresh that lands
+// after stop has cleared rollingSummaryId would create a second rolling card
+// next to the end-of-meeting summary, and rewrite the vault note from an older
+// transcript than the final summary's.
+let rollingSummaryAbort: AbortController | null = null;
 const ROLLING_SUMMARY_INTERVAL_MS = 120_000; // 2 minutes
 let configuredRetentionDays = getSettings().retentionDays;
 let whisperAvailable: boolean | null = null;
@@ -776,6 +782,8 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         const summaryWorker = registry.getWorker('summary');
         if (!summaryWorker) return;
 
+        const abort = new AbortController();
+        rollingSummaryAbort = abort;
         try {
           debugLog('[RollingSummary] Refreshing summary...');
           const result = await summaryWorker.execute(
@@ -789,10 +797,10 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
               startedAt: session?.startedAt,
               attendees: session?.attendees,
             },
-            new AbortController().signal,
+            abort.signal,
           );
 
-          if (result.success) {
+          if (result.success && !abort.signal.aborted) {
             if (rollingSummaryId) {
               // Update existing card in-place
               registry.replaceActionResult(rollingSummaryId, result);
@@ -833,6 +841,8 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
           }
         } catch (err) {
           debugLog(`[RollingSummary] Error: ${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+          if (rollingSummaryAbort === abort) rollingSummaryAbort = null;
         }
       }, ROLLING_SUMMARY_INTERVAL_MS);
 
@@ -888,6 +898,8 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
           clearInterval(rollingSummaryTimer);
           rollingSummaryTimer = null;
         }
+        rollingSummaryAbort?.abort();
+        rollingSummaryAbort = null;
         rollingSummaryId = null;
         rollingSummaryWordCount = 0;
 
@@ -919,7 +931,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
             const summaryAction = registry.suggest({
               type: 'summary',
               title: `Meeting Summary: ${session?.title || 'Untitled'}`,
-              description: 'Auto-generated end-of-meeting summary',
+              description: END_OF_MEETING_SUMMARY_DESCRIPTION,
               triggerQuote: fullTranscript.slice(-200),
               estimatedDurationSec: 30,
               params: {

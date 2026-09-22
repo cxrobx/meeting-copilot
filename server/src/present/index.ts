@@ -11,6 +11,7 @@ import { isOpenAiApiAvailable, openaiFastResearchStream } from '../api/openai.js
 import { isAnthropicApiAvailable, anthropicTriageJson } from '../api/anthropic.js';
 import { claudeSuggest } from '../claude-cli.js';
 import { buildSignalRegexSources, QUESTION_STARTS } from './signals.js';
+import { hideSupersededRollingSummaries } from './replay-actions.js';
 import { applyVaultLook, getVaultLook } from './vault-look.js';
 
 // ─── Highlight-to-ask prompts ───────────────────────────────────────────────
@@ -157,11 +158,11 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
       try {
         const db = new Database(dbPath, { readonly: true });
         const rows = db.prepare(
-          `SELECT id, type, title, description, state, result, completedAt FROM action ORDER BY createdAt ASC`,
-        ).all() as Array<{ id: string; type: string; title: string; description: string; state: string; result: string | null; completedAt: number | null }>;
+          `SELECT id, type, title, description, state, params, result, completedAt FROM action ORDER BY createdAt ASC`,
+        ).all() as Array<{ id: string; type: string; title: string; description: string; state: string; params: string | null; result: string | null; completedAt: number | null }>;
         db.close();
 
-        const actions = rows.map((r) => ({
+        const actions = hideSupersededRollingSummaries(rows).map((r) => ({
           id: r.id,
           type: r.type,
           title: r.title,
