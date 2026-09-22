@@ -34,6 +34,7 @@
 | `feature.state` | Monitor on/off snapshot | `features { factcheck, coach }` |
 | `factcheck.flag` | Fact-check verdict on a claim | `flag { claim, verdict, correction?, sources? }` |
 | `coach.suggestion` | "Say next" coach tip | `suggestion { kind, priority, headline, ... }` |
+| `coach.history` | Every coach card this session, sent on connect so a reload keeps them | `suggestions [ ... ]` |
 | `metrics` | Debug metrics snapshot | `data` |
 
 ## REST Endpoints
@@ -56,6 +57,7 @@
 | POST | `/meeting/prep` | Pre-meeting prep: email/past-session/vault context + a web-research agent (subscription CLI) → brief + agenda. Body `{ title?, attendees?, notes?, meeting? }` (`meeting` = a `/calendar/upcoming` entry). Streams NDJSON: `{type:"progress",message}`… then `{type:"result",brief,agenda,sources,mode,stats}` or `{type:"error",message}`. Closing the response cancels the agent |
 | GET | `/present` | The dashboard (HTML) |
 | GET | `/present/actions` / `/present/transcript` / `/present/sessions` | Dashboard data (live or `?session=<id>` replay) |
+| GET | `/present/coach?session=<uuid>` | Coach cards a stored session showed (from `coach_suggestion`; older sessions fall back to the event log's headlines) |
 | GET | `/present/events` | SSE fallback (replay only; suggested/running/completed) |
 | POST | `/present/ask` | Highlight-to-ask (SSE token stream) |
 | POST | `/present/review` | On-demand Opus self-review for a session |

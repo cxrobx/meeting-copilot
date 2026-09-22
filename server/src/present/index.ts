@@ -12,6 +12,7 @@ import { isAnthropicApiAvailable, anthropicTriageJson } from '../api/anthropic.j
 import { claudeSuggest } from '../claude-cli.js';
 import { buildSignalRegexSources, QUESTION_STARTS } from './signals.js';
 import { hideSupersededRollingSummaries } from './replay-actions.js';
+import { readStoredCoach, SESSION_ID_RE } from './replay-coach.js';
 import { applyVaultLook, getVaultLook } from './vault-look.js';
 
 // ─── Highlight-to-ask prompts ───────────────────────────────────────────────
@@ -225,6 +226,25 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
       res.json({ segments: rows, sessionId, startedAt: session?.startedAt ?? null });
     } catch (err) {
       res.status(500).json({ error: 'Failed to read transcript', detail: String(err) });
+    }
+  });
+
+  // ─── GET /present/coach — coach cards a stored session showed ───────
+  router.get('/present/coach', (req, res) => {
+    const sessionId = req.query.session as string | undefined;
+    if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
+      res.status(400).json({ error: 'session query param must be a session id' });
+      return;
+    }
+    const sessionDir = join(homedir(), '.meeting-copilot', 'sessions', sessionId);
+    if (!existsSync(sessionDir)) {
+      res.status(404).json({ error: 'Session not found', sessionId });
+      return;
+    }
+    try {
+      res.json({ suggestions: readStoredCoach(sessionDir), sessionId });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to read coach history', detail: String(err) });
     }
   });
 
@@ -2223,6 +2243,58 @@ const PRESENT_HTML = `<!DOCTYPE html>
     padding: 0 2px;
   }
   .coach-close:hover { color: var(--gb-text); }
+  /* The live card pins to the top of the column and is opaque, so the feed
+     scrolling beneath cannot show through the tint. Top 0, not under Quick
+     Actions: their own sticky has no effect (the rule sits on .quick-actions,
+     whose parent #quickActionsSlot is exactly its height), so they scroll
+     away. If that is ever fixed, offset this by their height. */
+  #coachSlot { position: sticky; top: 0; z-index: 19; }
+  #coachSlot:empty, #coachHistory:empty { display: none; }
+  #coachSlot .coach-strip {
+    background: linear-gradient(rgb(var(--warning) / 0.08), rgb(var(--warning) / 0.08)), var(--gb-base);
+    box-shadow: 0 6px 14px -12px rgb(var(--shadow-color) / 0.45);
+  }
+
+  /* ─── Coach history ─────────────────────────────────────────
+     Every card this meeting, newest first. The live card lasts 8–30s and
+     the next one replaces it; this is where they stay. Collapsed by default
+     so it costs a glance, and it outlives the meeting for the review. */
+  .coach-history {
+    background: var(--gb-surface0);
+    border: 1px solid var(--gb-surface2);
+    border-radius: 8px;
+    margin-bottom: 16px;
+  }
+  .coach-history > summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 8px 12px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--gb-subtext0);
+  }
+  .coach-history > summary::-webkit-details-marker { display: none; }
+  .coach-history > summary::before { content: '\\25B8'; display: inline-block; margin-right: 6px; font-size: 11px; transition: transform 0.15s; }
+  .coach-history[open] > summary::before { transform: rotate(90deg); }
+  .coach-history-list {
+    list-style: none;
+    margin: 0;
+    padding: 0 12px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .coach-history-item { display: flex; align-items: flex-start; gap: 10px; }
+  .coach-history-item .coach-phrasing { font-weight: 500; }
+  .coach-history-time {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--gb-overlay2);
+    flex-shrink: 0;
+    margin-top: 3px;
+  }
 
   /* ─── Fact-check flag cards ────────────────────────────────── */
   .card.factflag { border-color: var(--gb-red); background: rgb(var(--error) / 0.04); }
@@ -2952,6 +3024,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
       <button class="intel-warn" id="intelWarn" style="display:none" aria-label="Recent intelligence errors" title="Recent intelligence errors">&#9888; <span id="intelWarnCount"></span></button>
     </div>
     <div id="coachSlot"></div>
+    <div id="coachHistory"></div>
     <div id="results"></div>
   </div>
 
@@ -3002,6 +3075,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
   var toastStackEl = document.getElementById('toastStack');
   var transcriptOrderEl = document.getElementById('transcriptOrder');
   var coachSlot = document.getElementById('coachSlot');
+  var coachHistoryEl = document.getElementById('coachHistory');
+  var coachHistory = [];          // every card this session, oldest first
+  var coachHistoryOpen = false;   // the user's toggle survives re-renders
 
   // Opt-in monitor state — authoritative copy lives on the server and is
   // synced via feature.state broadcasts.
@@ -4199,6 +4275,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     actionCards.clear();
     factFlagCards.clear();
     window.dismissCoach();
+    window.clearCoachHistory();
     resultsEl.innerHTML = '';
     tocEntries.innerHTML = '';
     transcriptFeed.innerHTML = '';
@@ -5746,7 +5823,23 @@ const PRESENT_HTML = `<!DOCTYPE html>
   }
 
   // ─── Coach Strip ("say next") ─────────────────────────────
+  var COACH_LABELS = {
+    pressure: 'Pressure',
+    objection: 'Objection',
+    bad_answer: 'Recover',
+    overcommitment: 'Qualify',
+    confusion: 'Clarify',
+    contradiction: 'Correct',
+    agenda_risk: 'Agenda',
+    decision: 'Decision',
+    commitment: 'Commitment',
+    question: 'Answer',
+  };
+  function coachIncident(s) { return s.incidentType || s.kind || 'address'; }
+  function coachLabel(s) { return COACH_LABELS[coachIncident(s)] || 'Coach'; }
+
   function renderCoachSuggestion(s) {
+    addCoachHistory(s);
     if (coachExpireTimer) { clearTimeout(coachExpireTimer); coachExpireTimer = null; }
     var expiresAt = Number(s.expiresAt || 0);
     var remainingMs = expiresAt ? expiresAt - Date.now() : 15000;
@@ -5754,20 +5847,8 @@ const PRESENT_HTML = `<!DOCTYPE html>
       window.dismissCoach();
       return;
     }
-    var incident = s.incidentType || s.kind || 'address';
-    var labels = {
-      pressure: 'Pressure',
-      objection: 'Objection',
-      bad_answer: 'Recover',
-      overcommitment: 'Qualify',
-      confusion: 'Clarify',
-      contradiction: 'Correct',
-      agenda_risk: 'Agenda',
-      decision: 'Decision',
-      commitment: 'Commitment',
-      question: 'Answer',
-    };
-    var label = labels[incident] || 'Coach';
+    var incident = coachIncident(s);
+    var label = coachLabel(s);
     stageSetCoach(s, label);
     coachSlot.innerHTML = '<div class="coach-strip">' +
       '<span class="coach-kind ' + escapeHtml(incident) + '">' + escapeHtml(label) + '</span>' +
@@ -5780,11 +5861,53 @@ const PRESENT_HTML = `<!DOCTYPE html>
     coachExpireTimer = setTimeout(function() { window.dismissCoach(); }, Math.min(30000, remainingMs));
   }
 
+  // Clears the live card only — the history keeps it.
   window.dismissCoach = function() {
     if (coachExpireTimer) { clearTimeout(coachExpireTimer); coachExpireTimer = null; }
     coachSlot.innerHTML = '';
     stageClearCoach();
   };
+
+  function addCoachHistory(s) {
+    if (!s || !s.id) return;
+    for (var i = 0; i < coachHistory.length; i++) {
+      if (coachHistory[i].id === s.id) return;
+    }
+    coachHistory.push(s);
+    renderCoachHistory();
+  }
+
+  function setCoachHistory(list, open) {
+    coachHistory = (list || []).slice().sort(function(a, b) { return (a.createdAt || 0) - (b.createdAt || 0); });
+    if (open !== undefined) coachHistoryOpen = open;
+    renderCoachHistory();
+  }
+
+  function renderCoachHistory() {
+    if (!coachHistoryEl) return;
+    if (coachHistory.length === 0) { coachHistoryEl.innerHTML = ''; return; }
+    var items = coachHistory.slice().reverse().map(function(s) {
+      // Cards recovered from an older session's event log have no wording.
+      var main = s.phrasing || s.headline || '';
+      var sub = s.phrasing ? (s.headline || '') + (s.why ? ' \\u2014 ' + s.why : '') : (s.why || '');
+      return '<li class="coach-history-item">' +
+        '<span class="coach-kind ' + escapeHtml(coachIncident(s)) + '">' + escapeHtml(coachLabel(s)) + '</span>' +
+        '<div class="coach-body">' +
+          '<div class="coach-phrasing">' + escapeHtml(main) + '</div>' +
+          (sub ? '<div class="coach-why">' + escapeHtml(sub) + '</div>' : '') +
+        '</div>' +
+        '<span class="coach-history-time">' + escapeHtml(formatTime(new Date(s.createdAt).toISOString())) + '</span>' +
+      '</li>';
+    }).join('');
+    coachHistoryEl.innerHTML = '<details class="coach-history"' + (coachHistoryOpen ? ' open' : '') + '>' +
+      '<summary>Coach \\u00b7 ' + coachHistory.length + '</summary>' +
+      '<ol class="coach-history-list">' + items + '</ol>' +
+    '</details>';
+    var details = coachHistoryEl.querySelector('details');
+    if (details) details.addEventListener('toggle', function() { coachHistoryOpen = details.open; });
+  }
+
+  window.clearCoachHistory = function() { setCoachHistory([], false); };
 
   // ─── Theme ────────────────────────────────────────────────
   // data-theme on <html> drives every token; the pre-paint script in <head>
@@ -6865,6 +6988,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
             updateNewSegPill();
             showAllSegments = false;
             window.dismissCoach();
+            window.clearCoachHistory();
           }
           updateUI();
           break;
@@ -6921,6 +7045,10 @@ const PRESENT_HTML = `<!DOCTYPE html>
 
         case 'coach.suggestion':
           if (msg.suggestion) renderCoachSuggestion(msg.suggestion);
+          break;
+
+        case 'coach.history':
+          setCoachHistory(msg.suggestions);
           break;
 
         case 'intelligence.error':
@@ -7037,6 +7165,12 @@ const PRESENT_HTML = `<!DOCTYPE html>
         }
         headerTitle.innerHTML = '<span style="cursor:pointer;color:var(--gb-blue);margin-right:8px" onclick="window.location.href=\\'/present\\'">&larr; Back</span> Session Replay';
       });
+
+    // Coach cards — open in replay, where reading them back is the point.
+    fetch('/present/coach?session=' + encodeURIComponent(replaySessionId))
+      .then(function(r) { return r.ok ? r.json() : { suggestions: [] }; })
+      .then(function(data) { setCoachHistory(data.suggestions || [], true); })
+      .catch(function() { /* replay still works without it */ });
 
     // Load transcript
     fetch('/present/transcript?session=' + encodeURIComponent(replaySessionId))

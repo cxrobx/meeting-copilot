@@ -12,6 +12,8 @@ All notable changes to Meeting Copilot will be documented in this file.
 
 - `npm run eval:agenda` replays real sessions through the exact production reconcile call and gates a model against a baseline (`--baseline <model>`, or `--baseline-from <report.json>` to reuse a paid baseline run).
 
+- Coach cards no longer vanish. The live card pins to the top of the column instead of scrolling away, and every card goes into a collapsible "Coach · N" history that survives reloads and the end of the meeting. Cards are saved to the session (`coach_suggestion`, with the suggested wording, which the event log never kept), so replay shows them; older sessions show their headlines from the event log (the 09-21 call's 12 cards).
+
 ### Fixed
 
 - The copilot no longer shuts itself off mid-meeting. A 500-request lifetime cap stopped suggestions, agenda and coach at minute 26 of 33 (09-21) and 32 of 38 (09-14), at ~$0.68 of a $10 allowance; the 2M-token cap would have been next at ~minute 55. Dollars are now the only lifetime stop. Request and token counts became a one-minute runaway window (240 requests, 2M tokens, ~7x and ~13x the busiest real minute) that pauses a loop and lets the next call through once it drains.

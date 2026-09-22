@@ -54,6 +54,25 @@ export interface ContextSummaryRecord {
   createdAt: number;
 }
 
+/**
+ * A coach card as it was shown. Kept so the cards can be read after the
+ * meeting: on screen each one lasts 8–30s and the next replaces it, and the
+ * event log only ever kept the headline — never the words it suggested.
+ */
+export interface CoachSuggestionRecord {
+  id: string;
+  sessionId: string;
+  incidentType: string;
+  kind: string;
+  priority: number;
+  confidence: number;
+  headline: string;
+  phrasing: string;
+  why: string;
+  triggerQuote: string;
+  createdAt: number;
+}
+
 export class SessionStore {
   private db: Database.Database;
   private sessionId: string;
@@ -136,11 +155,27 @@ export class SessionStore {
         FOREIGN KEY (sessionId) REFERENCES session(id)
       );
 
+      CREATE TABLE IF NOT EXISTS coach_suggestion (
+        id TEXT PRIMARY KEY,
+        sessionId TEXT NOT NULL,
+        incidentType TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        priority INTEGER NOT NULL,
+        confidence REAL NOT NULL,
+        headline TEXT NOT NULL,
+        phrasing TEXT NOT NULL,
+        why TEXT NOT NULL DEFAULT '',
+        triggerQuote TEXT NOT NULL DEFAULT '',
+        createdAt INTEGER NOT NULL,
+        FOREIGN KEY (sessionId) REFERENCES session(id)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_transcript_session ON transcript(sessionId);
       CREATE INDEX IF NOT EXISTS idx_transcript_timestamp ON transcript(timestamp);
       CREATE INDEX IF NOT EXISTS idx_action_session ON action(sessionId);
       CREATE INDEX IF NOT EXISTS idx_action_state ON action(state);
       CREATE INDEX IF NOT EXISTS idx_context_summary_session ON context_summary(sessionId);
+      CREATE INDEX IF NOT EXISTS idx_coach_suggestion_session ON coach_suggestion(sessionId);
     `);
   }
 
@@ -301,12 +336,30 @@ export class SessionStore {
     );
   }
 
+  addCoachSuggestion(s: Omit<CoachSuggestionRecord, 'sessionId'>): void {
+    this.db.prepare(
+      `INSERT OR IGNORE INTO coach_suggestion
+         (id, sessionId, incidentType, kind, priority, confidence, headline, phrasing, why, triggerQuote, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      s.id, this.sessionId, s.incidentType, s.kind, s.priority, s.confidence,
+      s.headline, s.phrasing, s.why, s.triggerQuote, s.createdAt,
+    );
+  }
+
+  getCoachSuggestions(): CoachSuggestionRecord[] {
+    return this.db.prepare(
+      'SELECT * FROM coach_suggestion WHERE sessionId = ? ORDER BY createdAt ASC',
+    ).all(this.sessionId) as CoachSuggestionRecord[];
+  }
+
   getSession(): SessionRecord | undefined {
     const stmt = this.db.prepare('SELECT * FROM session WHERE id = ?');
     return stmt.get(this.sessionId) as SessionRecord | undefined;
   }
 
   deleteSession(): void {
+    this.db.prepare('DELETE FROM coach_suggestion WHERE sessionId = ?').run(this.sessionId);
     this.db.prepare('DELETE FROM context_summary WHERE sessionId = ?').run(this.sessionId);
     this.db.prepare('DELETE FROM action WHERE sessionId = ?').run(this.sessionId);
     this.db.prepare('DELETE FROM transcript WHERE sessionId = ?').run(this.sessionId);

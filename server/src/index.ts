@@ -206,6 +206,11 @@ type OutboundMessage =
       suggestion: CoachSuggestion;
     }
   | {
+      // Every card this session, sent on connect so a reload keeps the history.
+      type: 'coach.history';
+      suggestions: CoachSuggestion[];
+    }
+  | {
       // Realtime intelligence failure — surfaced so tier degradation and
       // silent monitor errors are visible in the dashboard instead of only
       // in server.log.
@@ -308,6 +313,10 @@ debug.setRealtimeMetricsProvider(() => ({
 // Flags raised this session — replayed to late-joining clients (page reload).
 let sessionFactFlags: FactFlag[] = [];
 let lastCoachSuggestion: CoachSuggestion | null = null;
+// Every card this session, so a dashboard that reconnects or reloads — during
+// the meeting or after it ends — gets the whole history back, not just a live
+// card that may already have expired.
+let sessionCoachSuggestions: CoachSuggestion[] = [];
 // The user's private goals for this meeting — coach-only context. Content is
 // deliberately NOT logged to the session JSONL (only its length).
 let meetingGoals = '';
@@ -334,12 +343,21 @@ factCheck.on('error', (msg: string) => {
 
 coach.on('suggestion', (suggestion: CoachSuggestion) => {
   lastCoachSuggestion = suggestion;
+  sessionCoachSuggestions.push(suggestion);
+  try {
+    sessionStore?.addCoachSuggestion(suggestion);
+  } catch (err) {
+    debugLog(`[Coach] failed to persist suggestion: ${err instanceof Error ? err.message : String(err)}`);
+  }
   eventLogger?.log('coach.suggestion', {
+    id: suggestion.id,
     kind: suggestion.kind,
     incidentType: suggestion.incidentType,
     priority: suggestion.priority,
     confidence: suggestion.confidence,
     headline: suggestion.headline,
+    phrasing: suggestion.phrasing,
+    why: suggestion.why,
     latencyMs: suggestion.latencyMs,
   });
   broadcast({ type: 'coach.suggestion', suggestion });
@@ -507,6 +525,9 @@ function handleWsConnection(ws: WebSocket, label: string): void {
     if (lastCoachSuggestion && lastCoachSuggestion.expiresAt > Date.now()) {
       ws.send(JSON.stringify({ type: 'coach.suggestion', suggestion: lastCoachSuggestion }));
     }
+  }
+  if (sessionCoachSuggestions.length > 0) {
+    ws.send(JSON.stringify({ type: 'coach.history', suggestions: sessionCoachSuggestions }));
   }
 
   ws.on('message', async (raw) => {
@@ -741,6 +762,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       featureFlags.coach = monitorDefaults.coach;
       sessionFactFlags = [];
       lastCoachSuggestion = null;
+      sessionCoachSuggestions = [];
       meetingGoals = '';
       lastAgendaMissingCount = 0;
       applyFeatureFlags();
