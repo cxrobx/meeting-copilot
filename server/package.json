@@ -11,6 +11,7 @@
     "test:watch": "vitest",
     "eval:audio": "tsx src/evals/real-audio-transcription.ts",
     "eval:coach": "tsx src/evals/recovery-coach-benchmark.ts",
+    "eval:agenda": "tsx src/evals/agenda-reconcile-replay.ts",
     "eval:research": "tsx src/evals/fast-research-benchmark.ts",
     "postinstall": "npm rebuild better-sqlite3"
   },

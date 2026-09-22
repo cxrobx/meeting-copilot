@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID, createHash } from 'node:crypto';
 import { claudeTriage, claudeSuggest } from '../claude-cli.js';
 import type { FastResearchSource } from '../api/openai.js';
+import { extractJsonText } from './first-json.js';
 import {
   FACTCHECK_EXTRACT_SYSTEM,
   FACTCHECK_VERIFY_SYSTEM,
@@ -331,12 +332,8 @@ function hashClaim(claim: string): string {
 }
 
 /** Pull the outermost JSON object out of a possibly-prose-wrapped response. */
-function extractJson(text: string): string {
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start === -1 || end === -1 || end <= start) return text;
-  return text.slice(start, end + 1);
-}
+// First complete object — gpt-6-luna appends text after it (first-json.ts).
+const extractJson = extractJsonText;
 
 const URL_RE = /https?:\/\/[^\s)\]}"'<>]+/g;
 

@@ -4,6 +4,18 @@ All notable changes to Meeting Copilot will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Agenda reconcile runs on gpt-6-luna instead of gpt-5.6-terra: about $0.07 instead of $1.42 for a 34-minute meeting, with a faster median (2.2 s vs 2.9 s). A replay of the two real meetings with agendas found no regression in schema, quote grounding, or how often items un-check. Roll back with `COPILOT_AGENDA_RECONCILE_MODEL=gpt-5.6-terra`.
+
+### Added
+
+- `npm run eval:agenda` replays real sessions through the exact production reconcile call and gates a model against a baseline (`--baseline <model>`, or `--baseline-from <report.json>` to reuse a paid baseline run).
+
+### Fixed
+
+- Triage, coach, fact-check and both agenda lanes no longer drop a good answer when gpt-6-luna writes text after its JSON (gotcha #21). Triage read those as "not actionable".
+
 ### Added
 
 - Both sides of phone calls handed off from an iPhone, and of FaceTime calls, are transcribed. Meeting audio now comes from a Core Audio process tap (macOS 14.2+), which hears the `avconferenced` call daemon that ScreenCaptureKit cannot see; ScreenCaptureKit remains the automatic fallback and the `meetingAudioSource=sck` rollback. The app asks for System Audio Recording permission on the first session.

@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { claudeChat } from '../claude-cli.js';
 import { MODEL_CONFIG } from '../model-config.js';
 import { runLiveJson } from './live-json.js';
+import { parseFirstJsonObject } from './first-json.js';
 
 // Agenda updates have two lanes: lexical candidate turns take the short delta
 // path immediately; this slower timer reconciles state and catches semantic
@@ -13,7 +14,13 @@ const MIN_NEW_WORDS_BEFORE_EVAL = 5;
 // require waiting for MIN_NEW_WORDS_BEFORE_EVAL of growth.
 const MIN_TOTAL_WORDS_FOR_FIRST_EVAL = 15;
 const MAX_DELTA_CHARS = 5_000;
-const MAX_RECONCILE_CHARS = 30_000;
+// Exported so `npm run eval:agenda` replays the exact production call rather
+// than a copy that drifts (the coach benchmark scored against a stale deadline
+// for exactly that reason).
+export const MAX_RECONCILE_CHARS = 30_000;
+export const RECONCILE_PROVIDER_TIMEOUT_MS = 4_000;
+export const RECONCILE_TOTAL_TIMEOUT_MS = 7_000;
+export const RECONCILE_MAX_OUTPUT_TOKENS = 900;
 
 const EXTRACT_MAX_ITEMS = 20;
 const EXTRACT_ITEM_MAX_CHARS = 150;
@@ -234,9 +241,9 @@ export class AgendaTracker extends EventEmitter {
         openAiModel: MODEL_CONFIG.agendaReconcile,
         label: 'agenda-reconcile',
         signal,
-        providerTimeoutMs: 4_000,
-        totalTimeoutMs: 7_000,
-        maxOutputTokens: 900,
+        providerTimeoutMs: RECONCILE_PROVIDER_TIMEOUT_MS,
+        totalTimeoutMs: RECONCILE_TOTAL_TIMEOUT_MS,
+        maxOutputTokens: RECONCILE_MAX_OUTPUT_TOKENS,
       });
       return result.text;
     });
@@ -580,7 +587,7 @@ export class AgendaTracker extends EventEmitter {
 // checking that `cache_read_input_tokens` > 0 in the `[api/anthropic]
 // agenda-eval` line emitted to ~/.meeting-copilot/server.log after the second
 // eval in a session.
-const AGENDA_EVAL_SYSTEM = `You are an agenda-tracking assistant running live during a meeting. You read the full transcript so far and the planned agenda, and for each agenda item decide whether it has been covered, partially addressed, or is still pending. You also flag items that look like they will be missed if the meeting wraps up without changing course.
+export const AGENDA_EVAL_SYSTEM = `You are an agenda-tracking assistant running live during a meeting. You read the full transcript so far and the planned agenda, and for each agenda item decide whether it has been covered, partially addressed, or is still pending. You also flag items that look like they will be missed if the meeting wraps up without changing course.
 
 Your output is consumed by a UI panel that shows a checklist of agenda items with per-item state badges and an optional "risk of missing" warning strip. Precision matters: false "covered" marks make the user trust the panel less; false "pending" marks make them think an item still needs attention when it is actually done. The transcript is spoken-language text produced by Whisper or a similar speech-to-text system; expect filler words, restarts, homophone errors, dropped punctuation, and occasional mis-segmented speaker turns.
 
@@ -965,7 +972,7 @@ Respond with JSON:
   return { staticPrefix, dynamicTail };
 }
 
-function buildAgendaEvalPrompt(
+export function buildAgendaEvalPrompt(
   items: AgendaItem[],
   transcript: string,
   sessionTitle: string,
@@ -997,14 +1004,12 @@ ${transcriptDelta}
 Return one entry for every agenda id. Preserve current state when these new turns add no evidence. missing_warnings must be an empty array.`;
 }
 
-function parseAgendaResponse(raw: string): AgendaEvalResponse | null {
+export function parseAgendaResponse(raw: string): AgendaEvalResponse | null {
   if (!raw) return null;
-  // Extract the largest JSON object in the response
-  const start = raw.indexOf('{');
-  const end = raw.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
+  // First complete object — gpt-6-luna appends text after it (first-json.ts).
+  const parsed = parseFirstJsonObject<any>(raw, (o) => Array.isArray(o.items));
+  if (!parsed) return null;
   try {
-    const parsed = JSON.parse(raw.slice(start, end + 1));
     if (!Array.isArray(parsed.items)) return null;
     const items = parsed.items
       .filter((i: any) => i && typeof i.id === 'string' && typeof i.state === 'string')
@@ -1143,18 +1148,8 @@ export function parseExtractResponse(raw: string): string[] | null {
     cleaned = fenceMatch[1].trim();
   }
 
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(cleaned.slice(start, end + 1));
-  } catch {
-    return null;
-  }
-
-  if (!parsed || typeof parsed !== 'object') return null;
+  const parsed = parseFirstJsonObject(cleaned, (o) => Array.isArray(o.items));
+  if (!parsed) return null;
   const items = (parsed as { items?: unknown }).items;
   if (!Array.isArray(items)) return null;
 

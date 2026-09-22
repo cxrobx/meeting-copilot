@@ -4,6 +4,7 @@ import { claudeChat, claudeTriage, claudeSuggest } from '../claude-cli.js';
 import { isOpenAiApiAvailable, openaiTriageJson } from '../api/openai.js';
 import { isAnthropicApiAvailable, anthropicSuggestStream } from '../api/anthropic.js';
 import { LLM_CONFIG, MODEL_CONFIG } from '../model-config.js';
+import { parseFirstJsonObject } from './first-json.js';
 import { LlmBudgetExceededError, resetLlmBudget } from '../api/budget.js';
 import { parsePartialSuggestion, type PartialSuggestion } from './partial-json.js';
 import type { TranscriptSegment } from '../transcription/types.js';
@@ -449,15 +450,10 @@ export class IntelligenceEngine extends EventEmitter {
     } else {
       text = await claudeTriage(prompt, HAIKU_TRIAGE_SYSTEM, signal);
     }
-    try {
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]) as HaikuTriageResult;
-      }
-      return JSON.parse(text) as HaikuTriageResult;
-    } catch {
-      return { actionable: false, reason: 'Failed to parse triage response', triggerQuote: '' };
-    }
+    // First complete object — gpt-6-luna appends text after it (first-json.ts).
+    // A miss here reads as "not actionable", so it must not be a parse artefact.
+    const parsed = parseFirstJsonObject<HaikuTriageResult>(text, (o) => typeof o.actionable === 'boolean');
+    return parsed ?? { actionable: false, reason: 'Failed to parse triage response', triggerQuote: '' };
   }
 
   private async runSonnetSuggestion(

@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 20 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 21 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -26,6 +26,7 @@ Organized by category. 20 items + recovery playbook, condensed format. Original 
 | 18 | AVAudioEngine input device-change crashes — installTap NSException → SIGABRT | Frontend |
 | 19 | Silero VAD Metal graph aborts on pre-M5 Apple Silicon | Frontend |
 | 20 | Phone / FaceTime calls invisible to ScreenCaptureKit — meeting track is a Core Audio process tap | Environment |
+| 21 | gpt-6-luna writes past its JSON object — parse the first complete object | External APIs |
 | — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
@@ -183,6 +184,15 @@ this default.
 **Cause**: WKWebView loads `/present` before the Node server finishes starting. Failed navigation shows blank page, `reload()` does nothing after failed provisional navigation.
 **Solution**: `WebDashboardView.Coordinator.loadWhenReady()` polls `/health` until 200, then loads. Retries on navigation failure with `load(URLRequest(...))` not `reload()`.
 **Pattern**: `app/MeetingCopilot/Sources/Features/WebPanel/WebDashboardView.swift`
+
+## External APIs
+
+### 21. gpt-6-luna Writes Past Its JSON Object — Parse the First Complete Object
+**Symptom**: A live lane silently loses answers: triage returns `Failed to parse triage response` (read as *not actionable*), the coach or an agenda lane gets `null`. Nothing errors; the model call itself succeeded.
+**Cause**: gpt-6-luna under a strict `json_schema` keeps writing after a valid object: a stray `"}`, `(Remember output contract…)`, `</|end|>`, or a second copy (16 of 128 agenda reconciles, 2026-09-22 replay). Once it wrote a *malformed* object (`{"id":"id":…`), then garbled text and "JSON malformed … Should correct", then a corrected one. gpt-5.6-luna never did either. Every parser sliced first `{` to LAST `}`, which swallows the tail, so `JSON.parse` threw.
+**Solution** (applied 2026-09-22): all live-path parsers go through `intelligence/first-json.ts`: each complete top-level object in order (string/escape-aware), the first that parses **and** passes the caller's shape check, with the old slice as the last resort. Never hand-roll `indexOf('{')`/`lastIndexOf('}')` for model output again.
+**Check**: `__tests__/first-json.test.ts` carries every real tail shape. `npm run eval:agenda` reports `schema` per model; a model swap that drops it below the baseline fails the gate.
+**Pattern**: `server/src/intelligence/first-json.ts`; callers in `agenda.ts`, `coach.ts`, `index.ts` (triage), `factcheck.ts`.
 
 ---
 

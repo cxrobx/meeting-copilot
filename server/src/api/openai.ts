@@ -35,7 +35,7 @@ function tierMultiplier(): number {
   return serviceTier() ? 2 : 1;
 }
 
-function tokenPrices(model: string): { input: number; output: number } {
+export function tokenPrices(model: string): { input: number; output: number } {
   const m = tierMultiplier();
   const base = baseTokenPrices(model);
   return { input: base.input * m, output: base.output * m };
@@ -86,6 +86,8 @@ export async function openaiStructuredJson(
     model?: string;
     reasoningEffort?: ReasoningEffort;
     maxOutputTokens?: number;
+    /** Per-call token usage, for evals that report spend and cache hits. */
+    onUsage?: (usage: { inputTokens: number; outputTokens: number; cachedTokens: number; latencyMs: number }) => void;
   } = {},
 ): Promise<string> {
   const client = getClient();
@@ -131,6 +133,12 @@ export async function openaiStructuredJson(
   });
   const cached = u?.input_tokens_details?.cached_tokens ?? 0;
   log('api/openai', `${tag} model=${model} latencyMs=${elapsed} in=${u?.input_tokens ?? 0} out=${u?.output_tokens ?? 0} cached=${cached}`);
+  options.onUsage?.({
+    inputTokens: u?.input_tokens ?? 0,
+    outputTokens: u?.output_tokens ?? 0,
+    cachedTokens: cached,
+    latencyMs: elapsed,
+  });
 
   return res.output_text;
 }

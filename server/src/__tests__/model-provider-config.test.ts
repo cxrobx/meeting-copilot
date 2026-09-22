@@ -8,7 +8,7 @@ describe('central model and provider configuration', () => {
     expect(MODEL_CONFIG.triage).toBe(process.env.COPILOT_TRIAGE_MODEL || 'gpt-6-luna');
     expect(MODEL_CONFIG.agenda).toBe(process.env.COPILOT_AGENDA_MODEL || 'gpt-6-luna');
     expect(MODEL_CONFIG.agendaReconcile).toBe(
-      process.env.COPILOT_AGENDA_RECONCILE_MODEL || 'gpt-5.6-terra',
+      process.env.COPILOT_AGENDA_RECONCILE_MODEL || 'gpt-6-luna',
     );
     // Luna since 2026-09-19: same 100/100 on the frozen coach cases across 3
     // runs each, 10x cheaper, and a tail that actually lands inside the

@@ -1,7 +1,11 @@
 export const MODEL_CONFIG = {
   triage: process.env.COPILOT_TRIAGE_MODEL || 'gpt-6-luna',
   agenda: process.env.COPILOT_AGENDA_MODEL || 'gpt-6-luna',
-  agendaReconcile: process.env.COPILOT_AGENDA_RECONCILE_MODEL || 'gpt-5.6-terra',
+  // gpt-6-luna since 2026-09-22 (was gpt-5.6-terra, never compared against a
+  // cheaper tier). Terra was 73% of a meeting's metered spend: 23 calls, $0.49
+  // of $0.68 in the 09-21 Winslow call. `npm run eval:agenda` replays real
+  // sessions through whatever this resolves to; set the env var to roll back.
+  agendaReconcile: process.env.COPILOT_AGENDA_RECONCILE_MODEL || 'gpt-6-luna',
   // Luna, not Terra. `npm run eval:coach`, 3 runs each on the 10 frozen cases:
   // identical quality (100/100 score, 100% decision/schema/quality on every
   // run) while Luna is 10x cheaper ($0.00027 vs $0.0027 per coach call) and has

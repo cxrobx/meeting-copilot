@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { MODEL_CONFIG } from '../model-config.js';
 import { runLiveJson } from './live-json.js';
+import { parseFirstJsonObject } from './first-json.js';
 import {
   COACH_SCHEMA,
   COACH_SYSTEM,
@@ -187,11 +188,13 @@ function reasonIncidentType(reason: string): CoachIncidentType {
 
 function parseCoachResponse(raw: string): CoachSuggestionResult | null {
   if (!raw) return null;
-  const start = raw.indexOf('{');
-  const end = raw.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
+  // First complete object — gpt-6-luna appends text after it (first-json.ts).
+  const parsed = parseFirstJsonObject<Partial<CoachSuggestionResult>>(
+    raw,
+    (o) => typeof o.hasSuggestion === 'boolean',
+  );
+  if (!parsed) return null;
   try {
-    const parsed = JSON.parse(raw.slice(start, end + 1)) as Partial<CoachSuggestionResult>;
     if (typeof parsed.hasSuggestion !== 'boolean') return null;
     const kind: CoachKind = parsed.kind === 'mention' || parsed.kind === 'ask'
       ? parsed.kind
