@@ -18,6 +18,8 @@ All notable changes to Meeting Copilot will be documented in this file.
 
 ### Fixed
 
+- Quick Actions actually stay at the top of the column now. The sticky rule sat on `.quick-actions`, whose parent is exactly its height, so it could never stick; it is on the slot now. The live coach card sticks directly beneath them, with their height measured rather than guessed.
+- The start form keeps what you typed when it re-renders (every reconnect and settings save rebuilt it, wiping Title, Attendees, Goals, the agenda box and consent), including focus and caret. New Meeting still gives a blank form, and now clears the last meeting's agenda draft too, which used to come back.
 - Every route that turns a session id into a path now requires the UUID shape a session is minted with (`session/ids.ts`). `/sessions/:id/export`, `/present/actions` and `/present/transcript` joined it in unchecked, and Express decodes `%2F` in route params, so `/sessions/..%2F..%2Fx/export` reached `new SessionStore('../../x')`, which creates directories.
 - The copilot no longer shuts itself off mid-meeting. A 500-request lifetime cap stopped suggestions, agenda and coach at minute 26 of 33 (09-21) and 32 of 38 (09-14), at ~$0.68 of a $10 allowance; the 2M-token cap would have been next at ~minute 55. Dollars are now the only lifetime stop. Request and token counts became a one-minute runaway window (240 requests, 2M tokens, ~7x and ~13x the busiest real minute) that pauses a loop and lets the next call through once it drains.
 - The coach shows one card per kind of moment per minute. On 09-21 it put up three capacity warnings in 4 seconds, each replacing the last after ~2s; the per-utterance cooldown missed them because each sentence was new. A held-back card costs no model call.

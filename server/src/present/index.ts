@@ -1840,16 +1840,24 @@ export const PRESENT_HTML = `<!DOCTYPE html>
      Sticks to the top of the .main scroll container so the user
      can kick off a research/search without scrolling back up as
      the card feed grows. The subtle shadow reads as "elevated"
-     once cards start flowing underneath. */
+     once cards start flowing underneath.
+     The sticky rule sits on the SLOT: on .quick-actions it did nothing
+     for months, because its parent #quickActionsSlot is exactly its
+     height and a sticky element can only move inside its parent. The
+     upward shadow in the page colour covers the column's 24px top
+     padding band, where the feed otherwise showed above the bar. */
+  #quickActionsSlot {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+  #quickActionsSlot:not(:empty) { box-shadow: 0 -24px 0 0 var(--gb-base); }
   .quick-actions {
     background: var(--gb-surface0);
     border: 1px solid var(--gb-surface2);
     border-radius: 8px;
     padding: 14px 16px;
     margin-bottom: 16px;
-    position: sticky;
-    top: 0;
-    z-index: 20;
     box-shadow: 0 6px 14px -12px rgb(var(--shadow-color) / 0.45);
   }
   .quick-actions-title {
@@ -2248,12 +2256,10 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     padding: 0 2px;
   }
   .coach-close:hover { color: var(--gb-text); }
-  /* The live card pins to the top of the column and is opaque, so the feed
-     scrolling beneath cannot show through the tint. Top 0, not under Quick
-     Actions: their own sticky has no effect (the rule sits on .quick-actions,
-     whose parent #quickActionsSlot is exactly its height), so they scroll
-     away. If that is ever fixed, offset this by their height. */
-  #coachSlot { position: sticky; top: 0; z-index: 19; }
+  /* The live card sticks directly under the sticky Quick Actions (their
+     height is measured into --qa-height) and is opaque, so the feed
+     scrolling beneath cannot show through the tint. */
+  #coachSlot { position: sticky; top: var(--qa-height, 0px); z-index: 19; }
   #coachSlot:empty, #coachHistory:empty { display: none; }
   #coachSlot .coach-strip {
     background: linear-gradient(rgb(var(--warning) / 0.08), rgb(var(--warning) / 0.08)), var(--gb-base);
@@ -3072,6 +3078,15 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   var mainCol = document.getElementById('mainCol');
   var idleOverlay = document.getElementById('idleOverlay');
   var quickActionsSlot = document.getElementById('quickActionsSlot');
+  // The coach card sticks under Quick Actions, whose height changes with the
+  // session state and the window width — track it rather than guess.
+  function syncQuickActionsHeight() {
+    if (!mainCol || !quickActionsSlot) return;
+    mainCol.style.setProperty('--qa-height', quickActionsSlot.offsetHeight + 'px');
+  }
+  if (window.ResizeObserver && quickActionsSlot) {
+    new ResizeObserver(syncQuickActionsHeight).observe(quickActionsSlot);
+  }
   var resultsEl = document.getElementById('results');
   var tocEntries = document.getElementById('tocEntries');
   var agendaPanel = document.getElementById('agendaPanel');
@@ -4202,7 +4217,64 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     showToast('Prefilled from \\u201C' + m.title + '\\u201D \\u2014 Prep this meeting to research it');
   };
 
+  // What the user has typed into the start form, across a rebuild.
+  // showIdleState rebuilds the whole form on every idle updateUI (a WS
+  // reconnect, a settings save), and Title, Attendees, Goals, the agenda box
+  // and consent live only in the DOM, so a reconnect mid-typing wiped them.
+  function captureIdleForm() {
+    if (!document.getElementById('startTitle')) return null;
+    function val(id) { var el = document.getElementById(id); return el ? el.value : ''; }
+    var goals = document.getElementById('startGoals');
+    var active = document.activeElement;
+    var saved = {
+      title: val('startTitle'),
+      attendees: val('startAttendees'),
+      goals: val('startGoals'),
+      goalsRows: goals ? goals.rows : 2,
+      goalsHint: (document.getElementById('startGoalsHint') || {}).textContent || '',
+      consent: !!(document.getElementById('consentCheck') || {}).checked,
+      focusId: active && active.id && idleOverlay.contains(active) ? active.id : null,
+      selStart: active && typeof active.selectionStart === 'number' ? active.selectionStart : null,
+      selEnd: active && typeof active.selectionEnd === 'number' ? active.selectionEnd : null,
+    };
+    // Edited agenda items are read back from the DOM at Start, so fold them
+    // into state, which renderAgendaEditor draws from. The free-text box has
+    // no state of its own and is carried as a value.
+    if (agendaState.kind === 'extracted') agendaState.items = snapshotEditorItems();
+    else saved.agenda = currentTextareaValue();
+    return saved;
+  }
+
+  function restoreIdleForm(saved) {
+    if (!saved) return;
+    function set(id, v) { var el = document.getElementById(id); if (el && v) el.value = v; }
+    set('startTitle', saved.title);
+    set('startAttendees', saved.attendees);
+    set('startGoals', saved.goals);
+    var goals = document.getElementById('startGoals');
+    if (goals && saved.goals) goals.rows = saved.goalsRows;
+    var hint = document.getElementById('startGoalsHint');
+    if (hint && saved.goals && saved.goalsHint) hint.textContent = saved.goalsHint;
+    if (saved.agenda !== undefined) {
+      var ta = document.getElementById('startAgenda');
+      if (ta && !ta.readOnly) ta.value = saved.agenda;
+    }
+    var consent = document.getElementById('consentCheck');
+    if (consent && saved.consent) {
+      consent.checked = true;
+      if (window.refreshStartButton) window.refreshStartButton();
+    }
+    var focus = saved.focusId && document.getElementById(saved.focusId);
+    if (focus) {
+      focus.focus();
+      if (saved.selStart !== null && typeof focus.setSelectionRange === 'function') {
+        try { focus.setSelectionRange(saved.selStart, saved.selEnd); } catch (e) { /* not a text field */ }
+      }
+    }
+  }
+
   function showIdleState() {
+    var savedForm = captureIdleForm();
     var wsConnected = ws && ws.readyState === WebSocket.OPEN;
     var btnDisabled = wsConnected ? '' : ' disabled';
     var statusMsg = wsConnected ? '' : '<p style="color:var(--gb-red);font-size:11px;margin-top:8px">Connecting to server...</p>';
@@ -4263,6 +4335,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     renderProjectPicker();
     refreshCalendarChips();
     prefillStandingGoals();
+    restoreIdleForm(savedForm);
   }
 
   function showQuickActions() {
@@ -4326,6 +4399,14 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     segCountEl.textContent = '0';
     sessionTimerEl.textContent = '';
     clearAgenda();
+    // A new meeting gets a blank form: drop the old one before updateUI, so
+    // showIdleState has nothing to carry over (consent is per session). The
+    // agenda draft is JS state that outlived every form until now, so the last
+    // meeting's agenda came back in the next one. Only here, never on the
+    // server's session.state idle, which also arrives on every reconnect.
+    idleOverlay.innerHTML = '';
+    agendaState = { kind: 'raw' };
+    agendaRawSnapshot = '';
     updateUI();
   };
 
