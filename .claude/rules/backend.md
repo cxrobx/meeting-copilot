@@ -73,6 +73,9 @@ cd server && npm start        # Run compiled dist/index.js
 | `SUGGESTION_TTL_MS` | No | 60000 | Legacy default for suggestion TTL |
 | `GEMINI_TRIAGE_TIMEOUT_MS` | No | 12000 | Tier-1 triage timeout before Haiku fallback |
 | `COPILOT_DISABLE_PAID_API` | No | - | `1` = hard zero-API-spend (CLIs/subscription only) |
+| `COPILOT_MAX_LLM_DOLLARS_PER_SESSION` | No | 10 | The only lifetime stop for a session's metered AI |
+| `COPILOT_MAX_LLM_REQUESTS_PER_MINUTE` | No | 240 | Runaway-loop pause (one-minute window), never a lockout |
+| `COPILOT_MAX_LLM_TOKENS_PER_MINUTE` | No | 2000000 | Runaway-loop pause (one-minute window), never a lockout |
 | `COPILOT_ENABLE_HTTP_TRANSCRIBE` | No | - | `1` re-enables the legacy POST /transcribe path |
 | `CXMAIL_DB_PATH` | No | `~/Library/Application Support/com.cxmail.app/cxmail.db` | cxmail DB for start-form meeting auto-fill (read-only) |
 | `ONYX_URL` | No | `http://127.0.0.1:8899` | Where the dashboard reads the vault palette from (Onyx's `/api/vault-look`) |

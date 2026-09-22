@@ -27,16 +27,18 @@ COPILOT_ALLOW_CLOUD_AUDIO=false # Must be exactly true before any audio leaves t
 COPILOT_PORT=17890             # Optional — default 17890
 SUGGESTION_TTL_MS=60000        # Optional — default 60000; ms before an unactioned suggestion auto-expires
 COPILOT_LIVE_LLM_MODE=auto     # auto|api|cli
-COPILOT_TRIAGE_MODEL=gpt-5.6-luna
-COPILOT_AGENDA_MODEL=gpt-5.6-luna
-COPILOT_AGENDA_RECONCILE_MODEL=gpt-5.6-terra
-COPILOT_COACH_MODEL=gpt-5.6-terra
+COPILOT_TRIAGE_MODEL=gpt-6-luna
+COPILOT_AGENDA_MODEL=gpt-6-luna
+COPILOT_AGENDA_RECONCILE_MODEL=gpt-6-luna
+COPILOT_COACH_MODEL=gpt-6-luna
 COPILOT_SUGGEST_MODEL=claude-sonnet-5
 COPILOT_WORKER_MODEL=claude-sonnet-5
 COPILOT_REVIEW_MODEL=claude-opus-5
-COPILOT_MAX_LLM_REQUESTS_PER_SESSION=500
-COPILOT_MAX_LLM_TOKENS_PER_SESSION=300000
-COPILOT_MAX_LLM_DOLLARS_PER_SESSION=10
+COPILOT_MAX_LLM_DOLLARS_PER_SESSION=10       # the only lifetime stop
+COPILOT_MAX_LLM_REQUESTS_PER_MINUTE=240      # runaway-loop pause, not a stop
+COPILOT_MAX_LLM_TOKENS_PER_MINUTE=2000000    # runaway-loop pause, not a stop
+# COPILOT_MAX_LLM_REQUESTS_PER_SESSION / _TOKENS_PER_SESSION: opt-in lifetime
+# caps, off by default — as defaults they stopped three real meetings early.
 ```
 
 The recovery coach is enabled by default for new installs. It evaluates a
