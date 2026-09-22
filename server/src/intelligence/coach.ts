@@ -40,6 +40,13 @@ const TRIGGER_DEBOUNCE_MS = 250;
 // window where it is still about the moment.
 export const ADVICE_DEADLINE_MS = 6_000;
 const INCIDENT_COOLDOWN_MS = 12_000;
+// One card per KIND of incident per minute. The 12s cooldown above is keyed on
+// the utterance text, so each new sentence is a new incident: the 09-21 call
+// got "Qualify your capacity", "Qualify the flexibility claim" and "Set a
+// clear capacity boundary" at 21:13:11, :13 and :15 — each on screen ~2s
+// before the next replaced it. The earlier card stays in the coach history,
+// so holding the next one back costs little.
+export const TYPE_COOLDOWN_MS = 60_000;
 const RECENT_SUGGESTION_MS = 2 * 60_000;
 
 const MOMENT_HINTS: Record<string, string> = {
@@ -257,6 +264,7 @@ export class CoachMonitor extends EventEmitter {
   private turns: CoachTurn[] = [];
   private recentSuggestions: Array<{ text: string; at: number }> = [];
   private recentIncidents = new Map<string, number>();
+  private lastShownByType = new Map<CoachIncidentType, number>();
   private totalLatencyMs = 0;
   private staleResults = 0;
 
@@ -403,6 +411,7 @@ export class CoachMonitor extends EventEmitter {
     this.pendingTrigger = null;
     this.recentSuggestions = [];
     this.recentIncidents.clear();
+    this.lastShownByType.clear();
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
@@ -509,6 +518,13 @@ export class CoachMonitor extends EventEmitter {
     return this.transcriptProvider().slice(-WINDOW_TAIL_CHARS);
   }
 
+  /** A card of this kind was shown under TYPE_COOLDOWN_MS ago. 'none' never cools. */
+  private inTypeCooldown(type: CoachIncidentType, now: number): boolean {
+    if (type === 'none') return false;
+    const last = this.lastShownByType.get(type);
+    return last !== undefined && now - last < TYPE_COOLDOWN_MS;
+  }
+
   private async runEval(
     gen: number,
     trigger: PendingTrigger,
@@ -549,6 +565,13 @@ export class CoachMonitor extends EventEmitter {
       triggerSource: trigger.source,
       triggerText: trigger.text,
     });
+
+    // Checked before the gate so a held-back card costs neither call.
+    const triggerType = reasonIncidentType(trigger.reason);
+    if (this.inTypeCooldown(triggerType, now)) {
+      this.emit('eval', { skipped: 'type-cooldown', incidentType: triggerType, trigger: trigger.reason });
+      return;
+    }
 
     // Cheap typed judgment before the expensive generative one. A closed gate
     // only ever saves a call — it fails open on error, timeout, or an
@@ -624,6 +647,13 @@ export class CoachMonitor extends EventEmitter {
     const incidentType = result.incidentType === 'none'
       ? reasonIncidentType(trigger.reason)
       : result.incidentType;
+    // Again after the call: the model may name a different type than the
+    // trigger did (an interval check that finds an overcommitment).
+    if (this.inTypeCooldown(incidentType, createdAt)) {
+      this.emit('eval', { skipped: 'type-cooldown', incidentType, trigger: trigger.reason, latencyMs });
+      return;
+    }
+    this.lastShownByType.set(incidentType, createdAt);
     const suggestion: CoachSuggestion = {
       id: randomUUID(),
       incidentId: trigger.incidentId,

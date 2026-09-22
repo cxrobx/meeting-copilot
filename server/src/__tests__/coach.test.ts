@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CoachMonitor,
+  TYPE_COOLDOWN_MS,
   detectMoment,
   type CoachSuggestion,
 } from '../intelligence/coach.js';
@@ -273,6 +274,73 @@ describe('CoachMonitor', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(triage).toHaveBeenCalledTimes(2);
+  });
+
+  describe('one card per kind per minute', () => {
+    // 09-21: three capacity cards at 21:13:11, :13 and :15, each replacing the
+    // last after ~2s. Distinct headlines, so text dedup never caught them.
+    function distinctPressureCards() {
+      let n = 0;
+      return vi.fn(async () => {
+        n += 1;
+        return result({ incidentType: 'pressure', headline: `Qualify the claim ${n}`, phrasing: `Boundary number ${n} is what we can commit to.` });
+      });
+    }
+
+    it('holds back a second card of the same kind, without paying for it', async () => {
+      const triage = distinctPressureCards();
+      const monitor = new CoachMonitor({ triage });
+      const suggestions: CoachSuggestion[] = [];
+      monitor.on('suggestion', (s: CoachSuggestion) => suggestions.push(s));
+      start(monitor);
+
+      monitor.noteSegment('We need you to commit right now.', 'meeting', { final: true, segmentId: 'p1' });
+      await vi.advanceTimersByTimeAsync(300);
+      monitor.noteSegment('You have to commit today, this is non-negotiable.', 'meeting', { final: true, segmentId: 'p2' });
+      await vi.advanceTimersByTimeAsync(300);
+
+      expect(suggestions).toHaveLength(1);
+      expect(triage).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(TYPE_COOLDOWN_MS);
+      monitor.noteSegment('We need an answer, commit by Friday.', 'meeting', { final: true, segmentId: 'p3' });
+      await vi.advanceTimersByTimeAsync(300);
+      expect(suggestions).toHaveLength(2);
+    });
+
+    it('still shows a different kind inside the minute', async () => {
+      const triage = vi.fn()
+        .mockResolvedValueOnce(result({ incidentType: 'pressure', headline: 'Hold the line' }))
+        .mockResolvedValueOnce(result({ incidentType: 'objection', headline: 'Answer the objection', phrasing: 'Fair point; here is what changes.' }));
+      const monitor = new CoachMonitor({ triage });
+      const suggestions: CoachSuggestion[] = [];
+      monitor.on('suggestion', (s: CoachSuggestion) => suggestions.push(s));
+      start(monitor);
+
+      monitor.noteSegment('We need you to commit right now.', 'meeting', { final: true, segmentId: 'p1' });
+      await vi.advanceTimersByTimeAsync(300);
+      monitor.noteSegment("That doesn't answer what I asked.", 'meeting', { final: true, segmentId: 'o1' });
+      await vi.advanceTimersByTimeAsync(300);
+
+      expect(suggestions.map((s) => s.incidentType)).toEqual(['pressure', 'objection']);
+    });
+
+    it('checks the kind the model named, not only the trigger', async () => {
+      // An objection trigger whose answer comes back as another pressure card.
+      const triage = distinctPressureCards();
+      const monitor = new CoachMonitor({ triage });
+      const suggestions: CoachSuggestion[] = [];
+      monitor.on('suggestion', (s: CoachSuggestion) => suggestions.push(s));
+      start(monitor);
+
+      monitor.noteSegment('We need you to commit right now.', 'meeting', { final: true, segmentId: 'p1' });
+      await vi.advanceTimersByTimeAsync(300);
+      monitor.noteSegment("That doesn't answer what I asked.", 'meeting', { final: true, segmentId: 'o1' });
+      await vi.advanceTimersByTimeAsync(300);
+
+      expect(triage).toHaveBeenCalledTimes(2);
+      expect(suggestions).toHaveLength(1);
+    });
   });
 
   it('keeps silence for a low-confidence model result', async () => {

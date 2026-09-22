@@ -15,6 +15,7 @@ All notable changes to Meeting Copilot will be documented in this file.
 ### Fixed
 
 - The copilot no longer shuts itself off mid-meeting. A 500-request lifetime cap stopped suggestions, agenda and coach at minute 26 of 33 (09-21) and 32 of 38 (09-14), at ~$0.68 of a $10 allowance; the 2M-token cap would have been next at ~minute 55. Dollars are now the only lifetime stop. Request and token counts became a one-minute runaway window (240 requests, 2M tokens, ~7x and ~13x the busiest real minute) that pauses a loop and lets the next call through once it drains.
+- The coach shows one card per kind of moment per minute. On 09-21 it put up three capacity warnings in 4 seconds, each replacing the last after ~2s; the per-utterance cooldown missed them because each sentence was new. A held-back card costs no model call.
 - Vault meeting notes no longer turn an over-long topic into the word "Meeting", and no longer stamp `CXV` on every note: the category is earned from the title or attendees (`Globex`, `AIQ`, `TH`, `BD`, `CXV`) or left off, matching cxnotes' 09-08 fix.
 - Triage, coach, fact-check and both agenda lanes no longer drop a good answer when gpt-6-luna writes text after its JSON (gotcha #21). Triage read those as "not actionable".
 
