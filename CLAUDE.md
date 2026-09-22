@@ -91,7 +91,7 @@ open "/Applications/Meeting Copilot.app" # Launch packaged app
 2. **Session isolation** — each meeting gets its own SQLite DB, never shared
 3. **Approval before action** — suggestions require user approval before workers execute
 4. **16kHz mono PCM** — both audio sources must output this format
-5. **NEVER `toISOString()` for a filename date** — it renders UTC, so any meeting after ~20:00 ET is stamped with tomorrow. Vault notes use `<CATEGORY> <Who|Topic> <MM.DD.YY>.md` in **local** time, from the session's own `startedAt` (not "now"). Helpers: `server/src/workers/filename.ts`; convention: `~/Documents/CX/CLAUDE.md`; mirror: `notes4chris/services/summariser.js`
+5. **NEVER `toISOString()` for a filename date** — it renders UTC, so any meeting after ~20:00 ET is stamped with tomorrow. Vault notes use `<CATEGORY> <Who|Topic> <MM.DD.YY>.md` in **local** time, from the session's own `startedAt` (not "now"). Helpers: `server/src/workers/filename.ts`; convention: `~/Documents/CX/CLAUDE.md`; mirror: `~/Projects/cxnotes/services/summariser.js` (`buildObsidianFilename`) — category is content-earned or absent, never a default
 
 Full list in `.claude/rules/architecture.md`.
 

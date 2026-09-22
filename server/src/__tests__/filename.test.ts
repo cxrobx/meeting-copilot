@@ -79,22 +79,53 @@ describe('topicFromTitle', () => {
 
 describe('buildMeetingFilename', () => {
   const startedAt = new Date('2026-04-28T23:58:00Z'); // 19:58 ET
+  // Category optional: the catch-all folder has no code, so it is earned or absent.
+  const CONVENTION = /^(?:[A-Z0-9]{2,5} )?\S.* \d{2}\.\d{2}\.\d{2}\.md$/;
 
-  it('emits <CATEGORY> <Who> <MM.DD.YY>.md', () => {
+  it('emits <CATEGORY> <Who> <MM.DD.YY>.md when the content earns a code', () => {
     expect(buildMeetingFilename({ title: 'Globex Sync', attendees: 'Chris, Marcus', startedAt }))
-      .toBe('CXV Marcus 04.28.26.md');
+      .toBe('Globex Marcus 04.28.26.md');
+  });
+
+  it('carries no prefix when nothing earns one — CXV is not a default', () => {
+    expect(buildMeetingFilename({ title: 'AI Skill Sharing', attendees: 'Chris', startedAt }))
+      .toBe('AI Skill Sharing 04.28.26.md');
+    expect(buildMeetingFilename({ title: 'Interview', attendees: 'Chris, Dana', startedAt }))
+      .toBe('Dana 04.28.26.md');
+  });
+
+  it('earns the specific code over CXV, and from the attendees too', () => {
+    // Only the words that earned THIS code are dropped — cxnotes gives the same.
+    expect(buildMeetingFilename({ title: 'CX Ventures Atlas IQ sync', attendees: 'Chris', startedAt }))
+      .toBe('AIQ CX Ventures Sync 04.28.26.md');
+    expect(buildMeetingFilename({ title: 'Portal review', attendees: 'Chris, Marcus (Globex)', startedAt }))
+      .toBe('Globex Marcus 04.28.26.md');
+  });
+
+  it('does not repeat the words that earned the code', () => {
+    expect(buildMeetingFilename({ title: 'Globex Portal Sync', attendees: 'Chris', startedAt }))
+      .toBe('Globex Portal Sync 04.28.26.md');
   });
 
   it('names two counterparts, then et al', () => {
     expect(buildMeetingFilename({ title: '', attendees: 'Chris, Marcus, Michael', startedAt }))
-      .toBe('CXV Marcus, Michael 04.28.26.md');
+      .toBe('Marcus, Michael 04.28.26.md');
     expect(buildMeetingFilename({ title: '', attendees: 'Chris, Marcus, Michael, Amy', startedAt }))
-      .toBe('CXV Marcus et al 04.28.26.md');
+      .toBe('Marcus et al 04.28.26.md');
   });
 
-  it('falls back to a topic when there is no counterpart', () => {
-    expect(buildMeetingFilename({ title: 'AI Skill Sharing', attendees: 'Chris', startedAt }))
-      .toBe('CXV AI Skill Sharing 04.28.26.md');
+  it('truncates an over-budget topic instead of replacing it with "Meeting"', () => {
+    // cxnotes' 09-08 bug, which this mirror carried verbatim: `Meeting` sat on
+    // the ladder ahead of truncation and always fits, so a topic a few
+    // characters over became the word "Meeting". The old budget test passed
+    // WITH the bug because it checked the shape, not that a word survived.
+    const name = buildMeetingFilename({
+      title: 'CX Ventures Quarterly Architecture Review',
+      attendees: 'Chris',
+      startedAt,
+    });
+    expect(name).toBe('CXV Quarterly Architecture 04.28.26.md');
+    expect(name).not.toMatch(/ Meeting /);
   });
 
   it('stays inside the 40-char budget and never truncates the date', () => {
@@ -105,17 +136,17 @@ describe('buildMeetingFilename', () => {
     });
     expect(name.length).toBeLessThanOrEqual(FILENAME_LIMIT);
     expect(name.endsWith(' 04.28.26.md')).toBe(true);
+    expect(name).toMatch(/Quarterly/);
   });
 
-  it('never emits an empty middle slot', () => {
-    const name = buildMeetingFilename({ title: 'Meeting', attendees: 'Chris', startedAt });
-    expect(name).toMatch(/^[A-Z0-9]{2,5} .+ \d{2}\.\d{2}\.\d{2}\.md$/);
+  it('uses "Meeting" only when the middle is genuinely empty', () => {
+    expect(buildMeetingFilename({ title: 'Meeting', attendees: 'Chris', startedAt }))
+      .toBe('Meeting 04.28.26.md');
   });
 
   it('matches the vault convention regex', () => {
-    const rx = /^[A-Z0-9]{2,5} .+ \d{2}\.\d{2}\.\d{2}\.md$/;
     for (const title of ['Globex Portal Sync', 'e2e', 'Accepted: Kickoff', '', 'Untitled']) {
-      expect(buildMeetingFilename({ title, attendees: 'Chris, Marcus', startedAt })).toMatch(rx);
+      expect(buildMeetingFilename({ title, attendees: 'Chris, Marcus', startedAt })).toMatch(CONVENTION);
     }
   });
 });
