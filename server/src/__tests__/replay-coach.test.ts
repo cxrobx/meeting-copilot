@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionStore } from '../session/store.js';
-import { readStoredCoach, SESSION_ID_RE } from '../present/replay-coach.js';
+import { readStoredCoach } from '../present/replay-coach.js';
+import { SESSION_ID_RE } from '../session/ids.js';
 
 const card = (n: number, createdAt: number) => ({
   id: `card-${n}`,

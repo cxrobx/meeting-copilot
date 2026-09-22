@@ -25,6 +25,7 @@ import {
 import { extractAgendaItemsFromNotes } from './intelligence/agenda.js';
 import { getUpcomingMeetings } from './calendar/cxmail.js';
 import { standingGoals } from './session/reviewStore.js';
+import { isSessionId } from './session/ids.js';
 import { prepRequestFromBody } from './prep/gather.js';
 import { runMeetingPrep } from './prep/agent.js';
 import type { ContextItemConfig } from './context/index.js';
@@ -454,6 +455,10 @@ export function createRoutes(ctx: RouteContext): Router {
   router.get('/sessions/:id/export', (req, res) => {
     try {
       const sessionId = req.params.id;
+      if (!isSessionId(sessionId)) {
+        res.status(400).json({ error: 'Invalid session id' });
+        return;
+      }
       const format = (req.query.format as string) || 'markdown';
 
       const sessionDir = join(homedir(), '.meeting-copilot', 'sessions', sessionId);
@@ -488,7 +493,7 @@ export function createRoutes(ctx: RouteContext): Router {
     try {
       const sessionId = req.params.id;
       // Validate UUID format to prevent path traversal
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
+      if (!isSessionId(sessionId)) {
         res.status(400).json({ error: 'Invalid session ID' });
         return;
       }

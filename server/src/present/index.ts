@@ -12,7 +12,8 @@ import { isAnthropicApiAvailable, anthropicTriageJson } from '../api/anthropic.j
 import { claudeSuggest } from '../claude-cli.js';
 import { buildSignalRegexSources, QUESTION_STARTS } from './signals.js';
 import { hideSupersededRollingSummaries } from './replay-actions.js';
-import { readStoredCoach, SESSION_ID_RE } from './replay-coach.js';
+import { readStoredCoach } from './replay-coach.js';
+import { isSessionId } from '../session/ids.js';
 import { applyVaultLook, getVaultLook } from './vault-look.js';
 
 // ─── Highlight-to-ask prompts ───────────────────────────────────────────────
@@ -148,7 +149,11 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
   router.get('/present/actions', (req, res) => {
     const sessionId = req.query.session as string | undefined;
 
-    if (sessionId) {
+    if (sessionId !== undefined) {
+      if (!isSessionId(sessionId)) {
+        res.status(400).json({ error: 'session must be a session id' });
+        return;
+      }
       const sessionDir = join(homedir(), '.meeting-copilot', 'sessions', sessionId);
       const dbPath = join(sessionDir, 'session.db');
       if (!existsSync(dbPath)) {
@@ -202,8 +207,8 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
   // ─── GET /present/transcript — transcript segments for stored session ─
   router.get('/present/transcript', (req, res) => {
     const sessionId = req.query.session as string | undefined;
-    if (!sessionId) {
-      res.status(400).json({ error: 'session query param required' });
+    if (!isSessionId(sessionId)) {
+      res.status(400).json({ error: 'session must be a session id' });
       return;
     }
 
@@ -232,8 +237,8 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
   // ─── GET /present/coach — coach cards a stored session showed ───────
   router.get('/present/coach', (req, res) => {
     const sessionId = req.query.session as string | undefined;
-    if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
-      res.status(400).json({ error: 'session query param must be a session id' });
+    if (!isSessionId(sessionId)) {
+      res.status(400).json({ error: 'session must be a session id' });
       return;
     }
     const sessionDir = join(homedir(), '.meeting-copilot', 'sessions', sessionId);
@@ -302,7 +307,7 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
     const sessionId = String((req.body?.sessionId ?? '')).trim();
     const refresh = req.body?.refresh === true;
     // sessionIds are directory names — guard against path traversal.
-    if (!sessionId || !/^[A-Za-z0-9_-]+$/.test(sessionId)) {
+    if (!isSessionId(sessionId)) {
       res.status(400).json({ error: 'valid sessionId required' });
       return;
     }

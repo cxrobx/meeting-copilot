@@ -15,9 +15,6 @@ export interface StoredCoachCard {
   createdAt: number;
 }
 
-/** Sessions are UUID directories; anything else never reaches the filesystem. */
-export const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /**
  * The coach cards a stored session showed, oldest first.
  *
