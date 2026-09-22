@@ -492,7 +492,7 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
 
 // ─── Inline HTML Template ─────────────────────────────────────────────────
 
-const PRESENT_HTML = `<!DOCTYPE html>
+export const PRESENT_HTML = `<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
@@ -2254,6 +2254,9 @@ const PRESENT_HTML = `<!DOCTYPE html>
     background: linear-gradient(rgb(var(--warning) / 0.08), rgb(var(--warning) / 0.08)), var(--gb-base);
     box-shadow: 0 6px 14px -12px rgb(var(--shadow-color) / 0.45);
   }
+
+  .goals-hint { font-size: 10px; line-height: 1.4; color: var(--gb-overlay2); margin: -4px 0 8px; }
+  .goals-hint:empty { display: none; }
 
   /* ─── Coach history ─────────────────────────────────────────
      Every card this meeting, newest first. The live card lasts 8–30s and
@@ -4078,6 +4081,36 @@ const PRESENT_HTML = `<!DOCTYPE html>
     dot.classList.add('flash');
   }
 
+  // ─── Standing goals (from recent self-reviews) ────────────
+  // What the post-meeting reviews keep repeating, pre-filled into the private
+  // goals the coach reads. Only while the box is empty and untouched, so it
+  // never overwrites the user's own words; fetched once per page.
+  var standingGoalsCache = null;
+  var goalsTouched = false;
+
+  function prefillStandingGoals() {
+    var box = document.getElementById('startGoals');
+    if (!box || isReplay) return;
+    box.addEventListener('input', function() { goalsTouched = true; });
+    function apply(data) {
+      var el = document.getElementById('startGoals');
+      if (!el || goalsTouched || el.value.trim() || !data || !data.goals || !data.goals.length) return;
+      el.value = data.goals.join('\\n');
+      // The form card is narrow, so a goal wraps to about two lines.
+      el.rows = Math.min(7, data.goals.length * 2);
+      var hint = document.getElementById('startGoalsHint');
+      if (hint) {
+        hint.textContent = 'From your last ' + data.reviewed + ' reviews: ' +
+          data.evidence.join(' \u00b7 ') + '. Edit or clear.';
+      }
+    }
+    if (standingGoalsCache) { apply(standingGoalsCache); return; }
+    fetch('/coach/standing-goals')
+      .then(function(r) { return r.json(); })
+      .then(function(data) { standingGoalsCache = data; apply(data); })
+      .catch(function() { /* the form works without it */ });
+  }
+
   // ─── Upcoming-Meeting Auto-fill (cxmail invites) ──────────
   // GET /calendar/upcoming reads cxmail's local invite DB. One click
   // prefills the start form from the event; the invite description goes
@@ -4203,6 +4236,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
         '<label>Attendees</label><input id="startAttendees" placeholder="Chris, Alex, Sam">' +
         '<label>Your Goals <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional · private, coach only)</span></label>' +
         '<textarea id="startGoals" rows="2" placeholder="What do you want out of this meeting? Positions, asks, red lines…"></textarea>' +
+        '<div id="startGoalsHint" class="goals-hint"></div>' +
         projectsHtml +
         contextHtml +
       '</div>' +
@@ -4223,6 +4257,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     renderPrepBrief();
     renderProjectPicker();
     refreshCalendarChips();
+    prefillStandingGoals();
   }
 
   function showQuickActions() {
@@ -4269,6 +4304,7 @@ const PRESENT_HTML = `<!DOCTYPE html>
     // Server is already idle/archived; the next session.start will move it forward.
     disarmEndingWatchdog();
     endingMessage = '';
+    goalsTouched = false;
     sessionState = 'idle';
     sessionTitle = '';
     sessionStartTime = null;

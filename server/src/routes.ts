@@ -24,6 +24,7 @@ import {
 } from './context/index.js';
 import { extractAgendaItemsFromNotes } from './intelligence/agenda.js';
 import { getUpcomingMeetings } from './calendar/cxmail.js';
+import { standingGoals } from './session/reviewStore.js';
 import { prepRequestFromBody } from './prep/gather.js';
 import { runMeetingPrep } from './prep/agent.js';
 import type { ContextItemConfig } from './context/index.js';
@@ -279,6 +280,14 @@ export function createRoutes(ctx: RouteContext): Router {
     } catch (err) {
       res.json({ meetings: [], error: err instanceof Error ? err.message : String(err) });
     }
+  });
+
+  // Goals the last few self-reviews keep repeating, to pre-fill the start
+  // form's private goals (which the coach reads). { goals: [] } when there is
+  // no pattern yet.
+  router.get('/coach/standing-goals', (_req, res) => {
+    const standing = standingGoals();
+    res.json(standing ?? { goals: [], evidence: [], reviewed: 0 });
   });
 
   // Context sources (files + folders)

@@ -49,6 +49,7 @@
 | POST | `/settings` | Persist + apply settings (`evalCadenceMs, suggestionTtlMs, monitorDefaults, retentionDays, summaryAutoWrite, shareTranscript`); unknown fields reported in `ignored` |
 | GET | `/projects` | Scan `~/Projects/**/CLAUDE.md` for project pickers |
 | GET | `/calendar/upcoming` | Upcoming meetings from cxmail's invite DB (read-only; `{ meetings: [] }` when absent) |
+| GET | `/coach/standing-goals` | Goals the last five self-reviews keep repeating, with evidence; pre-fills the start form's private goals (`{ goals: [] }` with no pattern yet) |
 | GET/POST/DELETE | `/context-sources` | Manage context files/folders (`/context-sources/add` alias) |
 | GET | `/sessions` | Session history list |
 | GET | `/sessions/:id/export?format=` | Export markdown/JSON |

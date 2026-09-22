@@ -12,6 +12,8 @@ All notable changes to Meeting Copilot will be documented in this file.
 
 - `npm run eval:agenda` replays real sessions through the exact production reconcile call and gates a model against a baseline (`--baseline <model>`, or `--baseline-from <report.json>` to reuse a paid baseline run).
 
+- The start form pre-fills your private goals, which the coach reads, with what your last five self-reviews keep repeating: a score of 2/5 or lower in at least half of them, a talk share over 55%, or a missing next step. Today that is concision (4 of 5), talk share (3 of 5) and next step (4 of 5), with the evidence under the box. It is worked out without a model, never overwrites anything typed, and can be edited or cleared.
+- A test parses the dashboard's inline scripts as the browser receives them (gotcha #22).
 - Coach cards no longer vanish. The live card pins to the top of the column instead of scrolling away, and every card goes into a collapsible "Coach · N" history that survives reloads and the end of the meeting. Cards are saved to the session (`coach_suggestion`, with the suggested wording, which the event log never kept), so replay shows them; older sessions show their headlines from the event log (the 09-21 call's 12 cards).
 
 ### Fixed

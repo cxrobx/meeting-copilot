@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 21 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 22 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -27,6 +27,7 @@ Organized by category. 21 items + recovery playbook, condensed format. Original 
 | 19 | Silero VAD Metal graph aborts on pre-M5 Apple Silicon | Frontend |
 | 20 | Phone / FaceTime calls invisible to ScreenCaptureKit — meeting track is a Core Audio process tap | Environment |
 | 21 | gpt-6-luna writes past its JSON object — parse the first complete object | External APIs |
+| 22 | Dashboard JS lives in a TS template literal — escapes decode twice | Frontend |
 | — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
@@ -193,6 +194,15 @@ this default.
 **Solution** (applied 2026-09-22): all live-path parsers go through `intelligence/first-json.ts`: each complete top-level object in order (string/escape-aware), the first that parses **and** passes the caller's shape check, with the old slice as the last resort. Never hand-roll `indexOf('{')`/`lastIndexOf('}')` for model output again.
 **Check**: `__tests__/first-json.test.ts` carries every real tail shape. `npm run eval:agenda` reports `schema` per model; a model swap that drops it below the baseline fails the gate.
 **Pattern**: `server/src/intelligence/first-json.ts`; callers in `agenda.ts`, `coach.ts`, `index.ts` (triage), `factcheck.ts`.
+
+## Frontend (dashboard)
+
+### 22. Dashboard JS Lives in a TS Template Literal — Escapes Decode Twice
+**Symptom**: `/present` is blank except for the header; the browser console says `Invalid or unexpected token`. `tsc` and every other test pass.
+**Cause**: `PRESENT_HTML` is one TypeScript template literal holding the page's JavaScript, so TS decodes escapes before the browser sees them. `join('\n')` written as JS ships as a raw newline inside a JS string (2026-09-22). The same applies to `\u2014`, `\'` and CSS `content: '\25B8'`.
+**Solution**: Write every escape doubled for the browser (`'\\n'`, `'\\u2014'`, `\\'`), as the rest of the file does. Never a backtick or `${` in the embedded JS.
+**Check**: `__tests__/present-script.test.ts` extracts each inline `<script>` from `PRESENT_HTML` and parses it with `vm.Script`. It fails on exactly this bug (verified by reintroducing it).
+**Pattern**: `server/src/present/index.ts` (`export const PRESENT_HTML`).
 
 ---
 

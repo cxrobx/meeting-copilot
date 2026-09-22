@@ -82,3 +82,62 @@ export function summarizeTrend(prev: ReviewRecord | null, current: ReviewScores,
   ];
   return `${parts.join(' · ')} (vs "${prev.title || 'last meeting'}", ${priorCount} prior review${priorCount === 1 ? '' : 's'})`;
 }
+
+export interface StandingGoals {
+  /** Goal lines for the start form, which feed the coach's prompt. */
+  goals: string[];
+  /** Why each goal is there, in the same order — shown under the field. */
+  evidence: string[];
+  reviewed: number;
+}
+
+// Canonical wording per weak score. The reviews' own goals are too specific to
+// carry forward ("Open Monday's call by proposing one first-version
+// pipeline…"); what recurs across them is the dimension.
+const DIMENSION_GOALS: Array<[keyof ReviewScores, string]> = [
+  ['concision', 'Answer the question in your first sentence, then expand.'],
+  ['clarity', 'Finish one thought before starting the next; park tangents out loud.'],
+  ['decisiveness', 'Lead with a recommendation, not a menu of options.'],
+];
+const TALK_SHARE_LIMIT = 0.55;
+const NEXT_STEP_RE = /next step|next action|owners?\b|close with|before the call ends|end (?:with|every)/i;
+
+/**
+ * What the last few self-reviews keep saying, as goals for the next meeting.
+ *
+ * Deterministic, no model: a dimension scored 2/5 or lower in at least half
+ * the window, a talk share over 55% in at least half, and a missing next step
+ * named in the goals of at least two. One review is a meeting, not a pattern,
+ * so fewer than two returns null. On 2026-09-22's six reviews this gives
+ * concision (4 of the last 5), talk share (3 of 5) and next step (4 of 5).
+ */
+export function standingGoals(all: ReviewRecord[] = readReviews(), window = 5): StandingGoals | null {
+  const recent = all.slice(-window);
+  if (recent.length < 2) return null;
+  const half = Math.ceil(recent.length / 2);
+  const goals: string[] = [];
+  const evidence: string[] = [];
+
+  for (const [dimension, goal] of DIMENSION_GOALS) {
+    const weak = recent.filter((r) => typeof r.scores?.[dimension] === 'number' && r.scores[dimension] <= 2).length;
+    if (weak >= half) {
+      goals.push(goal);
+      evidence.push(`${dimension} 2/5 or lower in ${weak} of ${recent.length}`);
+    }
+  }
+
+  const ratios = recent.map((r) => r.talkRatio).filter((x): x is number => typeof x === 'number');
+  const heavy = ratios.filter((x) => x > TALK_SHARE_LIMIT).length;
+  if (ratios.length >= 2 && heavy >= Math.ceil(ratios.length / 2)) {
+    goals.push('Keep your share of the talking under half: ask, then listen.');
+    evidence.push(`talk share over ${Math.round(TALK_SHARE_LIMIT * 100)}% in ${heavy} of ${ratios.length}`);
+  }
+
+  const closes = recent.filter((r) => (r.goals ?? []).some((g) => NEXT_STEP_RE.test(g))).length;
+  if (closes >= 2) {
+    goals.push('Before it ends, name one next step with an owner and a date.');
+    evidence.push(`no clear next step in ${closes} of ${recent.length}`);
+  }
+
+  return goals.length > 0 ? { goals, evidence, reviewed: recent.length } : null;
+}
