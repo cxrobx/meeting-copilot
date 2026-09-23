@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CLOSE_OUT_LEAD_MS,
   MeetingPulse,
+  askAnswerText,
   PULSE_INTERVAL_MS,
   buildPulsePrompt,
   detectWrapUp,
@@ -63,6 +64,13 @@ describe('parsePulse', () => {
     expect(parsePulse(raw, 'closeout')?.closeOut).toHaveLength(5);
   });
 
+  it('reads the missed list only in a missed pass, capped at 5', () => {
+    const many = (n: number) => Array.from({ length: n }, (_, i) => ({ text: `missed ${i}`, why: '' }));
+    const raw = JSON.stringify({ status: 'on_track', read: 'x', escalations: [], closeOut: [], missed: many(7) });
+    expect(parsePulse(raw, 'missed')?.missed).toHaveLength(5);
+    expect(parsePulse(raw, 'pulse')?.missed).toEqual([]);
+  });
+
   it('falls back to on_track for an unknown status, and to null with no read', () => {
     expect(parsePulse(JSON.stringify({ status: 'great', read: 'fine' }), 'pulse')?.status).toBe('on_track');
     expect(parsePulse(JSON.stringify({ status: 'stuck', read: '' }), 'pulse')).toBeNull();
@@ -94,6 +102,19 @@ describe('buildPulsePrompt', () => {
     const p = buildPulsePrompt({ ...base, previous });
     expect(p).toContain('previous read (5 min ago)');
     expect(p).toContain('- Ask X');
+  });
+
+  it('asks a check-in about the user, with their share of the talking', () => {
+    const p = buildPulsePrompt({ ...base, trigger: 'check-in', talkShare: 'the user has spoken 71% of the words so far' });
+    expect(p).toContain('How am I doing?');
+    expect(p).toContain("user's own showing");
+    expect(p).toContain('Speaking balance: the user has spoken 71%');
+  });
+
+  it('asks for the complete missed list in a missed pass', () => {
+    const p = buildPulsePrompt({ ...base, mode: 'missed', trigger: 'missed' });
+    expect(p).toContain('MISSED-ANYTHING pass');
+    expect(p).not.toContain("user's own showing");
   });
 
   it('keeps the most recent transcript when it is long', () => {
@@ -195,6 +216,96 @@ describe('MeetingPulse', () => {
     expect(pulses.map((p) => p.mode)).toEqual(['pulse', 'closeout']);
   });
 
+  it('answers "How am I doing?" now, with nothing new said, outside the CLI lane', async () => {
+    pulse.requestCheckIn();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pulses[0]).toMatchObject({ mode: 'pulse', trigger: 'check-in' });
+    expect(ask.mock.calls[0]![0]).toContain('How am I doing?');
+    expect(ask.mock.calls[0]![3]).toEqual({ asked: true });
+  });
+
+  it('keeps timer reads in the CLI lane', async () => {
+    words = 200;
+    await vi.advanceTimersByTimeAsync(PULSE_INTERVAL_MS);
+    expect(ask.mock.calls[0]![3]).toEqual({ asked: false });
+  });
+
+  it('answers "Missed anything?" with the missed list', async () => {
+    ask.mockResolvedValueOnce(JSON.stringify({
+      status: 'on_track', read: 'Fine.', escalations: [], closeOut: [],
+      missed: [{ text: 'Dana asked about Q3 pricing.', why: 'No answer given.' }],
+    }));
+    pulse.requestMissed();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pulses[0]).toMatchObject({ mode: 'missed', trigger: 'missed' });
+    expect(pulses[0]!.missed[0]!.text).toBe('Dana asked about Q3 pricing.');
+  });
+
+  it('keeps a check-in a check-in inside the close-out window', async () => {
+    pulse.setEndsAt(t0 + 4 * 60_000);
+    pulse.requestCheckIn();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pulses[0]).toMatchObject({ mode: 'pulse', trigger: 'check-in' });
+  });
+
+  it('cancels a timer read in progress when someone asks, without calling it a failure', async () => {
+    const failed = vi.fn();
+    const skipped = vi.fn();
+    pulse.on('failed', failed);
+    pulse.on('skipped', skipped);
+    ask.mockImplementationOnce((_p: string, _s: string, signal: AbortSignal) => new Promise<string>((_, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('Aborted')));
+    }));
+    words = 200;
+    await vi.advanceTimersByTimeAsync(PULSE_INTERVAL_MS);
+    expect(ask).toHaveBeenCalledTimes(1);
+
+    pulse.requestMissed();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(failed).not.toHaveBeenCalled();
+    expect(skipped).toHaveBeenCalledWith({ reason: 'superseded by an asked read' });
+    expect(pulses.map((p) => p.trigger)).toEqual(['missed']);
+  });
+
+  it('lets a close-out in progress finish, then runs the asked reads in the order pressed', async () => {
+    let release!: (v: string) => void;
+    ask.mockImplementationOnce(() => new Promise<string>((resolve) => { release = resolve; }));
+    vi.setSystemTime(t0 + 20 * 60_000);
+    pulse.noteSegment("Let's wrap this up."); // auto close-out, running
+    words = 500;
+    await vi.advanceTimersByTimeAsync(PULSE_INTERVAL_MS); // a timer read queues behind it
+    pulse.requestMissed();
+    pulse.requestCheckIn();
+    pulse.requestCheckIn(); // pressed twice: one answer
+    const skipped = vi.fn();
+    pulse.on('skipped', skipped);
+    release(ANSWER);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pulses.map((p) => p.trigger)).toEqual(['wrap-up', 'missed', 'check-in']);
+    // The timer read waited its turn, then found the asked reads had already
+    // covered everything said since.
+    expect(skipped).toHaveBeenCalledWith({ reason: 'growth: +0/80' });
+  });
+
+  it('runs one read when the same question is pressed while it is running', async () => {
+    let release!: (v: string) => void;
+    ask.mockImplementationOnce(() => new Promise<string>((resolve) => { release = resolve; }));
+    pulse.requestCheckIn();
+    pulse.requestCheckIn();
+    release(ANSWER);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ask).toHaveBeenCalledTimes(1);
+  });
+
+  it('says why an asked read has nothing to read yet', async () => {
+    const failed = vi.fn();
+    pulse.on('failed', failed);
+    pulse.start({ title: 'Empty', startedAt: t0, transcriptProvider: () => '', wordCountProvider: () => 0 });
+    pulse.requestCheckIn();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(failed).toHaveBeenCalledWith(expect.objectContaining({ trigger: 'check-in', reason: 'Nothing has been said yet' }));
+  });
+
   it('passes the previous read into the next prompt', async () => {
     pulse.requestCloseOut();
     await vi.advanceTimersByTimeAsync(0);
@@ -221,5 +332,30 @@ describe('MeetingPulse', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(pulses).toHaveLength(0);
     expect(failed).toHaveBeenCalledWith(expect.objectContaining({ reason: 'unparseable' }));
+  });
+});
+
+describe('askAnswerText', () => {
+  const base = {
+    id: 'p', status: 'drifting' as const, read: 'You are answering; they are not buying yet.',
+    escalations: [{ text: 'Ask what would make it a yes.', why: '' }],
+    closeOut: [{ text: 'Set the follow-up date.', why: '' }],
+    missed: [] as Array<{ text: string; why: string }>,
+    minutesIn: 12, minutesLeft: null, createdAt: 0, latencyMs: 0,
+  };
+
+  it('titles a check-in with the status and gives the read', () => {
+    expect(askAnswerText({ ...base, mode: 'pulse', trigger: 'check-in' } as MeetingPulseResult))
+      .toEqual({ title: 'How am I doing? \u00b7 Drifting', body: base.read });
+  });
+
+  it('gives the first two missed items, or says nothing slipped', () => {
+    const missed = [{ text: 'A', why: '' }, { text: 'B', why: '' }, { text: 'C', why: '' }];
+    expect(askAnswerText({ ...base, mode: 'missed', trigger: 'missed', missed } as MeetingPulseResult)!.body).toBe('A \u00b7 B');
+    expect(askAnswerText({ ...base, mode: 'missed', trigger: 'missed' } as MeetingPulseResult)!.body).toBe('Nothing slipped by so far.');
+  });
+
+  it('has nothing to say for a timer read', () => {
+    expect(askAnswerText({ ...base, mode: 'pulse', trigger: 'interval' } as MeetingPulseResult)).toBeNull();
   });
 });

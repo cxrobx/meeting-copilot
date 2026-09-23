@@ -4,6 +4,7 @@ import { MODEL_CONFIG } from '../model-config.js';
 import { runLiveJson } from './live-json.js';
 import { parseFirstJsonObject } from './first-json.js';
 import {
+  COACH_ASK_SYSTEM,
   COACH_SCHEMA,
   COACH_SYSTEM,
   buildCoachPrompt,
@@ -48,6 +49,15 @@ const INCIDENT_COOLDOWN_MS = 12_000;
 // so holding the next one back costs little.
 export const TYPE_COOLDOWN_MS = 60_000;
 const RECENT_SUGGESTION_MS = 2 * 60_000;
+// "Suggest" has someone waiting on it, so it gets the time a real answer
+// takes, CLI fallback included, instead of the 6s freshness window. The
+// direct API answers in ~3s; the subscription CLI took 19-24s for these
+// prompts on 2026-09-22 (Haiku), so 25s failed there and 45s does not.
+const ASK_PROVIDER_TIMEOUT_MS = 8_000;
+export const ASK_DEADLINE_MS = 45_000;
+// An asked card stays until dismissed; this only bounds a reconnect replay.
+const ASKED_CARD_MS = 10 * 60_000;
+const ASK_HINT = 'The user pressed Suggest and wants the single most useful thing to say, ask, or raise next.';
 
 const MOMENT_HINTS: Record<string, string> = {
   'moment:question': 'A question appears to have been directed at the user. Check whether a concise answer or clarifying question is needed.',
@@ -122,6 +132,8 @@ export function detectMoment(
 
 export interface CoachSuggestion {
   id: string;
+  /** The user pressed Suggest; the card stays until they dismiss it. */
+  asked?: boolean;
   incidentId: string;
   incidentType: CoachIncidentType;
   kind: CoachKind;
@@ -157,7 +169,18 @@ type CoachTriage = (
   prompt: string,
   systemPrompt: string,
   signal?: AbortSignal,
+  timeouts?: { providerTimeoutMs: number; totalTimeoutMs: number },
 ) => Promise<string>;
+
+export interface CoachStartOptions {
+  transcriptProvider: () => string;
+  wordCountProvider: () => number;
+  agendaStatusProvider?: () => AgendaStatus | null;
+  goalsProvider?: () => string;
+  speakerStatsProvider?: () => { micWords: number; meetingWords: number } | null;
+  sessionTitle?: string;
+  attendees?: string;
+}
 
 export interface CoachEvalDeps {
   triage?: CoachTriage;
@@ -263,6 +286,8 @@ export class CoachMonitor extends EventEmitter {
   private lastEvalWordCount = 0;
   private turns: CoachTurn[] = [];
   private recentSuggestions: Array<{ text: string; at: number }> = [];
+  private askInFlight: Promise<CoachSuggestion | null> | null = null;
+  private askAbort: AbortController | null = null;
   private recentIncidents = new Map<string, number>();
   private lastShownByType = new Map<CoachIncidentType, number>();
   private totalLatencyMs = 0;
@@ -282,7 +307,7 @@ export class CoachMonitor extends EventEmitter {
     super();
     this.now = deps.now ?? Date.now;
     this.gate = deps.gate ?? jevMomentGate;
-    this.triage = deps.triage ?? (async (prompt, systemPrompt, signal) => {
+    this.triage = deps.triage ?? (async (prompt, systemPrompt, signal, timeouts) => {
       const result = await runLiveJson({
         prompt,
         systemPrompt,
@@ -293,8 +318,8 @@ export class CoachMonitor extends EventEmitter {
         // Real Terra smoke: 2.72s end-to-end on a 649-token coach prompt.
         // Keep the direct provider inside the 4s freshness SLA instead of
         // aborting a useful response at an unrealistically tight 1.8s.
-        providerTimeoutMs: 3_500,
-        totalTimeoutMs: ADVICE_DEADLINE_MS,
+        providerTimeoutMs: timeouts?.providerTimeoutMs ?? 3_500,
+        totalTimeoutMs: timeouts?.totalTimeoutMs ?? ADVICE_DEADLINE_MS,
         maxOutputTokens: 240,
       });
       return result.text;
@@ -319,23 +344,9 @@ export class CoachMonitor extends EventEmitter {
     };
   }
 
-  start(options: {
-    transcriptProvider: () => string;
-    wordCountProvider: () => number;
-    agendaStatusProvider?: () => AgendaStatus | null;
-    goalsProvider?: () => string;
-    speakerStatsProvider?: () => { micWords: number; meetingWords: number } | null;
-    sessionTitle?: string;
-    attendees?: string;
-  }): void {
+  start(options: CoachStartOptions): void {
     this.stop();
-    this.transcriptProvider = options.transcriptProvider;
-    this.wordCountProvider = options.wordCountProvider;
-    this.agendaStatusProvider = options.agendaStatusProvider ?? (() => null);
-    this.goalsProvider = options.goalsProvider ?? (() => '');
-    this.speakerStatsProvider = options.speakerStatsProvider ?? (() => null);
-    this.sessionTitle = options.sessionTitle ?? '';
-    this.attendees = options.attendees ?? '';
+    this.configure(options);
     this.lastEvalWordCount = this.wordCountProvider();
     this.evalsRun = 0;
     this.suggestionsEmitted = 0;
@@ -390,6 +401,33 @@ export class CoachMonitor extends EventEmitter {
     });
   }
 
+  /**
+   * "Suggest": one card now, on request. Works with the live coach off (it
+   * reads from `options` then), skips the Jev gate, the per-type cooldown and
+   * the priority/confidence floors, and gets a longer deadline, because the
+   * user asked. Resolves to the card, or null when the model had nothing;
+   * rejects on failure. A second press while one runs shares its answer.
+   */
+  askNow(focus: string, options?: CoachStartOptions): Promise<CoachSuggestion | null> {
+    if (this.askInFlight) return this.askInFlight;
+    if (!this.running && options) this.configure(options);
+    const controller = new AbortController();
+    this.askAbort = controller;
+    const task = this.runAsked(focus.trim().slice(0, 300), controller.signal).finally(() => {
+      if (this.askInFlight === task) this.askInFlight = null;
+      if (this.askAbort === controller) this.askAbort = null;
+    });
+    this.askInFlight = task;
+    return task;
+  }
+
+  /** Session end: an answer to a meeting that is over is not worth showing. */
+  cancelAsk(): void {
+    this.askAbort?.abort();
+    this.askAbort = null;
+    this.askInFlight = null;
+  }
+
   /** External trigger, currently used by agenda risk warnings. */
   requestEval(reason: string): void {
     this.queueTrigger({ reason, source: 'system', text: '' });
@@ -416,6 +454,16 @@ export class CoachMonitor extends EventEmitter {
       this.abortController.abort();
       this.abortController = null;
     }
+  }
+
+  private configure(options: CoachStartOptions): void {
+    this.transcriptProvider = options.transcriptProvider;
+    this.wordCountProvider = options.wordCountProvider;
+    this.agendaStatusProvider = options.agendaStatusProvider ?? (() => null);
+    this.goalsProvider = options.goalsProvider ?? (() => '');
+    this.speakerStatsProvider = options.speakerStatsProvider ?? (() => null);
+    this.sessionTitle = options.sessionTitle ?? '';
+    this.attendees = options.attendees ?? '';
   }
 
   private upsertTurn(turn: CoachTurn): void {
@@ -525,15 +573,11 @@ export class CoachMonitor extends EventEmitter {
     return last !== undefined && now - last < TYPE_COOLDOWN_MS;
   }
 
-  private async runEval(
-    gen: number,
-    trigger: PendingTrigger,
-    signal: AbortSignal,
-  ): Promise<void> {
-    const transcriptWindow = this.transcriptWindow();
-    if (!transcriptWindow || transcriptWindow.trim().length < 20) return;
-    this.lastEvalWordCount = this.wordCountProvider();
-
+  private buildPrompt(
+    transcriptWindow: string,
+    now: number,
+    moment: { momentHint?: string; triggerSource: 'mic' | 'meeting' | 'system'; triggerText: string },
+  ): string {
     const agendaStatus = this.agendaStatusProvider();
     const agendaSummary = agendaStatus && agendaStatus.items.length > 0
       ? agendaStatus.items.map((item) => `[${item.state}] ${item.text}`).join('\n')
@@ -549,11 +593,10 @@ export class CoachMonitor extends EventEmitter {
       speakerBalance = `the user has spoken ${share}% of the words so far`;
     }
 
-    const now = this.now();
     this.recentSuggestions = this.recentSuggestions.filter(
       (suggestion) => now - suggestion.at <= RECENT_SUGGESTION_MS,
     );
-    const prompt = buildCoachPrompt({
+    return buildCoachPrompt({
       transcriptWindow,
       agendaSummary,
       meetingTitle: this.sessionTitle,
@@ -561,6 +604,89 @@ export class CoachMonitor extends EventEmitter {
       recentSuggestions: this.recentSuggestions.map((suggestion) => suggestion.text),
       userGoals: this.goalsProvider(),
       speakerBalance,
+      ...moment,
+    });
+  }
+
+  private async runAsked(focus: string, signal: AbortSignal): Promise<CoachSuggestion | null> {
+    const transcriptWindow = this.transcriptWindow();
+    if (!transcriptWindow || transcriptWindow.trim().length < 20) {
+      throw new Error('Nothing has been said yet');
+    }
+    const now = this.now();
+    const prompt = this.buildPrompt(transcriptWindow, now, {
+      momentHint: focus ? `${ASK_HINT} Their focus: "${focus}".` : ASK_HINT,
+      triggerSource: 'system',
+      triggerText: '',
+    });
+
+    const startedAt = this.now();
+    this.evalsRun++;
+    let raw: string;
+    try {
+      raw = await this.triage(prompt, COACH_ASK_SYSTEM, signal, {
+        providerTimeoutMs: ASK_PROVIDER_TIMEOUT_MS,
+        totalTimeoutMs: ASK_DEADLINE_MS,
+      });
+    } catch (error) {
+      // Only cancelAsk() means "the meeting ended". The model call's own
+      // deadline also surfaces as 'Aborted', and the user is waiting on it.
+      if (signal.aborted) throw new Error('Aborted');
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(message === 'Aborted' ? `No answer within ${ASK_DEADLINE_MS / 1000}s` : message);
+    }
+    if (signal.aborted) throw new Error('Aborted');
+    const latencyMs = this.now() - startedAt;
+    this.totalLatencyMs += latencyMs;
+
+    const result = parseCoachResponse(raw);
+    if (!result) {
+      this.emit('eval', { asked: true, skipped: 'parse-failed', latencyMs });
+      throw new Error('The coach answer could not be read');
+    }
+    if (!result.hasSuggestion || !result.phrasing) {
+      this.emit('eval', { asked: true, suggested: false, latencyMs });
+      return null;
+    }
+
+    const createdAt = this.now();
+    const incidentType = result.incidentType;
+    this.lastShownByType.set(incidentType, createdAt);
+    const suggestion: CoachSuggestion = {
+      id: randomUUID(),
+      asked: true,
+      incidentId: `asked:${createdAt}`,
+      incidentType,
+      kind: result.kind,
+      priority: Math.max(1, Math.min(5, Math.round(result.priority || 4))),
+      confidence: Math.max(0, Math.min(1, result.confidence)),
+      headline: result.headline.slice(0, 80),
+      phrasing: result.phrasing.slice(0, 280),
+      why: result.why.slice(0, 180),
+      triggerQuote: result.triggerQuote.slice(0, 180),
+      createdAt,
+      expiresAt: createdAt + ASKED_CARD_MS,
+      latencyMs,
+    };
+    this.recentSuggestions.push({ text: `${suggestion.headline} ${suggestion.phrasing}`, at: createdAt });
+    if (this.recentSuggestions.length > MAX_RECENT_SUGGESTIONS) this.recentSuggestions.shift();
+    this.suggestionsEmitted++;
+    this.emit('suggestion', suggestion);
+    this.emit('eval', { asked: true, completed: true, suggested: true, incidentType, latencyMs });
+    return suggestion;
+  }
+
+  private async runEval(
+    gen: number,
+    trigger: PendingTrigger,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const transcriptWindow = this.transcriptWindow();
+    if (!transcriptWindow || transcriptWindow.trim().length < 20) return;
+    this.lastEvalWordCount = this.wordCountProvider();
+
+    const now = this.now();
+    const prompt = this.buildPrompt(transcriptWindow, now, {
       momentHint: MOMENT_HINTS[trigger.reason],
       triggerSource: trigger.source,
       triggerText: trigger.text,

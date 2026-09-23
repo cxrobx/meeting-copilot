@@ -102,6 +102,35 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         center.add(request)
     }
 
+    /// One of the coach's questions, asked from a button or a ⌃⌥ hotkey. One
+    /// banner per question: the answer replaces the "Reading the meeting…"
+    /// banner. Silent, unlike the close-out: the meeting track taps system
+    /// audio, and the person who asked is already watching for it. Skipped
+    /// while the dashboard is in front, where the answer shows anyway.
+    func postAskNotification(_ ask: AskState) {
+        guard hasPermission else { return }
+        let identifier = "ask-\(ask.kind)"
+        if let gate = shouldPresentBanner, !gate() {
+            center.removeDeliveredNotifications(withIdentifiers: [identifier])
+            return
+        }
+        // Suggest answers in seconds; a "started" banner would only flash.
+        if ask.phase == "started" && ask.kind == "suggest" { return }
+        guard let title = ask.title, !title.isEmpty else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = ask.body ?? ""
+        content.threadIdentifier = "coach"
+        center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil))
+    }
+
+    /// Session end: a "Reading the meeting…" banner will never be answered.
+    func clearAskNotifications() {
+        let identifiers = ["checkin", "missed", "suggest", "wrapup"].map { "ask-\($0)" }
+        center.removeDeliveredNotifications(withIdentifiers: identifiers)
+    }
+
     /// Fires when the supervisor has exhausted its automatic restart budget.
     /// Surfaces to the user via macOS Notification Center so they know to
     /// check logs / quit-and-relaunch — otherwise the failure is silent.

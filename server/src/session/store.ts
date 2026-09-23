@@ -62,12 +62,13 @@ export interface ContextSummaryRecord {
 /** A meeting pulse as it was shown (intelligence/pulse.ts owns the shape). */
 export interface PulseRecord {
   id: string;
-  mode: 'pulse' | 'closeout';
+  mode: 'pulse' | 'closeout' | 'missed';
   trigger: string;
   status: 'on_track' | 'drifting' | 'stuck';
   read: string;
   escalations: Array<{ text: string; why: string }>;
   closeOut: Array<{ text: string; why: string }>;
+  missed: Array<{ text: string; why: string }>;
   minutesIn: number;
   minutesLeft: number | null;
   latencyMs: number;
@@ -91,6 +92,8 @@ export function pulseFromRow(row: Record<string, any>): PulseRecord {
     read: row.read,
     escalations: list(row.escalations),
     closeOut: list(row.closeOut),
+    // Absent from session DBs written before "Missed anything?" existed.
+    missed: list(row.missed),
     minutesIn: row.minutesIn,
     minutesLeft: row.minutesLeft ?? null,
     latencyMs: row.latencyMs ?? 0,
@@ -218,6 +221,7 @@ export class SessionStore {
         read TEXT NOT NULL,
         escalations TEXT NOT NULL DEFAULT '[]',
         closeOut TEXT NOT NULL DEFAULT '[]',
+        missed TEXT NOT NULL DEFAULT '[]',
         minutesIn INTEGER NOT NULL,
         minutesLeft INTEGER,
         latencyMs INTEGER NOT NULL DEFAULT 0,
@@ -233,6 +237,12 @@ export class SessionStore {
       CREATE INDEX IF NOT EXISTS idx_coach_suggestion_session ON coach_suggestion(sessionId);
       CREATE INDEX IF NOT EXISTS idx_pulse_session ON pulse(sessionId);
     `);
+    // A session DB opened again after an upgrade (a server restart mid-
+    // meeting) keeps its old pulse table; CREATE IF NOT EXISTS won't add to it.
+    const pulseColumns = this.db.prepare('PRAGMA table_info(pulse)').all() as Array<{ name: string }>;
+    if (!pulseColumns.some((c) => c.name === 'missed')) {
+      this.db.exec("ALTER TABLE pulse ADD COLUMN missed TEXT NOT NULL DEFAULT '[]'");
+    }
   }
 
   createSession(title: string = '', projectNames: string[] = [], agenda?: string, attendees?: string): SessionRecord {
@@ -412,11 +422,11 @@ export class SessionStore {
   addPulse(p: PulseRecord): void {
     this.db.prepare(
       `INSERT OR IGNORE INTO pulse
-         (id, sessionId, mode, trigger, status, read, escalations, closeOut, minutesIn, minutesLeft, latencyMs, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, sessionId, mode, trigger, status, read, escalations, closeOut, missed, minutesIn, minutesLeft, latencyMs, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       p.id, this.sessionId, p.mode, p.trigger, p.status, p.read,
-      JSON.stringify(p.escalations), JSON.stringify(p.closeOut),
+      JSON.stringify(p.escalations), JSON.stringify(p.closeOut), JSON.stringify(p.missed ?? []),
       p.minutesIn, p.minutesLeft, p.latencyMs, p.createdAt,
     );
   }

@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  ASK_DEADLINE_MS,
   CoachMonitor,
   TYPE_COOLDOWN_MS,
   detectMoment,
   type CoachSuggestion,
 } from '../intelligence/coach.js';
+import { COACH_ASK_SYSTEM } from '../intelligence/prompts/coach.v1.js';
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -357,5 +359,78 @@ describe('CoachMonitor', () => {
     await vi.advanceTimersByTimeAsync(300);
     await Promise.resolve();
     expect(suggestions).toHaveLength(0);
+  });
+});
+
+describe('CoachMonitor.askNow (Suggest)', () => {
+  const transcript = '[Meeting] What would the pilot cost us?\n[You] It depends on the scope, honestly.';
+  const options = {
+    transcriptProvider: () => transcript,
+    wordCountProvider: () => 20,
+    goalsProvider: () => 'Get a pilot date',
+  };
+
+  it('answers with the live coach off, past the gate and the floors, and pins the card', async () => {
+    const triage = vi.fn().mockResolvedValue(result({ priority: 2, confidence: 0.3, incidentType: 'none' }));
+    const gate = vi.fn();
+    const monitor = new CoachMonitor({ triage, gate });
+    const shown: CoachSuggestion[] = [];
+    monitor.on('suggestion', (s: CoachSuggestion) => shown.push(s));
+
+    const card = await monitor.askNow('', options);
+    expect(gate).not.toHaveBeenCalled();
+    expect(triage.mock.calls[0]![1]).toBe(COACH_ASK_SYSTEM);
+    expect(triage.mock.calls[0]![0]).toContain('Get a pilot date');
+    expect(triage.mock.calls[0]![3]).toMatchObject({ totalTimeoutMs: ASK_DEADLINE_MS });
+    expect(card).toMatchObject({ asked: true, phrasing: expect.stringContaining('capacity') });
+    expect(card!.expiresAt - card!.createdAt).toBeGreaterThanOrEqual(5 * 60_000);
+    expect(shown).toEqual([card]);
+  });
+
+  it('carries the prompt box text as the focus', async () => {
+    const triage = vi.fn().mockResolvedValue(result());
+    const monitor = new CoachMonitor({ triage });
+    await monitor.askNow('how do I answer the pricing push', options);
+    expect(triage.mock.calls[0]![0]).toContain('Their focus: "how do I answer the pricing push"');
+  });
+
+  it('resolves null when the model has nothing', async () => {
+    const triage = vi.fn().mockResolvedValue(result({ hasSuggestion: false, phrasing: '' }));
+    const monitor = new CoachMonitor({ triage });
+    await expect(monitor.askNow('', options)).resolves.toBeNull();
+  });
+
+  it('shares one call between two presses', async () => {
+    const pending = defer<string>();
+    const triage = vi.fn().mockReturnValue(pending.promise);
+    const monitor = new CoachMonitor({ triage });
+    const a = monitor.askNow('', options);
+    const b = monitor.askNow('', options);
+    pending.resolve(result());
+    expect(await a).toBe(await b);
+    expect(triage).toHaveBeenCalledTimes(1);
+  });
+
+  it('says so when nothing has been said', async () => {
+    const monitor = new CoachMonitor({ triage: vi.fn() });
+    await expect(monitor.askNow('', { ...options, transcriptProvider: () => '' }))
+      .rejects.toThrow('Nothing has been said yet');
+  });
+
+  it('reports its own deadline as a timeout, not as the meeting ending', async () => {
+    const monitor = new CoachMonitor({ triage: vi.fn().mockRejectedValue(new Error('Aborted')) });
+    await expect(monitor.askNow('', options)).rejects.toThrow(`No answer within ${ASK_DEADLINE_MS / 1000}s`);
+  });
+
+  it('drops the answer when the meeting ends under it', async () => {
+    const pending = defer<string>();
+    const monitor = new CoachMonitor({ triage: vi.fn().mockReturnValue(pending.promise) });
+    const shown = vi.fn();
+    monitor.on('suggestion', shown);
+    const ask = monitor.askNow('', options);
+    monitor.cancelAsk();
+    pending.resolve(result());
+    await expect(ask).rejects.toThrow('Aborted');
+    expect(shown).not.toHaveBeenCalled();
   });
 });

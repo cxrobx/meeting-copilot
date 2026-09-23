@@ -29,10 +29,14 @@ enum ClientMessage: Encodable {
     case actionDismiss(actionId: String)
     case actionCancel(actionId: String)
     case actionTrigger(actionType: String, prompt: String?)
+    /// A pulse read now: "checkin" (How am I doing?), "missed", or "closeout".
+    case pulseRequest(kind: String)
+    /// "Suggest": one coach card now.
+    case coachAsk(focus: String?)
 
     private enum CodingKeys: String, CodingKey {
         case type, data, source, actionId, title, projectNames, agenda, attendees, contextPaths, actionType, prompt,
-             chunkId, audioDurationSec, captureStartedAt, captureEndedAt, sequence, isContinuation
+             chunkId, audioDurationSec, captureStartedAt, captureEndedAt, sequence, isContinuation, kind, focus
     }
 
     private static let iso8601: ISO8601DateFormatter = {
@@ -78,6 +82,12 @@ enum ClientMessage: Encodable {
             try container.encode("action.trigger", forKey: .type)
             try container.encode(actionType, forKey: .actionType)
             try container.encodeIfPresent(prompt, forKey: .prompt)
+        case .pulseRequest(let kind):
+            try container.encode("pulse.request", forKey: .type)
+            try container.encode(kind, forKey: .kind)
+        case .coachAsk(let focus):
+            try container.encode("coach.ask", forKey: .type)
+            try container.encodeIfPresent(focus, forKey: .focus)
         }
     }
 }
@@ -96,9 +106,13 @@ enum ServerMessage: Decodable {
     case pulseCloseOut(body: String)
     /// The meeting pulse's latest big-picture read (every ~5 min).
     case pulseUpdate(MeetingPulse)
+    /// One of the coach's questions (a dashboard button or a hotkey) was
+    /// taken, answered, or failed. The app turns it into a notification.
+    case askState(AskState)
 
     private enum CodingKeys: String, CodingKey {
-        case type, segment, action, actionId, state, result, sessionId, data, body, pulse
+        case type, segment, action, actionId, state, result, sessionId, data, body, pulse,
+             kind, phase, title, empty
     }
 
     init(from decoder: Decoder) throws {
@@ -139,11 +153,32 @@ enum ServerMessage: Decodable {
             } else {
                 self = .metrics(DebugMetrics(transcriptLatencyMs: nil, activeWorkers: nil, audioBufferSizeBytes: nil, serverUptime: nil))
             }
+        case "ask.state":
+            self = .askState(AskState(
+                kind: try container.decode(String.self, forKey: .kind),
+                phase: try container.decode(String.self, forKey: .phase),
+                title: try container.decodeIfPresent(String.self, forKey: .title),
+                body: try container.decodeIfPresent(String.self, forKey: .body),
+                empty: (try container.decodeIfPresent(Bool.self, forKey: .empty)) ?? false
+            ))
         default:
             // Ignore unknown message types gracefully
             self = .metrics(DebugMetrics(transcriptLatencyMs: nil, activeWorkers: nil, audioBufferSizeBytes: nil, serverUptime: nil))
         }
     }
+}
+
+// MARK: - Coach Questions
+
+/// `ask.state` in server/src/index.ts. `kind` is checkin | missed | suggest |
+/// wrapup; `phase` is started | done | failed.
+struct AskState: Equatable {
+    let kind: String
+    let phase: String
+    let title: String?
+    let body: String?
+    /// done with no answer: Suggest found nothing worth saying.
+    let empty: Bool
 }
 
 // MARK: - Meeting Pulse

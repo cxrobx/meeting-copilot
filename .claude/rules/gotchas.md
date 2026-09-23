@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 23 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 24 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -29,6 +29,7 @@ Organized by category. 23 items + recovery playbook, condensed format. Original 
 | 21 | gpt-6-luna writes past its JSON object — parse the first complete object | External APIs |
 | 22 | Dashboard JS lives in a TS template literal — escapes decode twice | Frontend |
 | 23 | Swift's `.iso8601` rejects the server's milliseconds — messages silently dropped | Frontend |
+| 24 | Dashboard JS is one scope — a second `var` silently replaces the first | Frontend |
 | — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
@@ -211,6 +212,13 @@ this default.
 **Solution** (applied 2026-09-22): `JSONDecoder.copilotDecoder` takes ISO with or without milliseconds, and epoch ms. `ActionType` falls back to `.other`, `action.status` decodes its `result` with `try?` so the state always lands, and decode failures go to `appLog`. Behaviour that was designed but dormant is now live: suggestion banners fire when the panel isn't frontmost, and session end waits (60 s grace at most) for running actions.
 **Check**: `Tests/ServerMessageTests.swift` decodes real wire payloads with the app's own decoder, never a bare `JSONDecoder()`. With the old strategy it fails 4 of 8 (verified). A new server message or field the app reads gets a real-payload case there.
 **Pattern**: `app/MeetingCopilot/Sources/Core/Network/WebSocketClient.swift` (`copilotDecoder`), `Models/ActionSuggestion.swift`, `Models/Messages.swift`.
+
+### 24. Dashboard JS Is One Scope — A Second `var` Silently Replaces the First
+**Symptom**: A dashboard feature throws on its first render (`Cannot read properties of undefined`) while tsc and every test pass; the object it reads belongs to some other feature.
+**Cause**: The main `<script>` is one IIFE with ~310 top-level names, and `var` allows redeclaration. The coach's `ASK_LABELS` (2026-09-22) was reassigned by highlight-to-ask's `ASK_LABELS` further down, which runs later, so `ASK_LABELS.checkin` was undefined.
+**Solution**: Prefix a new feature's names (`COACH_ASK_LABELS`). Wire clicks through `data-*` attributes and one delegated listener rather than `onclick="fn(\\'x\\')"`, which also sidesteps #22's escaping.
+**Check**: `__tests__/present-script.test.ts` fails when a two-space-indented `var`/`let`/`const`/`function` name repeats in an inline script (verified by reintroducing the bug).
+**Pattern**: `server/src/present/index.ts`.
 
 ---
 

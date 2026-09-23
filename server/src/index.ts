@@ -22,8 +22,8 @@ import { IntelligenceEngine } from './intelligence/index.js';
 import { setLlmBudgetExceededHandler } from './api/budget.js';
 import { AgendaTracker, type AgendaStatus } from './intelligence/agenda.js';
 import { FactCheckMonitor, type FactFlag } from './intelligence/factcheck.js';
-import { CoachMonitor, type CoachSuggestion } from './intelligence/coach.js';
-import { MeetingPulse, type MeetingPulseResult } from './intelligence/pulse.js';
+import { CoachMonitor, type CoachStartOptions, type CoachSuggestion } from './intelligence/coach.js';
+import { MeetingPulse, askAnswerText, type MeetingPulseResult, type PulseTrigger } from './intelligence/pulse.js';
 import { inCliLane } from './intelligence/cli-lane.js';
 import { WorkerRegistry } from './workers/registry.js';
 import { ResearchWorker } from './workers/research.js';
@@ -123,8 +123,11 @@ type InboundMessage =
   | { type: 'meeting.goals'; goals: string }
   // The calendar end time of a meeting started from an invite (ISO or ms).
   | { type: 'meeting.schedule'; endsAt: string | number }
-  // The Wrap-up button: run a close-out pulse now.
-  | { type: 'pulse.request' };
+  // The coach's question buttons and the app's hotkeys: a pulse read now.
+  // No kind is the Wrap-up button (the only kind before 2026-09-22).
+  | { type: 'pulse.request'; kind?: 'closeout' | 'checkin' | 'missed' }
+  // "Suggest": one coach card now, optionally about the prompt box's text.
+  | { type: 'coach.ask'; focus?: string };
 
 // Messages TO Swift app
 type OutboundMessage =
@@ -217,10 +220,24 @@ type OutboundMessage =
       suggestions: CoachSuggestion[];
     }
   | { type: 'pulse.update'; pulse: MeetingPulseResult }
-  | { type: 'pulse.running'; mode: 'pulse' | 'closeout'; trigger: string }
-  | { type: 'pulse.failed'; reason: string }
-  // A close-out with something to settle — the app raises a notification.
+  // Every read this session, sent on connect for the coach's Earlier list.
+  | { type: 'pulse.history'; pulses: MeetingPulseResult[] }
+  | { type: 'pulse.running'; mode: MeetingPulseResult['mode']; trigger: string }
+  | { type: 'pulse.failed'; reason: string; mode?: string; trigger?: string }
+  // A timer's close-out with something to settle — the app raises a notification.
   | { type: 'pulse.closeout'; body: string }
+  // One of the coach's questions, asked from a button or a hotkey. `started`
+  // when the server takes it, then `done` or `failed`. The dashboard drives
+  // its busy buttons from this; the app turns title/body into a notification.
+  | {
+      type: 'ask.state';
+      kind: AskKind;
+      phase: 'started' | 'done' | 'failed';
+      title?: string;
+      body?: string;
+      /** done with no answer: Suggest found nothing worth saying. */
+      empty?: boolean;
+    }
   | {
       // Realtime intelligence failure — surfaced so tier degradation and
       // silent monitor errors are visible in the dashboard instead of only
@@ -338,13 +355,29 @@ let meetingGoals = '';
 const pulse = new MeetingPulse();
 let sessionPulses: MeetingPulseResult[] = [];
 
+type AskKind = 'checkin' | 'missed' | 'wrapup' | 'suggest';
+const ASK_KIND_BY_TRIGGER: Partial<Record<PulseTrigger, AskKind>> = {
+  'check-in': 'checkin',
+  missed: 'missed',
+  manual: 'wrapup',
+};
+const ASK_QUESTION: Record<AskKind, string> = {
+  checkin: 'How am I doing?',
+  missed: 'Missed anything?',
+  wrapup: 'Wrap-up check',
+  suggest: 'Suggest',
+};
 pulse.on('running', (d: { mode: 'pulse' | 'closeout'; trigger: string }) => {
   broadcast({ type: 'pulse.running', mode: d.mode, trigger: d.trigger });
 });
-pulse.on('failed', (d: { mode: string; trigger: string; reason: string; latencyMs: number }) => {
+pulse.on('failed', (d: { mode: string; trigger: PulseTrigger; reason: string; latencyMs: number }) => {
   debugLog(`[Pulse] ${d.mode} (${d.trigger}) failed after ${d.latencyMs}ms: ${d.reason}`);
   eventLogger?.log('pulse.failed', d);
-  broadcast({ type: 'pulse.failed', reason: d.reason });
+  broadcast({ type: 'pulse.failed', reason: d.reason, mode: d.mode, trigger: d.trigger });
+  const kind = ASK_KIND_BY_TRIGGER[d.trigger];
+  if (kind) {
+    broadcast({ type: 'ask.state', kind, phase: 'failed', title: `${ASK_QUESTION[kind]} didn't come back`, body: d.reason });
+  }
 });
 pulse.on('skipped', (d: { reason: string }) => {
   eventLogger?.log('pulse.skipped', d);
@@ -367,7 +400,10 @@ pulse.on('pulse', (p: MeetingPulseResult) => {
   });
   debugLog(`[Pulse] ${p.mode} (${p.trigger}) ${p.status} · ${p.escalations.length} escalate · ${p.closeOut.length} close-out · ${p.latencyMs}ms`);
   broadcast({ type: 'pulse.update', pulse: p });
-  if (p.mode === 'closeout' && p.closeOut.length + p.escalations.length > 0) {
+  const kind = ASK_KIND_BY_TRIGGER[p.trigger];
+  if (kind) {
+    broadcast({ type: 'ask.state', kind, phase: 'done', ...askAnswerText(p) });
+  } else if (p.mode === 'closeout' && p.closeOut.length + p.escalations.length > 0) {
     const first = [...p.escalations, ...p.closeOut].slice(0, 2).map((i) => i.text);
     broadcast({ type: 'pulse.closeout', body: first.join(' · ') });
   }
@@ -454,6 +490,19 @@ function monitorSpeakerStats(): { micWords: number; meetingWords: number } | nul
   return { micWords, meetingWords };
 }
 
+/** What the coach reads: shared by the live coach and a one-off Suggest. */
+function coachOptions(): CoachStartOptions {
+  return {
+    transcriptProvider: monitorTranscriptProvider,
+    wordCountProvider: monitorWordCountProvider,
+    agendaStatusProvider: () => lastAgendaStatus,
+    goalsProvider: () => meetingGoals,
+    speakerStatsProvider: monitorSpeakerStats,
+    sessionTitle: sessionStore?.getSession()?.title,
+    attendees: intelligence.getMeetingContext().attendees,
+  };
+}
+
 /** Start/stop a monitor to match its flag. Safe to call redundantly. */
 function applyFeatureFlags(): void {
   const session = sessionStore?.getSession();
@@ -470,16 +519,7 @@ function applyFeatureFlags(): void {
   }
 
   if (featureFlags.coach && sessionActive && !coach.isRunning()) {
-    const meetingContext = intelligence.getMeetingContext();
-    coach.start({
-      transcriptProvider: monitorTranscriptProvider,
-      wordCountProvider: monitorWordCountProvider,
-      agendaStatusProvider: () => lastAgendaStatus,
-      goalsProvider: () => meetingGoals,
-      speakerStatsProvider: monitorSpeakerStats,
-      sessionTitle: session?.title,
-      attendees: meetingContext.attendees,
-    });
+    coach.start(coachOptions());
     debugLog('[Coach] started');
   } else if ((!featureFlags.coach || !sessionActive) && coach.isRunning()) {
     coach.stop();
@@ -587,6 +627,9 @@ function handleWsConnection(ws: WebSocket, label: string): void {
   }
   if (sessionCoachSuggestions.length > 0) {
     ws.send(JSON.stringify({ type: 'coach.history', suggestions: sessionCoachSuggestions }));
+  }
+  if (sessionPulses.length > 0) {
+    ws.send(JSON.stringify({ type: 'pulse.history', pulses: sessionPulses }));
   }
   const latestPulse = sessionPulses[sessionPulses.length - 1];
   if (latestPulse) {
@@ -947,6 +990,12 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
           goalsProvider: () => meetingGoals,
           agendaProvider: agendaForPulse,
           coachProvider: () => sessionCoachSuggestions.map((s) => s.headline),
+          talkShareProvider: () => {
+            const stats = monitorSpeakerStats();
+            if (!stats || stats.micWords + stats.meetingWords < 100) return '';
+            const share = Math.round((stats.micWords / (stats.micWords + stats.meetingWords)) * 100);
+            return `the user has spoken ${share}% of the words so far`;
+          },
         });
       }
 
@@ -1008,6 +1057,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         rollingSummaryWordCount = 0;
         // The self-review takes over from here; a pulse mid-flight is dropped.
         pulse.stop();
+        coach.cancelAsk();
 
         // Run a final agenda evaluation so the wrap-up state is captured before stop
         try {
@@ -1216,9 +1266,40 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
     }
 
     case 'pulse.request': {
-      if (!sessionActive || !pulse.isRunning()) break;
-      eventLogger?.log('pulse.request', {});
-      pulse.requestCloseOut();
+      const kind: AskKind = message.kind === 'checkin' ? 'checkin' : message.kind === 'missed' ? 'missed' : 'wrapup';
+      if (!sessionActive || !pulse.isRunning()) {
+        // Say so: a button left on "Reading…" forever is how this used to fail.
+        const reason = !sessionActive ? 'No meeting is live' : 'The meeting pulse is off (COPILOT_PULSE=0)';
+        broadcast({ type: 'ask.state', kind, phase: 'failed', title: `${ASK_QUESTION[kind]} didn't run`, body: reason });
+        break;
+      }
+      eventLogger?.log('pulse.request', { kind });
+      broadcast({ type: 'ask.state', kind, phase: 'started', title: ASK_QUESTION[kind], body: 'Reading the meeting\u2026 about 30 seconds.' });
+      if (kind === 'checkin') pulse.requestCheckIn();
+      else if (kind === 'missed') pulse.requestMissed();
+      else pulse.requestCloseOut();
+      break;
+    }
+
+    case 'coach.ask': {
+      if (!sessionActive || !sessionStore) {
+        broadcast({ type: 'ask.state', kind: 'suggest', phase: 'failed', title: "Suggest didn't run", body: 'No meeting is live' });
+        break;
+      }
+      const focus = (message.focus ?? '').toString();
+      eventLogger?.log('coach.ask', { focusLength: focus.length });
+      broadcast({ type: 'ask.state', kind: 'suggest', phase: 'started' });
+      coach.askNow(focus, coachOptions()).then((card) => {
+        // The card itself arrives as coach.suggestion (coach.on('suggestion')).
+        broadcast(card
+          ? { type: 'ask.state', kind: 'suggest', phase: 'done', title: card.headline || 'Suggest', body: card.phrasing }
+          : { type: 'ask.state', kind: 'suggest', phase: 'done', empty: true, title: 'Suggest', body: 'Nothing worth saying right now.' });
+      }).catch((err: unknown) => {
+        const reason = err instanceof Error ? err.message : String(err);
+        if (reason === 'Aborted') return; // the meeting ended under it
+        debugLog(`[Coach] ask failed: ${reason}`);
+        broadcast({ type: 'ask.state', kind: 'suggest', phase: 'failed', title: "Suggest didn't come back", body: reason });
+      });
       break;
     }
 

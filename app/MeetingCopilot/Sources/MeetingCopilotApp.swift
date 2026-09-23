@@ -105,6 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let sessionManager = SessionManager()
     let menuBarFeed = MenuBarFeed()
     private let floatingPanelController = FloatingPanelController()
+    private let coachHotkeys = CoachHotkeys()
     private var hasShownPermissions = false
     private var terminationInProgress = false
 
@@ -184,6 +185,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if !AXIsProcessTrusted() {
             appLog("[Hotkey] ⌘⇧M works only while the app is focused — grant Accessibility (System Settings → Privacy & Security → Accessibility) for the global hotkey")
+        }
+
+        // ⌃⌥1/2/3: the coach's questions from any app, held only while a
+        // meeting is live (see CoachHotkeys for why Carbon, and why ⌃).
+        coachHotkeys.onPress = { [weak self] ask in
+            guard let self = self else { return }
+            appLog("[Hotkey] \(ask.chord) \(ask.label)")
+            Task { @MainActor in
+                if !(await self.sessionManager.askCoach(ask)) {
+                    // The only feedback possible from inside another app.
+                    NSSound.beep()
+                }
+            }
+        }
+        sessionManager.onMeetingLiveChanged = { [weak self] live in
+            guard let self = self else { return }
+            if live {
+                let failed = self.coachHotkeys.register()
+                if failed.isEmpty {
+                    appLog("[Hotkey] ⌃⌥1/2/3 registered for the meeting")
+                }
+                for (ask, status) in failed {
+                    appLog("[Hotkey] \(ask.chord) not registered (status \(status)): another app holds it")
+                    self.sessionManager.surfaceError("\(ask.chord) is taken by another app. Use the \(ask.label) button in the coach bar.")
+                }
+            } else if self.coachHotkeys.isRegistered {
+                self.coachHotkeys.unregister()
+                NotificationManager.shared.clearAskNotifications()
+                appLog("[Hotkey] ⌃⌥1/2/3 released")
+            }
         }
 
         // Check if first launch - show permissions

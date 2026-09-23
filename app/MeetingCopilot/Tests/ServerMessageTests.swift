@@ -108,4 +108,36 @@ final class ServerMessageTests: XCTestCase {
             return XCTFail("an unreadable pulse falls through to .metrics, got \(message)")
         }
     }
+
+    // MARK: - Coach questions (⌃⌥1/2/3 and the coach head's buttons)
+
+    func testAskStateDecodes() throws {
+        let message = try decode(#"""
+        {"type":"ask.state","kind":"missed","phase":"done","title":"You may have missed",
+         "body":"Dana asked about Q3 pricing · No owner for the pilot readout"}
+        """#)
+        guard case .askState(let ask) = message else {
+            return XCTFail("expected .askState, got \(message)")
+        }
+        XCTAssertEqual(ask, AskState(kind: "missed", phase: "done", title: "You may have missed",
+                                     body: "Dana asked about Q3 pricing · No owner for the pilot readout", empty: false))
+    }
+
+    func testAskStateStartedHasNoTitleForSuggest() throws {
+        let message = try decode(#"{"type":"ask.state","kind":"suggest","phase":"started"}"#)
+        guard case .askState(let ask) = message else {
+            return XCTFail("expected .askState, got \(message)")
+        }
+        XCTAssertNil(ask.title)
+        XCTAssertFalse(ask.empty)
+    }
+
+    func testHotkeyMessagesEncodeWhatTheServerReads() throws {
+        func json(_ message: ClientMessage) throws -> [String: String] {
+            let data = try JSONEncoder.copilotEncoder.encode(message)
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: String])
+        }
+        XCTAssertEqual(try json(.pulseRequest(kind: "checkin")), ["type": "pulse.request", "kind": "checkin"])
+        XCTAssertEqual(try json(.coachAsk(focus: nil)), ["type": "coach.ask"])
+    }
 }

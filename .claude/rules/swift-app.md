@@ -38,6 +38,7 @@ app/MeetingCopilot/
 - **REC indicator**: Always visible when recording is active (privacy requirement)
 - **Consent affirmation**: Required checkbox on the web start form, once per session; `SessionManager.startSessionFromWeb` refuses `consent == false` (native enforcement)
 - **Settings**: Web dashboard gear icon → `GET/POST /settings` (persisted server-side to `~/.meeting-copilot/settings.json`); there is no native Settings window
+- **Global hotkeys**: anything that must work while the user is in Zoom/Meet goes through Carbon `RegisterEventHotKey` (`Core/Hotkeys/CoachHotkeys.swift`), never an NSEvent global monitor (needs Accessibility, cannot swallow the key) or a page-level keydown (never fires with another app in front). Always include ⌃ or ⌘ in the chord: macOS 15 refuses hotkeys whose only modifiers are ⌥ or ⌥⇧. Register with `kEventHotKeyExclusive` so a taken chord fails loudly, and hold chords only while they mean something (the coach's ⌃⌥1-3 only while a meeting is live)
 
 ## ProcessSupervisor Path Resolution
 

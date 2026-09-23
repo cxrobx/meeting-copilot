@@ -17,6 +17,13 @@ import { inCliLane } from './cli-lane.js';
  * One card, updated in place. Near the end — five minutes before the calendar
  * end time, on wrap-up language, or on the Wrap-up button — it switches to a
  * close-out pass: the full list of what to settle before the call ends.
+ *
+ * Two more reads run only when asked, from the coach's buttons or the app's
+ * global hotkeys: "How am I doing?" (a regular read whose one-liner is about
+ * the user's own showing) and "Missed anything?" (a look back at what went by
+ * unhandled). A press goes ahead of the timer: it skips the new-speech floor,
+ * jumps the queue, cancels a timer read already running, and skips the
+ * background CLI lane, because someone is waiting on it.
  */
 
 export const PULSE_INTERVAL_MS = 5 * 60_000;
@@ -30,11 +37,23 @@ const MAX_TRANSCRIPT_CHARS = 60_000;
 const WRAP_UP_MIN_ELAPSED_MS = 10 * 60_000;
 const WRAP_UP_COOLDOWN_MS = 4 * 60_000;
 const MAX_ESCALATIONS = 2;
-const MAX_CLOSE_OUT = { pulse: 3, closeout: 5 } as const;
+const MAX_CLOSE_OUT = { pulse: 3, closeout: 5, missed: 3 } as const;
+const MAX_MISSED = 5;
+/** Asked reads waiting behind the running one; a fourth press is dropped. */
+const MAX_PENDING = 3;
 
 export type PulseStatus = 'on_track' | 'drifting' | 'stuck';
-export type PulseMode = 'pulse' | 'closeout';
-export type PulseTrigger = 'interval' | 'schedule' | 'wrap-up' | 'manual';
+export type PulseMode = 'pulse' | 'closeout' | 'missed';
+/**
+ * `manual` is the Wrap-up button, `check-in` is "How am I doing?", `missed`
+ * is "Missed anything?". The other three are the pulse's own timers.
+ */
+export type PulseTrigger = 'interval' | 'schedule' | 'wrap-up' | 'manual' | 'check-in' | 'missed';
+
+/** A person asked for this read, so it answers them rather than a timer. */
+export function isAskedTrigger(trigger: PulseTrigger): boolean {
+  return trigger === 'manual' || trigger === 'check-in' || trigger === 'missed';
+}
 
 export interface PulseItem {
   text: string;
@@ -49,6 +68,8 @@ export interface MeetingPulseResult {
   read: string;
   escalations: PulseItem[];
   closeOut: PulseItem[];
+  /** Only in a `missed` read: what went by without being handled. */
+  missed: PulseItem[];
   minutesIn: number;
   /** Minutes to the calendar end, when the meeting came from an invite. */
   minutesLeft: number | null;
@@ -86,7 +107,8 @@ Return ONLY a JSON object:
   "status": "on_track" | "drifting" | "stuck",
   "read": "one plain sentence on how it is going and why, specific to THIS meeting",
   "escalations": [{ "text": "...", "why": "..." }],
-  "closeOut": [{ "text": "...", "why": "..." }]
+  "closeOut": [{ "text": "...", "why": "..." }],
+  "missed": [{ "text": "...", "why": "..." }]
 }
 
 status: on_track = moving toward what the user wants; drifting = time going to side topics or the user's goals slipping; stuck = circling, blocked, or tension going unaddressed.
@@ -97,6 +119,8 @@ escalations (0–2): only things that cost the user if left alone for the next f
 
 closeOut: what must be settled before the call ends. Open questions, the next step with an owner and a date, agenda items not yet covered, decisions left hanging, an ask the user came to make. In a regular pulse list at most 3, and only ones already clear. In a close-out pass give the complete list, at most 5, most important first.
 
+missed: only in a MISSED-ANYTHING pass; otherwise []. What has already gone by without being handled: a question put to the user that got no real answer, a point someone raised that was dropped, a request or offer the user did not respond to, a commitment made without an owner or date, an agenda item or one of the user's goals not touched yet. Only things in this transcript, most important first, at most 5. An empty list is a real answer when nothing slipped.
+
 Every item's text is something the user can say or do now, 18 words or fewer ("Ask Dana who owns the pilot readout, and by when"). why is 12 words or fewer. Do not repeat a coach card already shown unless it is still unresolved. Do not invent facts; quote no more than 12 words verbatim.`;
 
 export interface PulseContext {
@@ -106,6 +130,8 @@ export interface PulseContext {
   goals: string;
   agenda: string;
   coachShown: string[];
+  /** e.g. "the user has spoken 62% of the words so far"; empty when unknown. */
+  talkShare?: string;
   previous: MeetingPulseResult | null;
   minutesIn: number;
   minutesLeft: number | null;
@@ -118,6 +144,8 @@ const TRIGGER_WORDS: Record<PulseTrigger, string> = {
   schedule: 'five minutes before the calendar end time',
   'wrap-up': 'someone said something that sounds like the call is wrapping up',
   manual: 'the user asked for a wrap-up check',
+  'check-in': 'the user asked "How am I doing?"',
+  missed: 'the user asked "Did I miss anything?"',
 };
 
 export function buildPulsePrompt(c: PulseContext): string {
@@ -127,15 +155,23 @@ export function buildPulsePrompt(c: PulseContext): string {
     ? `${c.minutesIn} minutes in; scheduled end unknown.`
     : `${c.minutesIn} minutes in; about ${Math.max(0, c.minutesLeft)} minutes left on the calendar.`;
   parts.push(`Timing: ${timing}`);
-  parts.push(c.mode === 'closeout'
-    ? `This is a CLOSE-OUT pass (${TRIGGER_WORDS[c.trigger]}). Give the complete closeOut list.`
-    : `This is a regular pulse (${TRIGGER_WORDS[c.trigger]}).`);
+  if (c.mode === 'closeout') {
+    parts.push(`This is a CLOSE-OUT pass (${TRIGGER_WORDS[c.trigger]}). Give the complete closeOut list.`);
+  } else if (c.mode === 'missed') {
+    parts.push(`This is a MISSED-ANYTHING pass (${TRIGGER_WORDS[c.trigger]}). Give the complete missed list; keep escalations and closeOut to what is not already in it.`);
+  } else {
+    parts.push(`This is a regular pulse (${TRIGGER_WORDS[c.trigger]}).`);
+  }
+  if (c.trigger === 'check-in') {
+    parts.push('Make read about the user\'s own showing: whether their answers are landing, whether they are getting what they came for, and their share of the talking. status still describes the meeting as a whole.');
+  }
+  if (c.talkShare) parts.push(`Speaking balance: ${c.talkShare}.`);
   if (c.goals.trim()) parts.push(`The user's private goals for this meeting:\n${c.goals.trim()}`);
   if (c.agenda.trim()) parts.push(`Agenda, with the tracker's current state:\n${c.agenda.trim()}`);
   if (c.coachShown.length) parts.push(`Coach cards already shown to the user:\n${c.coachShown.map((h) => `- ${h}`).join('\n')}`);
   if (c.previous) {
     const ago = Math.max(0, c.minutesIn - c.previous.minutesIn);
-    const items = [...c.previous.escalations, ...c.previous.closeOut].map((i) => `- ${i.text}`).join('\n');
+    const items = [...c.previous.escalations, ...c.previous.closeOut, ...(c.previous.missed ?? [])].map((i) => `- ${i.text}`).join('\n');
     parts.push(`Your previous read (${ago} min ago): ${c.previous.status} — ${c.previous.read}${items ? `\nItems you raised then (keep the ones still open, drop the settled ones):\n${items}` : ''}`);
   }
   const clipped = c.transcript.length > MAX_TRANSCRIPT_CHARS;
@@ -157,7 +193,7 @@ function items(value: unknown, max: number): PulseItem[] {
 }
 
 /** The model's answer, clamped to the card's shape; null when there is none. */
-export function parsePulse(raw: string, mode: PulseMode): Pick<MeetingPulseResult, 'status' | 'read' | 'escalations' | 'closeOut'> | null {
+export function parsePulse(raw: string, mode: PulseMode): Pick<MeetingPulseResult, 'status' | 'read' | 'escalations' | 'closeOut' | 'missed'> | null {
   const parsed = parseFirstJsonObject<Record<string, unknown>>(
     raw,
     (o) => typeof o.read === 'string' && (o.read as string).trim().length > 0,
@@ -169,10 +205,30 @@ export function parsePulse(raw: string, mode: PulseMode): Pick<MeetingPulseResul
     read: String(parsed.read).trim().slice(0, 300),
     escalations: items(parsed.escalations, MAX_ESCALATIONS),
     closeOut: items(parsed.closeOut, MAX_CLOSE_OUT[mode]),
+    missed: mode === 'missed' ? items(parsed.missed, MAX_MISSED) : [],
   };
 }
 
-type PulseAsk = (prompt: string, systemPrompt: string, signal: AbortSignal) => Promise<string>;
+const PULSE_STATUS_WORDS = { on_track: 'On track', drifting: 'Drifting', stuck: 'Stuck' } as const;
+
+/** Notification text for a pulse read someone asked for. */
+export function askAnswerText(p: MeetingPulseResult): { title: string; body: string } | null {
+  const first = (items: Array<{ text: string }>, empty: string) =>
+    items.slice(0, 2).map((i) => i.text).join(' \u00b7 ') || empty;
+  switch (p.trigger) {
+    case 'check-in':
+      return { title: `How am I doing? \u00b7 ${PULSE_STATUS_WORDS[p.status]}`, body: p.read };
+    case 'missed':
+      return { title: 'You may have missed', body: first(p.missed, 'Nothing slipped by so far.') };
+    case 'manual':
+      return { title: 'Before this call ends', body: first([...p.escalations, ...p.closeOut], 'Nothing left to settle.') };
+    default:
+      return null;
+  }
+}
+
+/** `asked`: a person is waiting, so the call skips the background CLI lane. */
+type PulseAsk = (prompt: string, systemPrompt: string, signal: AbortSignal, opts: { asked: boolean }) => Promise<string>;
 
 export interface MeetingPulseDeps {
   ask?: PulseAsk;
@@ -188,6 +244,16 @@ export interface PulseStartOptions {
   goalsProvider?: () => string;
   agendaProvider?: () => string;
   coachProvider?: () => string[];
+  talkShareProvider?: () => string;
+}
+
+interface PulseRequest {
+  mode: PulseMode;
+  trigger: PulseTrigger;
+}
+
+function sameRequest(a: PulseRequest, b: PulseRequest): boolean {
+  return a.mode === b.mode && a.trigger === b.trigger;
 }
 
 export class MeetingPulse extends EventEmitter {
@@ -198,7 +264,10 @@ export class MeetingPulse extends EventEmitter {
   private closeOutTimer: ReturnType<typeof setTimeout> | null = null;
   private abort: AbortController | null = null;
   private inFlight = false;
-  private pending: { mode: PulseMode; trigger: PulseTrigger } | null = null;
+  private current: PulseRequest | null = null;
+  /** Aborted because a person asked while it ran; not a failure. */
+  private superseded: AbortController | null = null;
+  private pending: PulseRequest[] = [];
   private generation = 0;
   private lastWords = 0;
   private lastWrapUpAt = 0;
@@ -207,8 +276,10 @@ export class MeetingPulse extends EventEmitter {
 
   constructor(deps: MeetingPulseDeps = {}) {
     super();
-    this.ask = deps.ask ?? ((prompt, system, signal) => inCliLane(() =>
-      claudeSuggest(prompt, system, signal, undefined, { model: MODEL_CONFIG.pulse, cold: true })));
+    this.ask = deps.ask ?? ((prompt, system, signal, { asked }) => {
+      const call = () => claudeSuggest(prompt, system, signal, undefined, { model: MODEL_CONFIG.pulse, cold: true });
+      return asked ? call() : inCliLane(call);
+    });
     this.now = deps.now ?? Date.now;
   }
 
@@ -257,6 +328,16 @@ export class MeetingPulse extends EventEmitter {
     this.request('closeout', 'manual');
   }
 
+  /** "How am I doing?" */
+  requestCheckIn(): void {
+    this.request('pulse', 'check-in');
+  }
+
+  /** "Missed anything?" */
+  requestMissed(): void {
+    this.request('missed', 'missed');
+  }
+
   stop(): void {
     this.generation++;
     if (this.timer) clearInterval(this.timer);
@@ -266,7 +347,9 @@ export class MeetingPulse extends EventEmitter {
     this.abort?.abort();
     this.abort = null;
     this.inFlight = false;
-    this.pending = null;
+    this.current = null;
+    this.superseded = null;
+    this.pending = [];
     this.options = null;
     this.endsAt = null;
   }
@@ -277,31 +360,61 @@ export class MeetingPulse extends EventEmitter {
 
   private request(mode: PulseMode, trigger: PulseTrigger): void {
     if (!this.options) return;
-    // Near the calendar end every regular read becomes a close-out, so the
-    // list stays current through the last minutes.
-    if (mode === 'pulse' && this.inCloseOutWindow()) {
+    // Near the calendar end every timer read becomes a close-out, so the list
+    // stays current through the last minutes. A question someone asked stays
+    // the question they asked.
+    if (trigger === 'interval' && this.inCloseOutWindow()) {
       mode = 'closeout';
       trigger = 'schedule';
     }
-    if (this.inFlight) {
-      // Keep the most useful request for when this one lands: a close-out
-      // outranks a regular read.
-      if (!this.pending || mode === 'closeout') this.pending = { mode, trigger };
+    const req: PulseRequest = { mode, trigger };
+    if (!this.inFlight) {
+      void this.run(mode, trigger);
       return;
     }
-    void this.run(mode, trigger);
+    // The same question already running or waiting: one answer covers both
+    // presses (the app's hotkey and a page-level key can both fire).
+    if ((this.current && sameRequest(this.current, req)) || this.pending.some((p) => sameRequest(p, req))) return;
+
+    if (isAskedTrigger(trigger)) {
+      // A person asked. A timer read in progress gives way: the next tick is
+      // five minutes off, and the asked read covers the same ground.
+      if (this.current?.trigger === 'interval' && this.abort) {
+        this.superseded = this.abort;
+        this.abort.abort();
+      }
+      const firstAuto = this.pending.findIndex((p) => !isAskedTrigger(p.trigger));
+      if (firstAuto === -1) this.pending.push(req);
+      else this.pending.splice(firstAuto, 0, req);
+      if (this.pending.length > MAX_PENDING) this.pending.length = MAX_PENDING;
+      return;
+    }
+    // At most one timer read waits, and a close-out outranks a regular one.
+    const autoIdx = this.pending.findIndex((p) => !isAskedTrigger(p.trigger));
+    if (autoIdx === -1) {
+      if (this.pending.length < MAX_PENDING) this.pending.push(req);
+    } else if (mode === 'closeout') {
+      this.pending[autoIdx] = req;
+    }
   }
 
   private async run(mode: PulseMode, trigger: PulseTrigger): Promise<void> {
     const options = this.options;
     if (!options) return;
+    const asked = isAskedTrigger(trigger);
     const words = options.wordCountProvider();
-    if (mode === 'pulse' && words - this.lastWords < MIN_NEW_WORDS) {
+    if (mode === 'pulse' && !asked && words - this.lastWords < MIN_NEW_WORDS) {
       this.emit('skipped', { reason: `growth: +${words - this.lastWords}/${MIN_NEW_WORDS}` });
+      this.runNext();
       return;
     }
     const transcript = options.transcriptProvider();
-    if (!transcript.trim()) return;
+    if (!transcript.trim()) {
+      // Someone is waiting on this one: say why nothing is coming.
+      if (asked) this.emit('failed', { mode, trigger, reason: 'Nothing has been said yet', latencyMs: 0 });
+      this.runNext();
+      return;
+    }
 
     const gen = this.generation;
     const now = this.now();
@@ -314,6 +427,7 @@ export class MeetingPulse extends EventEmitter {
       goals: options.goalsProvider?.() ?? '',
       agenda: options.agendaProvider?.() ?? '',
       coachShown: options.coachProvider?.() ?? [],
+      talkShare: options.talkShareProvider?.() ?? '',
       previous: this.previous,
       minutesIn,
       minutesLeft,
@@ -322,11 +436,12 @@ export class MeetingPulse extends EventEmitter {
     });
 
     this.inFlight = true;
+    this.current = { mode, trigger };
     const abort = new AbortController();
     this.abort = abort;
     this.emit('running', { mode, trigger });
     try {
-      const raw = await this.ask(prompt, PULSE_SYSTEM, abort.signal);
+      const raw = await this.ask(prompt, PULSE_SYSTEM, abort.signal, { asked });
       if (gen !== this.generation) return;
       const parsed = parsePulse(raw, mode);
       if (!parsed) {
@@ -348,15 +463,24 @@ export class MeetingPulse extends EventEmitter {
       this.emit('pulse', result);
     } catch (error) {
       if (gen !== this.generation) return;
+      if (this.superseded === abort) {
+        this.emit('skipped', { reason: 'superseded by an asked read' });
+        return;
+      }
       this.emit('failed', { mode, trigger, reason: error instanceof Error ? error.message : String(error), latencyMs: this.now() - now });
     } finally {
       if (gen === this.generation) {
         this.inFlight = false;
+        this.current = null;
         if (this.abort === abort) this.abort = null;
-        const next = this.pending;
-        this.pending = null;
-        if (next) this.request(next.mode, next.trigger);
+        if (this.superseded === abort) this.superseded = null;
+        this.runNext();
       }
     }
+  }
+
+  private runNext(): void {
+    const next = this.pending.shift();
+    if (next) this.request(next.mode, next.trigger);
   }
 }

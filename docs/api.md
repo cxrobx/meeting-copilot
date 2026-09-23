@@ -19,7 +19,8 @@
 | `feature.toggle` | Toggle an opt-in monitor | `feature: 'factcheck'\|'coach', enabled` |
 | `meeting.goals` | Private coach-only goals for this meeting | `goals` |
 | `meeting.schedule` | Calendar end of a meeting started from an invite; the pulse runs its close-out 5 min before | `endsAt` (ISO or ms) |
-| `pulse.request` | The Wrap-up button: run a close-out pulse now | — |
+| `pulse.request` | A pulse read now: `checkin` is "How am I doing?", `missed` is "Missed anything?", `closeout` (or no kind) is the Wrap-up check. Sent by the coach head and by the app's ⌃⌥1/⌃⌥2 hotkeys | `kind?` |
+| `coach.ask` | "Suggest": one coach card now, with the live coach on or off. Sent by the coach head and by ⌃⌥3 | `focus?` (the Quick Actions box) |
 
 ### Server → Client Messages
 
@@ -35,12 +36,14 @@
 | `intelligence.error` | Realtime intelligence failure / tier degradation | `source, message, at, degraded?, recovered?` |
 | `feature.state` | Monitor on/off snapshot | `features { factcheck, coach }` |
 | `factcheck.flag` | Fact-check verdict on a claim | `flag { claim, verdict, correction?, sources? }` |
-| `coach.suggestion` | "Say next" coach tip | `suggestion { kind, priority, headline, ... }` |
+| `coach.suggestion` | "Say next" coach tip; `asked: true` for a Suggest card, which stays until dismissed | `suggestion { kind, priority, headline, asked?, ... }` |
 | `coach.history` | Every coach card this session, sent on connect so a reload keeps them | `suggestions [ ... ]` |
-| `pulse.update` | A meeting pulse (every 5 min, or a close-out); also sent on connect | `pulse { mode, trigger, status, read, escalations[], closeOut[], minutesIn, minutesLeft }` |
+| `pulse.update` | A meeting pulse (every 5 min, or a close-out); also sent on connect | `pulse { mode, trigger, status, read, escalations[], closeOut[], missed[], minutesIn, minutesLeft }` |
+| `pulse.history` | Every pulse this session, sent on connect for the coach's Earlier list | `pulses [ ... ]` |
 | `pulse.running` | A pulse is being read (20–40s on Opus) | `mode`, `trigger` |
-| `pulse.failed` | A pulse could not be read | `reason` |
-| `pulse.closeout` | A close-out found things to settle; the app raises a notification | `body` |
+| `pulse.failed` | A pulse could not be read | `reason`, `mode`, `trigger` |
+| `pulse.closeout` | A timer's close-out (calendar or wrap-up language) found things to settle; the app raises a notification | `body` |
+| `ask.state` | One of the coach's questions was taken (`started`), answered (`done`) or `failed`. The dashboard's buttons show progress from it; the app turns `title`/`body` into a notification when the dashboard is not in front | `kind` (checkin/missed/suggest/wrapup), `phase`, `title?`, `body?`, `empty?` |
 | `metrics` | Debug metrics snapshot | `data` |
 
 ## REST Endpoints

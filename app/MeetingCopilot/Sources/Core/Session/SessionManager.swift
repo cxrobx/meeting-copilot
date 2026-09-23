@@ -445,6 +445,10 @@ final class SessionManager {
     /// into a JS toast so the user sees them without a native error panel).
     var onError: ((String) -> Void)?
 
+    /// A meeting went live (true) or stopped being live (false). The app
+    /// holds the coach's global hotkeys only in between.
+    var onMeetingLiveChanged: ((Bool) -> Void)?
+
     /// Evaluates JavaScript inside the dashboard WKWebView (wired by
     /// WebDashboardView). Nil until the web panel has been created.
     var runDashboardJS: ((String) -> Void)?
@@ -486,6 +490,27 @@ final class SessionManager {
         }
     }
 
+    /// ⌃⌥1/2/3: one of the coach's questions, sent straight to the server so
+    /// it works with the dashboard hidden. The server echoes ask.state to
+    /// every client, so the dashboard's button shows the same progress.
+    /// Returns false when no meeting is live or the socket is down.
+    func askCoach(_ ask: CoachHotkeys.Ask) async -> Bool {
+        guard state == .live || state == .degraded else { return false }
+        let message: ClientMessage
+        switch ask {
+        case .checkIn: message = .pulseRequest(kind: "checkin")
+        case .missed: message = .pulseRequest(kind: "missed")
+        case .suggest: message = .coachAsk(focus: nil)
+        }
+        do {
+            try await webSocketClient.send(message)
+            return true
+        } catch {
+            appLog("[Hotkey] \(ask.chord) send failed: \(error)")
+            return false
+        }
+    }
+
     func surfaceError(_ message: String) {
         errorMessage = message
         onError?(message)
@@ -511,8 +536,11 @@ final class SessionManager {
             return false
         }
         print("[SessionManager] State: \(state.rawValue) -> \(newState.rawValue)")
+        let wasLive = state == .live || state == .degraded
         state = newState
         currentSession?.state = newState
+        let isLive = newState == .live || newState == .degraded
+        if wasLive != isLive { onMeetingLiveChanged?(isLive) }
         return true
     }
 
@@ -653,6 +681,9 @@ final class SessionManager {
 
         case .pulseCloseOut(let body):
             NotificationManager.shared.postCloseOutNotification(body: body)
+
+        case .askState(let ask):
+            NotificationManager.shared.postAskNotification(ask)
 
         case .pulseUpdate(let pulse):
             // On connect the server replays the last pulse it has, which is

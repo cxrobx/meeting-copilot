@@ -2204,37 +2204,6 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   .toast-error .toast-bar { background: rgba(255,255,255,0.5); }
   @keyframes drain { from { width: 100%; } to { width: 0%; } }
 
-  /* ─── Monitor toggles (fact-check / coach) ─────────────────── */
-  .qa-title-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 8px;
-    gap: 8px;
-  }
-  .qa-title-row .quick-actions-title { margin-bottom: 0; }
-  .monitor-toggles { display: flex; gap: 4px; flex-shrink: 0; }
-  .monitor-toggle {
-    font-family: var(--font-sans);
-    font-size: 9px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 2px 8px;
-    border-radius: 8px;
-    border: 1px solid var(--gb-surface2);
-    background: transparent;
-    color: var(--gb-overlay2);
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-  .monitor-toggle:hover { background: var(--gb-surface1); }
-  .monitor-toggle.on {
-    background: var(--gb-green);
-    border-color: var(--gb-green);
-    color: white;
-  }
-
   /* ─── Coach strip ("say next") ─────────────────────────────── */
   .coach-strip {
     display: flex;
@@ -2276,11 +2245,90 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     padding: 0 2px;
   }
   .coach-close:hover { color: var(--gb-text); }
-  /* The live card sticks directly under the sticky Quick Actions (their
-     height is measured into --qa-height) and is opaque, so the feed
-     scrolling beneath cannot show through the tint. */
-  #coachSlot { position: sticky; top: var(--qa-height, 0px); z-index: 19; }
-  #coachSlot:empty, #coachHistory:empty { display: none; }
+  /* The coach dock (head line + live card) sticks directly under the
+     sticky Quick Actions (their height is measured into --qa-height) and
+     is opaque, so the feed scrolling beneath cannot show through. */
+  #coachDock { position: sticky; top: var(--qa-height, 0px); z-index: 19; }
+  #coachHead:empty, #coachSlot:empty, #coachHistory:empty { display: none; }
+  .coach-strip.asked { border-color: var(--gb-blue); }
+  #coachSlot .coach-strip + .coach-strip { margin-top: -10px; }
+  #coachSlot .coach-strip.asked {
+    background: linear-gradient(rgb(var(--accent) / 0.07), rgb(var(--accent) / 0.07)), var(--gb-base);
+  }
+  .coach-kind.asked { background: var(--gb-blue); }
+  .coach-kind.pulse { background: var(--gb-surface2); color: var(--gb-text); }
+
+  /* ─── Coach head ────────────────────────────────────────────
+     The coach's one always-visible line during a meeting: the latest pulse
+     (a dot and its one-line read; click it for the full card), the three
+     questions, and a menu for the rest. Everything else the coach knows
+     waits one click away, in the answer card or Earlier. */
+  .coach-head {
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 8px;
+    background: var(--gb-surface0);
+    border: 1px solid var(--gb-surface2);
+    border-radius: 8px;
+    padding: 6px 6px 6px 12px;
+    margin-bottom: 10px;
+    box-shadow: 0 6px 14px -12px rgb(var(--shadow-color) / 0.45);
+  }
+  .coach-head-title {
+    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--gb-overlay2); flex-shrink: 0;
+  }
+  .coach-head-pulse {
+    display: flex; align-items: center; gap: 6px;
+    flex: 1 1 160px; min-width: 0;
+    background: none; border: 0; border-radius: 4px; padding: 3px 6px;
+    font-family: var(--font-sans); font-size: 12px; color: var(--gb-subtext0);
+    text-align: left;
+  }
+  button.coach-head-pulse { cursor: pointer; }
+  button.coach-head-pulse:hover, button.coach-head-pulse[aria-expanded="true"] { background: var(--gb-surface1); }
+  .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gb-green); flex-shrink: 0; }
+  .pulse-dot.drifting { background: var(--gb-yellow); }
+  .pulse-dot.stuck { background: var(--gb-red); }
+  .coach-head-status { font-weight: 600; color: var(--gb-text); flex-shrink: 0; }
+  .coach-head-read { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .coach-head-note { font-size: 10px; color: var(--gb-blue); flex-shrink: 0; }
+  .coach-asks { display: flex; gap: 4px; flex-shrink: 0; }
+  .coach-ask {
+    font-family: var(--font-sans); font-size: 11px; font-weight: 500; white-space: nowrap;
+    padding: 4px 10px; border-radius: 999px;
+    border: 1px solid var(--gb-surface2); background: var(--gb-base); color: var(--gb-text);
+    cursor: pointer; transition: border-color 0.15s, color 0.15s;
+  }
+  .coach-ask:hover { border-color: var(--gb-blue); color: var(--gb-blue); }
+  .coach-ask.busy { color: var(--gb-overlay2); border-style: dashed; cursor: default; }
+  .coach-ask.busy:hover { border-color: var(--gb-surface2); color: var(--gb-overlay2); }
+  .coach-more {
+    flex-shrink: 0; width: 28px; height: 26px; border-radius: 6px;
+    border: 1px solid transparent; background: none; color: var(--gb-subtext0);
+    font-size: 16px; line-height: 1; cursor: pointer;
+  }
+  .coach-more:hover, .coach-more[aria-expanded="true"] { background: var(--gb-surface1); border-color: var(--gb-surface2); }
+  .coach-menu {
+    position: absolute; right: 6px; top: calc(100% + 4px); z-index: 30;
+    min-width: 250px; padding: 4px;
+    background: var(--gb-base); border: 1px solid var(--gb-surface2); border-radius: 8px;
+    box-shadow: 0 14px 30px -14px rgb(var(--shadow-color) / 0.55);
+  }
+  .coach-menu[hidden] { display: none; }
+  .coach-menu button {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    width: 100%; padding: 7px 10px; border: 0; border-radius: 5px; background: none;
+    font-family: var(--font-sans); font-size: 12px; color: var(--gb-text); text-align: left; cursor: pointer;
+  }
+  .coach-menu button:hover { background: var(--gb-surface1); }
+  .coach-menu-hint { font-size: 10px; color: var(--gb-overlay2); }
+  .coach-menu-state { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gb-overlay2); }
+  .coach-menu-state.on { color: var(--gb-green); }
+  .coach-menu-sep { height: 1px; margin: 4px 6px; background: var(--gb-surface2); }
+  .coach-menu-note { padding: 6px 10px 4px; font-size: 10px; line-height: 1.45; color: var(--gb-overlay2); }
   #coachSlot .coach-strip {
     background: linear-gradient(rgb(var(--warning) / 0.08), rgb(var(--warning) / 0.08)), var(--gb-base);
     box-shadow: 0 6px 14px -12px rgb(var(--shadow-color) / 0.45);
@@ -2322,6 +2370,11 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     color: var(--gb-subtext0); margin-bottom: 4px;
   }
   .pulse-section.escalate .pulse-section-title { color: var(--gb-red); }
+  .pulse-section.missed-list .pulse-section-title { color: var(--gb-blue); }
+  .pulse-card.missed { border-color: var(--gb-blue); }
+  .pulse-card.missed .pulse-label { color: var(--gb-blue); }
+  .pulse-empty { font-size: 12px; color: var(--gb-subtext0); margin-top: 8px; }
+  .pulse-head .coach-close { margin-left: 2px; }
   .pulse-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   .pulse-list li { font-size: 12px; line-height: 1.45; color: var(--gb-text); padding-left: 16px; position: relative; }
   .pulse-list li::before { content: '\\25A2'; position: absolute; left: 0; color: var(--gb-overlay2); }
@@ -3097,9 +3150,9 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       <span id="intelStatusText">Listening</span>
       <button class="intel-warn" id="intelWarn" style="display:none" aria-label="Recent intelligence errors" title="Recent intelligence errors">&#9888; <span id="intelWarnCount"></span></button>
     </div>
-    <div id="coachSlot"></div>
-    <div id="coachHistory"></div>
+    <div id="coachDock"><div id="coachHead"></div><div id="coachSlot"></div></div>
     <div id="pulseSlot"></div>
+    <div id="coachHistory"></div>
     <div id="results"></div>
   </div>
 
@@ -3173,11 +3226,37 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   // session is live, the same way the goals are.
   var pendingEndsAt = null;
 
-  // ─── Meeting pulse ─────────────────────────────────────────
+  // ─── Coach: pulse, questions, answer card ─────────────────
+  // Progressive disclosure. The coach head is one line: the latest pulse
+  // (dot + one-line read) and the three questions. The answer card under it
+  // appears only when someone asked, a read escalates, or it is a close-out.
+  // Everything else is one click away in Earlier.
   var pulseSlot = document.getElementById('pulseSlot');
+  var coachHeadEl = document.getElementById('coachHead');
   var latestPulse = null;
-  var pulseRunning = null; // 'pulse' | 'closeout' while a read is in flight
+  var pulseHistory = [];          // every read this session, oldest first
+  // The card under the head: { pulse, kind }. 'asked': someone asked, and a
+  // timer read never replaces it. 'view': opened from the head, follows the
+  // latest read. 'auto': an escalation or a close-out the timer produced.
+  var pulseAnswer = null;
+  var dismissedPulseIds = {};
+  var autoPulseRunning = false;   // a timer read is in flight
   var PULSE_STATUS = { on_track: 'On track', drifting: 'Drifting', stuck: 'Stuck' };
+  var ASKED_TRIGGERS = { 'check-in': 1, missed: 1, manual: 1 };
+  // Busy since (ms) per question, 0 when idle. The server's ask.state drives
+  // it, so a hotkey press from another app shows here too.
+  var askBusy = { checkin: 0, missed: 0, suggest: 0, wrapup: 0 };
+  var COACH_ASK_TIMEOUT_MS = 120000;
+  var COACH_ASK_LABELS = { checkin: 'How am I doing?', missed: 'Missed anything?', suggest: 'Suggest', wrapup: 'Wrap-up check' };
+  var COACH_ASK_TITLES = {
+    checkin: 'How you are coming across, and whether you are getting what you came for. About 30s.',
+    missed: 'What went by unhandled: unanswered questions, dropped points, loose commitments. About 30s.',
+    suggest: 'The one thing to say or ask next. Uses the Quick Actions box as its focus. Usually a few seconds.',
+  };
+  var COACH_ASK_KEYS = { checkin: '1', missed: '2', suggest: '3' };
+  var coachMenuOpen = false;
+
+  function attrText(s) { return escapeHtml(String(s || '')).replace(/"/g, '&quot;'); }
 
   function pulseList(title, items, cls) {
     if (!items || !items.length) return '';
@@ -3189,55 +3268,243 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       }).join('') + '</ul></div>';
   }
 
+  function pulseLabel(p) {
+    if (p.trigger === 'check-in') return 'How am I doing?';
+    if (p.mode === 'missed') return 'Missed anything?';
+    if (p.mode === 'closeout') return 'Close out';
+    return 'Pulse';
+  }
+
   function renderPulse() {
     if (!pulseSlot) return;
-    var p = latestPulse;
-    if (!p && !pulseRunning) { pulseSlot.innerHTML = ''; return; }
-    var closeout = (p && p.mode === 'closeout') || pulseRunning === 'closeout';
-    var running = pulseRunning
-      ? '<span class="pulse-running">' + (pulseRunning === 'closeout' ? 'Checking what to close out\\u2026' : 'Reading the meeting\\u2026') + '</span>'
-      : '';
-    var meta = '';
-    if (p) {
-      meta = p.minutesIn + ' min in' +
-        (p.minutesLeft !== null && p.minutesLeft !== undefined ? ' \\u00b7 ' + Math.max(0, p.minutesLeft) + ' left' : '') +
-        ' \\u00b7 ' + formatTime(new Date(p.createdAt).toISOString());
-    }
-    pulseSlot.innerHTML = '<div class="pulse-card' + (closeout ? ' closeout' : '') + '">' +
+    var p = pulseAnswer && pulseAnswer.pulse;
+    if (!p) { pulseSlot.innerHTML = ''; return; }
+    var closeout = p.mode === 'closeout';
+    var missed = p.mode === 'missed';
+    var meta = p.minutesIn + ' min in' +
+      (p.minutesLeft !== null && p.minutesLeft !== undefined ? ' \\u00b7 ' + Math.max(0, p.minutesLeft) + ' left' : '') +
+      ' \\u00b7 ' + formatTime(new Date(p.createdAt).toISOString());
+    pulseSlot.innerHTML = '<div class="pulse-card' + (closeout ? ' closeout' : '') + (missed ? ' missed' : '') + '">' +
       '<div class="pulse-head">' +
-        '<span class="pulse-label">' + (closeout ? 'Close out' : 'Pulse') + '</span>' +
-        (p ? '<span class="pulse-status ' + escapeHtml(p.status) + '">' + escapeHtml(PULSE_STATUS[p.status] || p.status) + '</span>' : '') +
-        running +
-        (meta ? '<span class="pulse-meta">' + escapeHtml(meta) + '</span>' : '') +
+        '<span class="pulse-label">' + escapeHtml(pulseLabel(p)) + '</span>' +
+        '<span class="pulse-status ' + escapeHtml(p.status) + '">' + escapeHtml(PULSE_STATUS[p.status] || p.status) + '</span>' +
+        '<span class="pulse-meta">' + escapeHtml(meta) + '</span>' +
+        '<button class="coach-close" data-coach="dismiss-pulse" title="Dismiss">&times;</button>' +
       '</div>' +
-      (p ? '<div class="pulse-read">' + escapeHtml(p.read) + '</div>' +
-        pulseList('Escalate now', p.escalations, 'escalate') +
-        pulseList(p.mode === 'closeout' ? 'Before the call ends' : 'Close out before the end', p.closeOut, 'closeout-list')
+      '<div class="pulse-read">' + escapeHtml(p.read) + '</div>' +
+      pulseList('Escalate now', p.escalations, 'escalate') +
+      (missed
+        ? ((p.missed || []).length
+            ? pulseList('You may have missed', p.missed, 'missed-list')
+            : '<div class="pulse-empty">Nothing slipped by so far.</div>')
         : '') +
+      pulseList(closeout ? 'Before the call ends' : 'Close out before the end', p.closeOut, 'closeout-list') +
     '</div>';
   }
 
+  function addPulseHistory(p) {
+    for (var i = 0; i < pulseHistory.length; i++) {
+      if (pulseHistory[i].id === p.id) return;
+    }
+    pulseHistory.push(p);
+  }
+
+  function setPulseHistory(list) {
+    pulseHistory = (list || []).slice().sort(function(a, b) { return (a.createdAt || 0) - (b.createdAt || 0); });
+    renderCoachHistory();
+  }
+
+  // A read arrived (live, or replayed on reconnect).
+  function onPulse(p) {
+    if (!p) return;
+    latestPulse = p;
+    addPulseHistory(p);
+    if (!ASKED_TRIGGERS[p.trigger]) autoPulseRunning = false;
+    if (dismissedPulseIds[p.id]) {
+      // Dismissed before a reconnect replayed it.
+    } else if (ASKED_TRIGGERS[p.trigger]) {
+      pulseAnswer = { pulse: p, kind: 'asked' };
+    } else if (pulseAnswer && pulseAnswer.kind === 'asked') {
+      // Keep what they asked for; the head's dot already shows this read.
+    } else if (pulseAnswer && pulseAnswer.kind === 'view') {
+      pulseAnswer = { pulse: p, kind: 'view' };
+    } else if ((p.escalations || []).length || p.mode === 'closeout') {
+      pulseAnswer = { pulse: p, kind: 'auto' };
+    } else {
+      pulseAnswer = null;
+    }
+    renderPulse();
+    renderCoachHead();
+    renderCoachHistory();
+  }
+
+  // Replay, or a meeting that just ended: show the last read as it was.
   function setPulse(p) {
     latestPulse = p || null;
-    pulseRunning = null;
+    pulseAnswer = p ? { pulse: p, kind: 'view' } : null;
     renderPulse();
+  }
+
+  function resetAskBusy() {
+    for (var k in askBusy) askBusy[k] = 0;
   }
 
   window.clearPulse = function() {
     latestPulse = null;
-    pulseRunning = null;
+    pulseAnswer = null;
+    pulseHistory = [];
+    dismissedPulseIds = {};
+    autoPulseRunning = false;
+    coachMenuOpen = false;
+    resetAskBusy();
     renderPulse();
+    renderCoachHead();
   };
 
-  // The Wrap-up button: a close-out read now (~30s on Opus).
-  window.requestWrapUp = function() {
-    if (!wsSend({ type: 'pulse.request' })) {
-      showToast('Not connected \\u2014 the wrap-up check was not sent.', { error: true });
+  function dismissPulse() {
+    if (pulseAnswer) dismissedPulseIds[pulseAnswer.pulse.id] = 1;
+    pulseAnswer = null;
+    renderPulse();
+  }
+
+  // The head's dot and read: open the latest read in full, or close it.
+  function togglePulseView() {
+    if (!latestPulse) return;
+    if (pulseAnswer && pulseAnswer.pulse.id === latestPulse.id) { dismissPulse(); return; }
+    delete dismissedPulseIds[latestPulse.id];
+    pulseAnswer = { pulse: latestPulse, kind: 'view' };
+    renderPulse();
+  }
+
+  function setAskBusy(kind, busy) {
+    if (!(kind in askBusy)) return;
+    var since = busy ? Date.now() : 0;
+    askBusy[kind] = since;
+    if (busy) {
+      // Never strand a button on "Reading" if the answer is lost.
+      setTimeout(function() {
+        if (askBusy[kind] === since) { askBusy[kind] = 0; renderCoachHead(); }
+      }, COACH_ASK_TIMEOUT_MS);
+    }
+    renderCoachHead();
+  }
+
+  // One of the coach's questions: a head button, the menu, or Ctrl+Opt+1-3.
+  window.coachAsk = function(kind) {
+    if (!(kind in askBusy) || askBusy[kind]) return;
+    if (!((sessionState === 'live' || sessionState === 'degraded') && !isReplay)) return;
+    var msg;
+    var promptEl = null;
+    if (kind === 'suggest') {
+      promptEl = document.getElementById('quickPrompt');
+      var focus = promptEl ? promptEl.value.trim() : '';
+      msg = { type: 'coach.ask', focus: focus || undefined };
+    } else {
+      msg = { type: 'pulse.request', kind: kind === 'wrapup' ? 'closeout' : kind };
+    }
+    if (!wsSend(msg)) {
+      showToast('Not connected \\u2014 ' + COACH_ASK_LABELS[kind] + ' was not sent.', { error: true });
       return;
     }
-    pulseRunning = 'closeout';
-    renderPulse();
+    if (promptEl) promptEl.value = '';
+    coachMenuOpen = false;
+    setAskBusy(kind, true);
   };
+
+  function coachMenuItem(action, label, hint) {
+    return '<button role="menuitem" data-coach="' + action + '">' + escapeHtml(label) +
+      '<span class="coach-menu-hint">' + escapeHtml(hint) + '</span></button>';
+  }
+
+  function coachMenuToggle(feature, label, on) {
+    return '<button role="menuitemcheckbox" aria-checked="' + (on ? 'true' : 'false') + '" data-coach="toggle-' + feature + '">' +
+      escapeHtml(label) + '<span class="coach-menu-state' + (on ? ' on' : '') + '">' + (on ? 'On' : 'Off') + '</span></button>';
+  }
+
+  function renderCoachHead() {
+    if (!coachHeadEl) return;
+    if (!((sessionState === 'live' || sessionState === 'degraded') && !isReplay)) {
+      coachHeadEl.innerHTML = '';
+      return;
+    }
+    var p = latestPulse;
+    var pulsePart;
+    if (p) {
+      var open = !!(pulseAnswer && pulseAnswer.pulse.id === p.id);
+      pulsePart = '<button class="coach-head-pulse" data-coach="pulse" aria-expanded="' + (open ? 'true' : 'false') + '"' +
+        ' title="' + attrText(p.read) + '">' +
+        '<span class="pulse-dot ' + escapeHtml(p.status) + '"></span>' +
+        '<span class="coach-head-status">' + escapeHtml(PULSE_STATUS[p.status] || p.status) + '</span>' +
+        '<span class="coach-head-read">' + escapeHtml(p.read) + '</span>' +
+      '</button>';
+    } else {
+      pulsePart = '<span class="coach-head-pulse"><span class="coach-head-read">' +
+        (autoPulseRunning ? 'Reading the meeting&hellip;' : 'First read about five minutes in') + '</span></span>';
+    }
+    var note = '';
+    if (askBusy.wrapup) note = '<span class="coach-head-note">Wrap-up check&hellip;</span>';
+    else if (autoPulseRunning && p) note = '<span class="coach-head-note">reading&hellip;</span>';
+    var asks = ['checkin', 'missed', 'suggest'].map(function(kind) {
+      var busy = !!askBusy[kind];
+      return '<button class="coach-ask' + (busy ? ' busy' : '') + '" data-ask="' + kind + '"' +
+        (busy ? ' aria-busy="true"' : '') +
+        ' title="' + attrText(COACH_ASK_TITLES[kind]) + ' &#8963;&#8997;' + COACH_ASK_KEYS[kind] + '">' +
+        (busy ? (kind === 'suggest' ? 'Thinking&hellip;' : 'Reading&hellip;') : escapeHtml(COACH_ASK_LABELS[kind])) +
+      '</button>';
+    }).join('');
+    coachHeadEl.innerHTML = '<div class="coach-head">' +
+      '<span class="coach-head-title">Coach</span>' +
+      pulsePart + note +
+      '<span class="coach-asks">' + asks + '</span>' +
+      '<button class="coach-more" data-coach="menu" aria-haspopup="menu" aria-expanded="' + (coachMenuOpen ? 'true' : 'false') + '"' +
+        ' title="Wrap-up check, self-review, coach and fact-check">&#8943;</button>' +
+      '<div class="coach-menu" role="menu"' + (coachMenuOpen ? '' : ' hidden') + '>' +
+        coachMenuItem('wrapup', 'Wrap-up check', askBusy.wrapup ? 'running' : 'what to settle before the end') +
+        coachMenuItem('review', 'Full self-review', 'scorecard so far') +
+        '<div class="coach-menu-sep"></div>' +
+        coachMenuToggle('coach', 'Coach cards', featureState.coach) +
+        coachMenuToggle('factcheck', 'Fact-check', featureState.factcheck) +
+        '<div class="coach-menu-note">&#8963;&#8997;1 How am I doing? &middot; &#8963;&#8997;2 Missed anything? &middot; &#8963;&#8997;3 Suggest. They work from any app while the meeting is live.</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  // One listener for everything in the coach area: the markup is rebuilt on
+  // every change, so per-element handlers would not survive.
+  document.addEventListener('click', function(e) {
+    var target = e.target && e.target.closest ? e.target.closest('[data-ask],[data-coach]') : null;
+    if (!target) {
+      if (coachMenuOpen && !(e.target && e.target.closest && e.target.closest('.coach-menu'))) {
+        coachMenuOpen = false;
+        renderCoachHead();
+      }
+      return;
+    }
+    var ask = target.getAttribute('data-ask');
+    if (ask) { window.coachAsk(ask); return; }
+    switch (target.getAttribute('data-coach')) {
+      case 'menu': coachMenuOpen = !coachMenuOpen; renderCoachHead(); break;
+      case 'pulse': togglePulseView(); renderCoachHead(); break;
+      case 'dismiss-pulse': dismissPulse(); renderCoachHead(); break;
+      case 'dismiss-live': dismissCoachCard('live'); break;
+      case 'dismiss-asked': dismissCoachCard('asked'); break;
+      case 'wrapup': window.coachAsk('wrapup'); break;
+      case 'review': coachMenuOpen = false; window.triggerAction('review'); renderCoachHead(); break;
+      case 'toggle-coach': window.toggleFeature('coach'); break;
+      case 'toggle-factcheck': window.toggleFeature('factcheck'); break;
+    }
+  });
+
+  // Ctrl+Opt+1/2/3. Inside the app the native global hotkey claims these
+  // first, from any app; this covers a plain browser. e.code, because Option
+  // turns e.key into a symbol.
+  document.addEventListener('keydown', function(e) {
+    if (!e.ctrlKey || !e.altKey || e.metaKey) return;
+    var kind = { Digit1: 'checkin', Digit2: 'missed', Digit3: 'suggest' }[e.code];
+    if (!kind) return;
+    e.preventDefault();
+    window.coachAsk(kind);
+  });
 
   // ─── State ──────────────────────────────────────────────────
   var params = new URLSearchParams(window.location.search);
@@ -4207,7 +4474,12 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       showQuickActions();
     } else {
       quickActionsSlot.innerHTML = '';
+      // Questions asked of a meeting that is over will not be answered.
+      resetAskBusy();
+      coachMenuOpen = false;
     }
+    renderCoachHead();
+    renderCoachHistory();
 
     // Intelligence status row + transcript order chip — live sessions only
     var showIntel = (sessionState === 'live' || sessionState === 'degraded') && !isReplay;
@@ -4533,15 +4805,11 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     restoreIdleForm(savedForm);
   }
 
+  // Workers only: things to make. The coach's questions, the wrap-up check,
+  // the self-review and the coach / fact-check switches live in the coach head.
   function showQuickActions() {
     quickActionsSlot.innerHTML = '<div class="quick-actions">' +
-      '<div class="qa-title-row">' +
-        '<div class="quick-actions-title">Quick Actions</div>' +
-        '<div class="monitor-toggles">' +
-          '<button class="monitor-toggle' + (featureState.factcheck ? ' on' : '') + '" onclick="toggleFeature(\\'factcheck\\')" title="Live fact-checking of claims \u2014 extra API cost while on">Fact-check: ' + (featureState.factcheck ? 'On' : 'Off') + '</button>' +
-          '<button class="monitor-toggle' + (featureState.coach ? ' on' : '') + '" onclick="toggleFeature(\\'coach\\')" title="Real-time recovery advice for pressure, objections, and weak answers">Coach: ' + (featureState.coach ? 'On' : 'Off') + '</button>' +
-        '</div>' +
-      '</div>' +
+      '<div class="quick-actions-title">Quick Actions</div>' +
       '<input class="quick-actions-input" id="quickPrompt" placeholder="Topic or prompt (optional)...">' +
       '<div class="quick-actions-row">' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'fast-research\\')" title="Quick answer with web search, in seconds (GPT-5.6 Luna, a cent or two)">\u26A1 Fast</button>' +
@@ -4550,21 +4818,8 @@ export const PRESENT_HTML = `<!DOCTYPE html>
         '<button class="btn btn-ghost" onclick="triggerAction(\\'analysis\\')">Analysis</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'mockup\\')" title="UI wireframe from the discussion (type a screen in the box first)">Mockup</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'codegen\\')" title="Generate code from the discussion">Code</button>' +
-        '<button class="btn btn-ghost" onclick="triggerAction(\\'review\\')" title="Self-review: how you did so far">Review</button>' +
-        '<button class="btn btn-ghost" onclick="requestWrapUp()" title="Close-out check: what to settle before the call ends (about 30s, Opus 5.5)">Wrap-up</button>' +
       '</div>' +
     '</div>';
-  }
-
-  // Re-render the quick actions card (e.g., after a feature.state broadcast)
-  // without losing whatever the user typed in the prompt box.
-  function refreshQuickActions() {
-    if (!((sessionState === 'live' || sessionState === 'degraded') && !isReplay)) return;
-    var input = document.getElementById('quickPrompt');
-    var saved = input ? input.value : '';
-    showQuickActions();
-    var fresh = document.getElementById('quickPrompt');
-    if (fresh && saved) fresh.value = saved;
   }
 
   window.toggleFeature = function(name) {
@@ -6158,36 +6413,73 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     question: 'Answer',
   };
   function coachIncident(s) { return s.incidentType || s.kind || 'address'; }
-  function coachLabel(s) { return COACH_LABELS[coachIncident(s)] || 'Coach'; }
+  function coachLabel(s) { return s.asked ? 'Suggest' : (COACH_LABELS[coachIncident(s)] || 'Coach'); }
 
-  function renderCoachSuggestion(s) {
-    addCoachHistory(s);
-    if (coachExpireTimer) { clearTimeout(coachExpireTimer); coachExpireTimer = null; }
-    var expiresAt = Number(s.expiresAt || 0);
-    var remainingMs = expiresAt ? expiresAt - Date.now() : 15000;
-    if (remainingMs <= 0) {
-      window.dismissCoach();
-      return;
-    }
-    var incident = coachIncident(s);
-    var label = coachLabel(s);
-    stageSetCoach(s, label);
-    coachSlot.innerHTML = '<div class="coach-strip">' +
-      '<span class="coach-kind ' + escapeHtml(incident) + '">' + escapeHtml(label) + '</span>' +
+  // Two cards can share the strip. An unasked card fades after 8-30s; a
+  // Suggest card stays until closed. A new unasked card never replaces the
+  // one someone asked for: the live one stacks above it instead.
+  var liveCoachCard = null;
+  var askedCoachCard = null;
+  var dismissedCoachIds = {};
+
+  function coachStripHtml(s, which) {
+    var incident = s.asked ? 'asked' : coachIncident(s);
+    return '<div class="coach-strip' + (s.asked ? ' asked' : '') + '">' +
+      '<span class="coach-kind ' + escapeHtml(incident) + '">' + escapeHtml(coachLabel(s)) + '</span>' +
       '<div class="coach-body">' +
         '<div class="coach-phrasing">' + escapeHtml(s.phrasing) + '</div>' +
         '<div class="coach-why">' + escapeHtml(s.headline) + (s.why ? ' \\u2014 ' + escapeHtml(s.why) : '') + '</div>' +
       '</div>' +
-      '<button class="coach-close" onclick="dismissCoach()" title="Dismiss">\\u00d7</button>' +
+      '<button class="coach-close" data-coach="dismiss-' + which + '" title="Dismiss">&times;</button>' +
     '</div>';
-    coachExpireTimer = setTimeout(function() { window.dismissCoach(); }, Math.min(30000, remainingMs));
   }
 
-  // Clears the live card only — the history keeps it.
+  function renderCoachStrips() {
+    coachSlot.innerHTML = (liveCoachCard ? coachStripHtml(liveCoachCard, 'live') : '') +
+      (askedCoachCard ? coachStripHtml(askedCoachCard, 'asked') : '');
+    var top = liveCoachCard || askedCoachCard;
+    if (top) stageSetCoach(top, coachLabel(top));
+    else stageClearCoach();
+  }
+
+  function renderCoachSuggestion(s) {
+    addCoachHistory(s);
+    // A reconnect replays the last card; one already dismissed stays gone.
+    if (s.id && dismissedCoachIds[s.id]) return;
+    var expiresAt = Number(s.expiresAt || 0);
+    var remainingMs = expiresAt ? expiresAt - Date.now() : 15000;
+    if (remainingMs <= 0) return;
+    if (s.asked) {
+      askedCoachCard = s;
+    } else {
+      liveCoachCard = s;
+      if (coachExpireTimer) clearTimeout(coachExpireTimer);
+      coachExpireTimer = setTimeout(function() { dismissCoachCard('live'); }, Math.min(30000, remainingMs));
+    }
+    renderCoachStrips();
+  }
+
+  function dismissCoachCard(which) {
+    var card = which === 'asked' ? askedCoachCard : liveCoachCard;
+    if (card && card.id) dismissedCoachIds[card.id] = 1;
+    if (which === 'asked') {
+      askedCoachCard = null;
+    } else {
+      liveCoachCard = null;
+      if (coachExpireTimer) { clearTimeout(coachExpireTimer); coachExpireTimer = null; }
+    }
+    renderCoachStrips();
+  }
+
+  // Stage shows one card, the top one; its Dismiss closes just that.
+  window.dismissCoachTop = function() {
+    dismissCoachCard(liveCoachCard ? 'live' : 'asked');
+  };
+
+  // Clears both cards (the meeting ended, or a new one started). The history keeps them.
   window.dismissCoach = function() {
-    if (coachExpireTimer) { clearTimeout(coachExpireTimer); coachExpireTimer = null; }
-    coachSlot.innerHTML = '';
-    stageClearCoach();
+    dismissCoachCard('live');
+    dismissCoachCard('asked');
   };
 
   function addCoachHistory(s) {
@@ -6205,24 +6497,44 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     renderCoachHistory();
   }
 
+  function coachHistoryItem(s) {
+    // Cards recovered from an older session's event log have no wording.
+    var main = s.phrasing || s.headline || '';
+    var sub = s.phrasing ? (s.headline || '') + (s.why ? ' \\u2014 ' + s.why : '') : (s.why || '');
+    return '<li class="coach-history-item">' +
+      '<span class="coach-kind ' + escapeHtml(s.asked ? 'asked' : coachIncident(s)) + '">' + escapeHtml(coachLabel(s)) + '</span>' +
+      '<div class="coach-body">' +
+        '<div class="coach-phrasing">' + escapeHtml(main) + '</div>' +
+        (sub ? '<div class="coach-why">' + escapeHtml(sub) + '</div>' : '') +
+      '</div>' +
+      '<span class="coach-history-time">' + escapeHtml(formatTime(new Date(s.createdAt).toISOString())) + '</span>' +
+    '</li>';
+  }
+
+  function pulseHistoryItem(p) {
+    var items = [].concat(p.escalations || [], p.missed || [], p.closeOut || []).map(function(i) { return i.text; });
+    return '<li class="coach-history-item">' +
+      '<span class="coach-kind pulse">' + escapeHtml(pulseLabel(p)) + '</span>' +
+      '<div class="coach-body">' +
+        '<div class="coach-phrasing">' + escapeHtml((PULSE_STATUS[p.status] || p.status) + ': ' + (p.read || '')) + '</div>' +
+        (items.length ? '<div class="coach-why">' + escapeHtml(items.join(' \\u00b7 ')) + '</div>' : '') +
+      '</div>' +
+      '<span class="coach-history-time">' + escapeHtml(formatTime(new Date(p.createdAt).toISOString())) + '</span>' +
+    '</li>';
+  }
+
+  // Coach cards and pulse reads, newest first. During a meeting this sits
+  // under the coach head as "Earlier"; after it, it is the coach's record.
   function renderCoachHistory() {
     if (!coachHistoryEl) return;
-    if (coachHistory.length === 0) { coachHistoryEl.innerHTML = ''; return; }
-    var items = coachHistory.slice().reverse().map(function(s) {
-      // Cards recovered from an older session's event log have no wording.
-      var main = s.phrasing || s.headline || '';
-      var sub = s.phrasing ? (s.headline || '') + (s.why ? ' \\u2014 ' + s.why : '') : (s.why || '');
-      return '<li class="coach-history-item">' +
-        '<span class="coach-kind ' + escapeHtml(coachIncident(s)) + '">' + escapeHtml(coachLabel(s)) + '</span>' +
-        '<div class="coach-body">' +
-          '<div class="coach-phrasing">' + escapeHtml(main) + '</div>' +
-          (sub ? '<div class="coach-why">' + escapeHtml(sub) + '</div>' : '') +
-        '</div>' +
-        '<span class="coach-history-time">' + escapeHtml(formatTime(new Date(s.createdAt).toISOString())) + '</span>' +
-      '</li>';
-    }).join('');
+    var entries = coachHistory.map(function(s) { return { at: s.createdAt || 0, coach: s }; })
+      .concat(pulseHistory.map(function(p) { return { at: p.createdAt || 0, pulse: p }; }));
+    if (entries.length === 0) { coachHistoryEl.innerHTML = ''; return; }
+    entries.sort(function(a, b) { return b.at - a.at; });
+    var live = (sessionState === 'live' || sessionState === 'degraded') && !isReplay;
+    var items = entries.map(function(e) { return e.coach ? coachHistoryItem(e.coach) : pulseHistoryItem(e.pulse); }).join('');
     coachHistoryEl.innerHTML = '<details class="coach-history"' + (coachHistoryOpen ? ' open' : '') + '>' +
-      '<summary>Coach \\u00b7 ' + coachHistory.length + '</summary>' +
+      '<summary>' + (live ? 'Earlier' : 'Coach') + ' \\u00b7 ' + entries.length + '</summary>' +
       '<ol class="coach-history-list">' + items + '</ol>' +
     '</details>';
     var details = coachHistoryEl.querySelector('details');
@@ -6633,7 +6945,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
         '</div>' +
         '<div class="title">' + escapeHtml(stageCoach.phrasing) + '</div>' +
         (stageCoach.why ? '<div class="why">' + escapeHtml(stageCoach.why) + '</div>' : '') +
-        '<div class="row"><button class="stage-btn ghost" onclick="dismissCoach()">Dismiss</button></div>' +
+        '<div class="row"><button class="stage-btn ghost" onclick="dismissCoachTop()">Dismiss</button></div>' +
       '</div>';
     }
     if (stageSuggestion) {
@@ -7362,7 +7674,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
         case 'feature.state':
           if (msg.features) {
             featureState = msg.features;
-            refreshQuickActions();
+            renderCoachHead();
           }
           break;
 
@@ -7379,22 +7691,35 @@ export const PRESENT_HTML = `<!DOCTYPE html>
           break;
 
         case 'pulse.update':
-          setPulse(msg.pulse);
-          if (msg.pulse && msg.pulse.mode === 'closeout') {
+          onPulse(msg.pulse);
+          // A close-out nobody asked for (the calendar, or wrap-up language).
+          if (msg.pulse && msg.pulse.mode === 'closeout' && !ASKED_TRIGGERS[msg.pulse.trigger]) {
             var toSettle = (msg.pulse.closeOut || []).length + (msg.pulse.escalations || []).length;
             if (toSettle > 0) showToast('Close-out ready: ' + toSettle + ' thing' + (toSettle === 1 ? '' : 's') + ' to settle before the call ends.');
           }
           break;
 
+        case 'pulse.history':
+          setPulseHistory(msg.pulses);
+          break;
+
         case 'pulse.running':
-          pulseRunning = msg.mode || 'pulse';
-          renderPulse();
+          if (!ASKED_TRIGGERS[msg.trigger]) { autoPulseRunning = true; renderCoachHead(); }
           break;
 
         case 'pulse.failed':
-          if (pulseRunning === 'closeout') showToast('The wrap-up check could not read the meeting \\u2014 try again.', { error: true });
-          pulseRunning = null;
-          renderPulse();
+          // An asked read's failure arrives as ask.state, with a toast.
+          if (!ASKED_TRIGGERS[msg.trigger]) { autoPulseRunning = false; renderCoachHead(); }
+          break;
+
+        case 'ask.state':
+          if (msg.phase === 'started') {
+            setAskBusy(msg.kind, true);
+          } else {
+            setAskBusy(msg.kind, false);
+            if (msg.phase === 'failed') showToast((msg.title || 'The coach') + (msg.body ? ': ' + msg.body : ''), { error: true });
+            else if (msg.empty) showToast(msg.body || 'Nothing worth saying right now.');
+          }
           break;
 
         case 'intelligence.error':
@@ -7517,6 +7842,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       .then(function(r) { return r.ok ? r.json() : { pulses: [] }; })
       .then(function(data) {
         var pulses = data.pulses || [];
+        setPulseHistory(pulses);
         if (pulses.length) setPulse(pulses[pulses.length - 1]);
       })
       .catch(function() { /* replay still works without it */ });
