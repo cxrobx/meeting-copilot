@@ -44,7 +44,7 @@ cd app/MeetingCopilot && swift build
 
 - **Audio**: Core Audio process tap (meeting — hears phone and FaceTime calls too; ScreenCaptureKit fallback) + AVAudioEngine (mic), 16kHz mono PCM
 - **Transcription**: whisper-server local (default), Deepgram cloud (optional)
-- **Intelligence**: Gemini Flash triage (15s cadence) → Sonnet suggestions. Fallback: Haiku → GPT 5.4 Mini
+- **Intelligence**: gpt-6-luna triage via the OpenAI API (15s cadence) → Sonnet suggestions on the subscription CLI. Triage falls back to Haiku on the subscription CLI when the API is off (`COPILOT_LIVE_LLM_MODE=cli`) or fails twice. Context compression (the 5-min summaries fed back into triage) runs the same route
 - **Meeting pulse** (`intelligence/pulse.ts`): every 5 min, Opus 5.5 on the subscription CLI reads the whole meeting and updates one card: on track / drifting / stuck, up to 2 things to escalate, and what to settle before the end. A close-out pass runs 5 min before the calendar end (invite-started meetings), on wrap-up language after minute 10, or on the Wrap-up button, and the app raises a notification for it. It shares one CLI lane with the rolling summary (`intelligence/cli-lane.ts`) and always runs cold, since a warm session would carry the previous transcript. Costs no metered spend.
 - **Workers**: Research, Summary, Analysis, Mockup, CodeGen (all implemented)
 - **UI**: Web dashboard at `/present` served in WKWebView — CX family design system shared with cxmail/cxtasks/cxnotes (Apple-blue accent, warm charcoal/off-white surfaces, SF system sans with JetBrains Mono reserved for data). Dark default + light toggle via `data-theme` on `<html>`, remembered in `localStorage['mc-theme']`. Full-screen **Stage** presentation mode is always dark.
