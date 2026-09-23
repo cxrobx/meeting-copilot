@@ -68,7 +68,15 @@ const ONYX_URL = process.env.ONYX_URL ?? 'http://127.0.0.1:8899';
 const FETCH_TIMEOUT_MS = 400;
 const MEMORY_TTL_MS = 60_000;
 /** Bumped when the mapping below changes, so a cached page re-takes the new CSS. */
-const TRANSLATOR_VERSION = 1;
+const TRANSLATOR_VERSION = 2;
+
+/**
+ * The one colour a dark vault does not choose: the accent is the dashboard's
+ * own red, the same value as the `[data-theme="dark"]` block in present/index.ts.
+ * A light vault keeps its own accent.
+ */
+export const DARK_ACCENT = '255 69 58';
+export const DARK_ACCENT_HOVER = '255 105 97';
 
 // ─── Grammar ────────────────────────────────────────────────────────────────
 // Onyx validates harder than this on the way in (markdown_theme._UNSAFE, and a
@@ -223,9 +231,11 @@ export function vaultLookCss(palette: VaultPalette): string {
  */
 export function vaultLookTokens(palette: VaultPalette): Record<string, string> {
   const t = palette.tokens;
+  const dark = palette.mode === 'dark';
   const ground = triplet(t['bg-primary'])!;
   const ink = triplet(t['ink'])!;
-  const accent = triplet(t['accent'])!;
+  const accentValue = dark ? DARK_ACCENT : t['accent'];
+  const accent = triplet(accentValue)!;
 
   const line = (name: string, ratio: number): string =>
     render((t[name] ? composite(t[name], ground) : null) ?? mix(ground, ink, ratio));
@@ -242,8 +252,8 @@ export function vaultLookTokens(palette: VaultPalette): Record<string, string> {
     'text-secondary': t['secondary'],
     'text-muted': t['muted'],
     'text-faint': t['faint'],
-    accent: t['accent'],
-    'accent-hover': t['accent-hover'],
+    accent: accentValue,
+    'accent-hover': dark ? DARK_ACCENT_HOVER : t['accent-hover'],
     'accent-ink': render(accentInk(accent, ground, ink)),
   };
   // The vault's INTERFACE font (the explorer's), never its reading font: chrome

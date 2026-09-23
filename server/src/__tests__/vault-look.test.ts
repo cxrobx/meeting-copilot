@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
+import { PRESENT_HTML } from '../present/index.js';
 import {
   accentInk,
   applyVaultLook,
   contrast,
+  DARK_ACCENT,
+  DARK_ACCENT_HOVER,
   parseOnyxPalette,
   vaultLookCss,
   vaultLookTokens,
@@ -175,6 +178,51 @@ describe('vaultLookTokens', () => {
       if (name === 'font-sans') continue;
       expect(value, name).toMatch(/^\d{1,3} \d{1,3} \d{1,3}$/);
     }
+  });
+});
+
+/**
+ * The vault the dashboard actually wears (Onyx, 2026-09-22): a dark vault whose
+ * accent is cyan. Trimmed to the first rule.
+ */
+const DARK_VAULT = {
+  ok: true,
+  enabled: true,
+  available: true,
+  mode: 'dark',
+  base: [26, 26, 26],
+  revision: 'f0e1d2c3b4a5',
+  css:
+    ':root.vault-look{--bg-primary:26 26 26;--bg-sidebar:26 26 26;--bg-surface:24 24 24;' +
+    '--bg-elevated:34 35 34;--bg-input:32 32 32;--ink:196 197 181;--secondary:152 153 141;' +
+    '--muted:106 106 99;--faint:79 79 74;--line:rgb(196 197 181/.14);--line-soft:rgb(196 197 181/.07);' +
+    '--accent:88 209 235;--accent-hover:115 206 222;color-scheme:dark}',
+};
+
+describe('dark mode accent', () => {
+  const tokens = vaultLookTokens(parseOnyxPalette(DARK_VAULT)!);
+  const triplet = (v: string) => v.split(' ').map(Number) as [number, number, number];
+
+  it('wears the dashboard s red over a dark vault, not the vault s own accent', () => {
+    expect(tokens['accent']).toBe(DARK_ACCENT);
+    expect(tokens['accent-hover']).toBe(DARK_ACCENT_HOVER);
+    expect(vaultLookCss(parseOnyxPalette(DARK_VAULT)!)).not.toContain('88 209 235');
+  });
+
+  it('keeps a light vault s own accent', () => {
+    expect(vaultLookTokens(parseOnyxPalette(SOLARIZED)!)['accent']).toBe('203 75 22');
+  });
+
+  it('puts an AA ink on the red fill', () => {
+    expect(contrast(triplet(tokens['accent-ink']!), triplet(DARK_ACCENT))).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('is the same red as the page s own dark theme, so vault on or off look alike', () => {
+    const block = /\[data-theme="dark"\]\s*\{([^}]*)\}/.exec(PRESENT_HTML)![1]!;
+    const value = (name: string) => new RegExp(`--${name}:\\s*([\\d ]+);`).exec(block)![1]!.trim().replace(/\s+/g, ' ');
+    expect(value('accent')).toBe(DARK_ACCENT);
+    expect(value('accent-hover')).toBe(DARK_ACCENT_HOVER);
+    expect(contrast(triplet(value('accent-ink')), triplet(DARK_ACCENT))).toBeGreaterThanOrEqual(4.5);
   });
 });
 

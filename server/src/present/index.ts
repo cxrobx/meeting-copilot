@@ -606,12 +606,15 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     --text-muted:     155 153 150;
     --text-faint:     115 113 110;
 
-    --accent:       10 132 255;
-    --accent-hover:  8 106 204;
-    /* Text drawn ON an accent fill. White on both family themes; the vault look
-       recomputes it, because a vault's accent is only held to 3:1 on its ground
-       and need not carry white text. */
-    --accent-ink:  255 255 255;
+    /* Red, not the family's Apple blue: dark mode is this app's own call.
+       present/vault-look.ts wears the same red over a dark vault
+       (DARK_ACCENT), and a test holds the two equal. */
+    --accent:      255 69 58;
+    --accent-hover: 255 105 97;
+    /* Text drawn ON an accent fill. White fails AA on this red (3.4:1), so the
+       fill carries the ground instead (5.1:1). The vault look recomputes it,
+       because a vault's accent is only held to 3:1 on its ground. */
+    --accent-ink:  28 26 23;
 
     --success: 143 179 136;
     --error:   212 118 106;
