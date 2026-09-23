@@ -3,6 +3,8 @@ import { v4 as uuidv4 } from 'uuid';
 import type { TranscriptSegment, TranscriptionProvider } from './types.js';
 import { WhisperProvider } from './whisper.js';
 import { DeepgramProvider } from './deepgram.js';
+import { GrokProvider } from './grok.js';
+import { FallbackProvider } from './fallback.js';
 import { CHUNK_DURATION_SECONDS } from '../audio/chunkConfig.js';
 import { paidApiDisabled } from '../api/killswitch.js';
 
@@ -73,23 +75,12 @@ export function isLikelyHallucination(text: string): boolean {
 }
 
 /**
- * Creates the appropriate TranscriptionProvider based on environment config.
- *
- * Set `TRANSCRIPTION_PROVIDER=deepgram` to use Deepgram (requires DEEPGRAM_API_KEY).
- * Defaults to whisper-server.
- *
- * Cost-safe override: when `COPILOT_DISABLE_PAID_API` is set, force local
- * whisper even if Deepgram was requested. Deepgram is a metered API (it bills
- * per chunk AND once at startup via prewarm()), and the kill switch promises
- * zero paid spend — so it must cover transcription, not just the LLM gates.
+ * The local backend the launcher started. start.sh / ProcessSupervisor pin
+ * TRANSCRIPTION_PROVIDER to whatever they actually launched, so if Parakeet
+ * had to fall back to whisper (no `uv` / sidecar failed) this resolves to
+ * whisper and stays correct.
  */
-function createProvider(): TranscriptionProvider {
-  // Parakeet is the DEFAULT backend (best local accuracy on meeting speech).
-  // The launcher (start.sh / ProcessSupervisor) starts the matching backend
-  // and pins TRANSCRIPTION_PROVIDER to whatever it actually launched, so if it
-  // had to fall back to whisper (no `uv` / sidecar failed) this resolves to
-  // whisper and stays correct.
-  const selection = (process.env.TRANSCRIPTION_PROVIDER ?? 'parakeet').toLowerCase();
+function createLocalProvider(selection: string): TranscriptionProvider {
   // Parakeet (NVIDIA Parakeet-TDT via parakeet-mlx) runs through a local
   // sidecar that speaks the SAME /inference contract as whisper-server, so we
   // reuse WhisperProvider pointed at the sidecar's port. Fully local + free,
@@ -98,27 +89,64 @@ function createProvider(): TranscriptionProvider {
     const url =
       process.env.PARAKEET_URL ??
       `http://127.0.0.1:${process.env.PARAKEET_PORT ?? '8077'}`;
-    console.log(`[Transcription] Using Parakeet sidecar at ${url}`);
+    console.log(`[Transcription] Local backend: Parakeet sidecar at ${url}`);
     return new WhisperProvider(url, {
       mode: 'parakeet',
       model: process.env.PARAKEET_MODEL ?? 'mlx-community/parakeet-tdt-0.6b-v3',
       supportsPrompt: false,
     });
   }
-  if (selection === 'deepgram' && paidApiDisabled()) {
-    console.warn(
-      '[Transcription] COPILOT_DISABLE_PAID_API set — ignoring TRANSCRIPTION_PROVIDER=deepgram and using local whisper (no Deepgram billing).',
-    );
-    return new WhisperProvider();
-  }
-  if (selection === 'deepgram') {
-    if (process.env.COPILOT_ALLOW_CLOUD_AUDIO !== 'true') {
-      console.warn('[Transcription] Cloud audio is not consented; using local whisper. Set COPILOT_ALLOW_CLOUD_AUDIO=true explicitly to enable Deepgram.');
-      return new WhisperProvider();
-    }
-    return new DeepgramProvider();
-  }
   return new WhisperProvider();
+}
+
+type CloudChoice = 'grok' | 'deepgram';
+
+/**
+ * Which cloud provider (if any) should sit in front of the local backend.
+ * An explicit TRANSCRIPTION_PROVIDER=grok|deepgram wins (legacy form);
+ * otherwise COPILOT_CLOUD_TRANSCRIPTION decides, defaulting to Grok.
+ * `off` / `none` / `local` keeps transcription fully local.
+ */
+function cloudChoice(selection: string): CloudChoice | null {
+  if (selection === 'grok' || selection === 'deepgram') return selection;
+  const configured = (process.env.COPILOT_CLOUD_TRANSCRIPTION ?? 'grok').trim().toLowerCase();
+  return configured === 'grok' || configured === 'deepgram' ? configured : null;
+}
+
+/**
+ * Creates the TranscriptionProvider from environment config.
+ *
+ * DEFAULT (2026-09-22): Grok Voice Transcribe 2.0 in front of the local
+ * backend, which takes over per chunk if Grok fails. Grok is only used when
+ * ALL of these hold — otherwise transcription is purely local:
+ *   - COPILOT_ALLOW_CLOUD_AUDIO=true (explicit consent before audio leaves the Mac)
+ *   - COPILOT_DISABLE_PAID_API is not set (the kill switch covers metered STT)
+ *   - XAI_API_KEY is set (DEEPGRAM_API_KEY for deepgram)
+ * Pick the cloud with COPILOT_CLOUD_TRANSCRIPTION=grok|deepgram|off.
+ */
+export function createProvider(): TranscriptionProvider {
+  const selection = (process.env.TRANSCRIPTION_PROVIDER ?? 'parakeet').toLowerCase();
+  const local = createLocalProvider(selection);
+  const cloud = cloudChoice(selection);
+  if (!cloud) return local;
+
+  const localMode = local.getInfo().mode;
+  if (paidApiDisabled()) {
+    console.warn(`[Transcription] COPILOT_DISABLE_PAID_API set — skipping ${cloud}, using ${localMode} (no metered STT billing).`);
+    return local;
+  }
+  if (process.env.COPILOT_ALLOW_CLOUD_AUDIO !== 'true') {
+    console.warn(`[Transcription] Cloud audio is not consented; using ${localMode}. Set COPILOT_ALLOW_CLOUD_AUDIO=true explicitly to enable ${cloud}.`);
+    return local;
+  }
+  const keyVar = cloud === 'grok' ? 'XAI_API_KEY' : 'DEEPGRAM_API_KEY';
+  if (!process.env[keyVar]) {
+    console.warn(`[Transcription] ${keyVar} is not set; using ${localMode}.`);
+    return local;
+  }
+  const primary = cloud === 'grok' ? new GrokProvider() : new DeepgramProvider();
+  console.log(`[Transcription] Using ${cloud} with ${localMode} as per-chunk fallback.`);
+  return new FallbackProvider(primary, local);
 }
 
 export interface TranscribeChunkMeta {
@@ -338,7 +366,7 @@ export class TranscriptionService extends EventEmitter {
           transcriptionLatencyMs: latency,
           queueLatencyMs: queueLatency,
           endToEndLatencyMs: endToEndLatency,
-          provider: this.provider.getInfo().mode,
+          provider: result.mode ?? this.provider.getInfo().mode,
           captureStartedAt: item.captureStartedAt,
           captureEndedAt: item.captureEndedAt,
           sequence: item.sequence,
@@ -360,7 +388,7 @@ export class TranscriptionService extends EventEmitter {
         transcriptionLatencyMs: latency,
         queueLatencyMs: queueLatency,
         endToEndLatencyMs: endToEndLatency,
-        provider: this.provider.getInfo().mode,
+        provider: result.mode ?? this.provider.getInfo().mode,
         captureStartedAt: item.captureStartedAt,
         captureEndedAt: item.captureEndedAt,
         sequence: item.sequence,
@@ -418,5 +446,7 @@ function wrapPcmAsWav(pcm: Buffer): Buffer {
 }
 
 export { DeepgramProvider } from './deepgram.js';
+export { GrokProvider } from './grok.js';
+export { FallbackProvider } from './fallback.js';
 export { WhisperProvider } from './whisper.js';
 export type { TranscriptSegment, TranscriptionProvider };

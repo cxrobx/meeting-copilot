@@ -52,7 +52,8 @@ cd app/MeetingCopilot && swift build
 ## Environment
 
 - `ANTHROPIC_API_KEY` — required for intelligence + workers
-- `DEEPGRAM_API_KEY` — optional, for cloud transcription
+- `XAI_API_KEY` — Grok Voice Transcribe 2.0, the default cloud transcription (needs `COPILOT_ALLOW_CLOUD_AUDIO=true`; local Parakeet takes over per chunk on failure)
+- `DEEPGRAM_API_KEY` — optional, only with `COPILOT_CLOUD_TRANSCRIPTION=deepgram`
 - `COPILOT_PORT` — TCP port (default: 17890)
 
 ## Golden Commands

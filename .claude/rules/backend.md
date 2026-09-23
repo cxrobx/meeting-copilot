@@ -62,7 +62,9 @@ cd server && npm start        # Run compiled dist/index.js
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `DEEPGRAM_API_KEY` | No | - | Cloud transcription (metered) |
+| `XAI_API_KEY` | No | - | Grok cloud transcription — the default when `COPILOT_ALLOW_CLOUD_AUDIO=true` (metered) |
+| `COPILOT_CLOUD_TRANSCRIPTION` | No | `grok` | `grok` \| `deepgram` \| `off` — cloud STT in front of the local backend |
+| `DEEPGRAM_API_KEY` | No | - | Deepgram cloud transcription (metered) |
 | `OPENAI_API_KEY` | No | - | **Metered.** Present in `.env`; its presence is what puts the live path on the API |
 | `TYPESAFE_API_KEY` | No | - | **Metered.** Jev gate before the coach's generative call (~$0.000042/call) |
 | `COPILOT_LIVE_LLM_MODE` | No | auto | `cli` forces the live path onto the subscription CLIs |

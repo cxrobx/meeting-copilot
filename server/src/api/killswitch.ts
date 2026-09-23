@@ -9,14 +9,14 @@
  * having to remove the keys from `~/.meeting-copilot/.env`.
  *
  * It ALSO covers the other metered API in the stack: `createProvider()` in
- * `transcription/index.ts` checks this flag and forces local whisper even when
- * `TRANSCRIPTION_PROVIDER=deepgram` is set, so no Deepgram billing (per-chunk
- * or the startup prewarm) can occur either. Net: a truthy flag = zero metered
- * OpenAI / Anthropic / Deepgram spend, regardless of which features you exercise.
+ * `transcription/index.ts` checks this flag and skips cloud STT (Grok by
+ * default, or Deepgram), so no metered transcription (per-chunk or the startup
+ * prewarm) can occur either. Net: a truthy flag = zero metered OpenAI /
+ * Anthropic / xAI / Deepgram spend, regardless of which features you exercise.
  *
  * Use it for cost-safe testing: `COPILOT_DISABLE_PAID_API=1 ./scripts/start.sh`.
  * Proof it worked: `grep '\[api/' ~/.meeting-copilot/server.log` is empty, and
- * `grep -i api.deepgram.com ~/.meeting-copilot/server.log` is empty too.
+ * `grep "skipping" ~/.meeting-copilot/server.log` shows cloud STT was skipped too.
  */
 export function paidApiDisabled(): boolean {
   const v = (process.env.COPILOT_DISABLE_PAID_API ?? '').trim().toLowerCase();

@@ -6,6 +6,7 @@ All notable changes to Meeting Copilot will be documented in this file.
 
 ### Changed
 
+- Cloud transcription defaults to Grok Voice Transcribe 2.0 instead of Deepgram Nova-3: 2.3% vs 5.2% word error on Artificial Analysis's non-streaming board, at $0.10/hr. The local backend (Parakeet, else whisper) now sits behind it and takes over per chunk if Grok fails, skipping Grok for 60 s after a failure. Consent (`COPILOT_ALLOW_CLOUD_AUDIO=true`), the key (`XAI_API_KEY`) and the paid-API kill switch still gate it; without them transcription stays fully local. Pick with `COPILOT_CLOUD_TRANSCRIPTION=grok|deepgram|off`.
 - Agenda reconcile runs on gpt-6-luna instead of gpt-5.6-terra: about $0.07 instead of $1.42 for a 34-minute meeting, with a faster median (2.2 s vs 2.9 s). A replay of the two real meetings with agendas found no regression in schema, quote grounding, or how often items un-check. Roll back with `COPILOT_AGENDA_RECONCILE_MODEL=gpt-5.6-terra`.
 
 ### Added

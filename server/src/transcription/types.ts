@@ -40,13 +40,13 @@ export interface TranscriptionProvider {
   transcribe(
     wavBuffer: Buffer,
     options?: TranscribeOptions,
-  ): Promise<{ text: string }>;
+  ): Promise<{ text: string; mode?: TranscriptionProviderInfo['mode'] }>;
   isAvailable(): Promise<boolean>;
   getInfo(): TranscriptionProviderInfo;
 }
 
 export interface TranscriptionProviderInfo {
-  mode: 'whisper-server' | 'parakeet' | 'deepgram';
+  mode: 'whisper-server' | 'parakeet' | 'deepgram' | 'grok';
   model?: string;
   endpoint?: string;
   supportsPrompt: boolean;
@@ -55,4 +55,6 @@ export interface TranscriptionProviderInfo {
   streaming: boolean;
   supportsDiarization: boolean;
   audioStorage: 'memory-only' | 'remote-ephemeral';
+  /** Local backend a cloud primary falls back to per chunk (FallbackProvider). */
+  fallback?: TranscriptionProviderInfo['mode'];
 }

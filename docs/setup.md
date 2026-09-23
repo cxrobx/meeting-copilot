@@ -21,8 +21,10 @@ Create `server/.env`:
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...   # Optional direct Haiku fallback + Sonnet 5 suggestions
 OPENAI_API_KEY=sk-...          # Preferred live path: Luna agenda, Terra recovery coach
-TRANSCRIPTION_PROVIDER=parakeet # Local default; whisper and deepgram are supported
-DEEPGRAM_API_KEY=...           # Optional — Nova-3 cloud transcription
+TRANSCRIPTION_PROVIDER=parakeet # Local backend (pinned by the launcher); whisper is the local fallback
+COPILOT_CLOUD_TRANSCRIPTION=grok # Cloud in front of the local backend: grok (default) | deepgram | off
+XAI_API_KEY=...                # Grok Voice Transcribe 2.0 (default cloud STT, $0.10/hr)
+DEEPGRAM_API_KEY=...           # Optional — Nova-3, only with COPILOT_CLOUD_TRANSCRIPTION=deepgram
 COPILOT_ALLOW_CLOUD_AUDIO=false # Must be exactly true before any audio leaves the Mac
 COPILOT_PORT=17890             # Optional — default 17890
 SUGGESTION_TTL_MS=60000        # Optional — default 60000; ms before an unactioned suggestion auto-expires

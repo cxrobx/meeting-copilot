@@ -53,7 +53,8 @@ cd app/MeetingCopilot && swift build
 
 ## Environment
 
-- `DEEPGRAM_API_KEY` — optional, for cloud transcription
+- `XAI_API_KEY` — Grok Voice Transcribe 2.0, the default cloud transcription (needs `COPILOT_ALLOW_CLOUD_AUDIO=true`; local Parakeet takes over per chunk on failure)
+- `DEEPGRAM_API_KEY` — optional, only with `COPILOT_CLOUD_TRANSCRIPTION=deepgram`
 - `OPENAI_API_KEY` — **metered.** Present in `~/.meeting-copilot/.env`, and the live path prefers it
 - `TYPESAFE_API_KEY` — **metered.** Jev gate in front of the coach's generative call
 - `COPILOT_PORT` — TCP port (default: 17890; honored by BOTH server and app via `ServerConfig`)
