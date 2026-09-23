@@ -4716,7 +4716,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   };
 
   // ─── Staged preps (prepared ahead by Claude) ──────────────
-  // scripts/stage-prep.sh (the meeting-prep skill) leaves a finished session in
+  // scripts/stage-prep.sh (the meeting-copilot-prep skill) leaves a finished session in
   // ~/.meeting-copilot/staged/; GET /prep/staged lists them, soonest first. The
   // form fills itself from the first one while it is untouched, so all that is
   // left at meeting time is Start. The rest wait as chips.

@@ -25,7 +25,7 @@ server/src/
 ├── settings.ts        # ~/.meeting-copilot/settings.json (cadence/TTL/monitors/retention)
 ├── calendar/          # Upcoming meetings read-only from cxmail's invite DB (start-form auto-fill)
 ├── prep/              # "Prep this meeting": gather.ts (email/sessions/vault, no model) → agent.ts (web research);
-│                      #   staged.ts + stage-cli.ts: preps staged ahead (scripts/stage-prep.sh, the meeting-prep skill)
+│                      #   staged.ts + stage-cli.ts: preps staged ahead (scripts/stage-prep.sh, the meeting-copilot-prep skill)
 ├── transcription/     # Transcription providers (whisper/parakeet, deepgram, dedup, stitcher)
 ├── intelligence/      # Eval loop (triage→suggest), agenda, coach, factcheck, prompts
 ├── workers/           # Research, FastResearch, Summary, Analysis, Mockup, CodeGen, Review

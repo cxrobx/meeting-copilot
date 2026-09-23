@@ -10,7 +10,7 @@
 //
 // Exit 0 = staged (warnings are printed but do not fail); 1 = nothing written.
 // Works with Meeting Copilot closed: the start form reads the folder when it
-// opens. See prep/staged.ts for the file format and skills/meeting-prep for
+// opens. See prep/staged.ts for the file format and skills/meeting-copilot-prep for
 // the skill that writes the input.
 
 import { readFileSync } from 'node:fs';

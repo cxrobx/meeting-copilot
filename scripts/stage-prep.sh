@@ -8,7 +8,7 @@
 #   scripts/stage-prep.sh --invites [days]   cxmail invites ahead (default 7), with their eventUid
 #   scripts/stage-prep.sh --gather <uid>     email threads, past meetings, vault notes for an invite
 #
-# Input format and limits: skills/meeting-prep/SKILL.md. Source: server/src/prep/stage-cli.ts.
+# Input format and limits: skills/meeting-copilot-prep/SKILL.md. Source: server/src/prep/stage-cli.ts.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

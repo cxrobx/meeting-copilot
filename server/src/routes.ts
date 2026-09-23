@@ -284,7 +284,7 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
-  // Preps staged ahead of time (scripts/stage-prep.sh, the meeting-prep skill),
+  // Preps staged ahead of time (scripts/stage-prep.sh, the meeting-copilot-prep skill),
   // soonest meeting first. The start form fills itself from the first one;
   // `skipped` names files this build cannot read (e.g. a newer format).
   router.get('/prep/staged', (_req, res) => {

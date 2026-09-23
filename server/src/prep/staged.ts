@@ -1,5 +1,5 @@
 // Staged preps: a meeting prepared ahead of time, waiting on disk until the
-// start form shows it. Claude (the meeting-prep skill) researches a meeting and
+// start form shows it. Claude (the meeting-copilot-prep skill) researches a meeting and
 // writes everything the start form takes — title, agenda, attendees, private
 // goals, projects, context files, the brief — through scripts/stage-prep.sh.
 // The dashboard fills itself from the next one, so all that is left at meeting
