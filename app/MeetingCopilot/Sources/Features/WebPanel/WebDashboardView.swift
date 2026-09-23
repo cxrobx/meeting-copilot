@@ -46,6 +46,9 @@ private struct WebViewWrapper: NSViewRepresentable {
                 stopSession: function() {
                   window.webkit.messageHandlers.\(bridgeMessageName).postMessage({ action: 'stopSession' });
                 },
+                startWindowDrag: function() {
+                  window.webkit.messageHandlers.\(bridgeMessageName).postMessage({ action: 'startWindowDrag' });
+                },
                 setAppearance: function(theme) {
                   window.webkit.messageHandlers.\(bridgeMessageName).postMessage({
                     action: 'appearance',
@@ -100,6 +103,15 @@ private struct WebViewWrapper: NSViewRepresentable {
             }
         }
 
+        // Remember the last press in the panel: when the page says it landed in
+        // its title bar (`startWindowDrag`), that press is what AppKit drags from.
+        context.coordinator.mouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak coordinator = context.coordinator] event in
+            if let coordinator, event.window != nil, event.window === coordinator.webView?.window {
+                coordinator.lastMouseDown = event
+            }
+            return event
+        }
+
         // Enable Cmd+/- browser-style zoom via CSS font-size scaling
         context.coordinator.keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             guard event.modifierFlags.contains(.command) else { return event }
@@ -133,6 +145,10 @@ private struct WebViewWrapper: NSViewRepresentable {
             NSEvent.removeMonitor(monitor)
             coordinator.keyMonitor = nil
         }
+        if let monitor = coordinator.mouseDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            coordinator.mouseDownMonitor = nil
+        }
         webView.configuration.userContentController.removeScriptMessageHandler(forName: bridgeMessageName)
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
@@ -149,6 +165,8 @@ private struct WebViewWrapper: NSViewRepresentable {
         weak var webView: WKWebView?
         var zoomLevel: Int = 100
         var keyMonitor: Any?
+        var mouseDownMonitor: Any?
+        var lastMouseDown: NSEvent?
         var disposed = false
         private var retryCount = 0
 
@@ -237,6 +255,11 @@ private struct WebViewWrapper: NSViewRepresentable {
                     )
                 case "stopSession":
                     self.sessionManager.stopSessionFromWeb()
+                case "startWindowDrag":
+                    // One press, one action: a repeat request can't replay it.
+                    guard let press = self.lastMouseDown, let window = self.webView?.window else { return }
+                    self.lastMouseDown = nil
+                    WindowDrag.perform(for: press, in: window)
                 case "appearance":
                     // The panel has no titlebar of its own to speak of, but its
                     // appearance still drives the traffic lights, sheets and

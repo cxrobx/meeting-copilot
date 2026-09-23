@@ -556,7 +556,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
 
     // Inside the Meeting Copilot app the panel is borderless — a transparent,
     // full-size-content titlebar, so this page owns every pixel including the
-    // 19pt strip the window still keeps for dragging and the traffic lights.
+    // 19pt strip the traffic lights sit in.
     // The class (set here, at first paint, so the header never jumps) is what
     // the .native rules below key off. Outside the app — a plain browser for
     // debugging — nothing changes.
@@ -747,13 +747,21 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   }
 
   /* Borderless in the app: the panel's titlebar is transparent and the page
-     paints under it (FloatingPanelController). That top 19pt strip still
-     hit-tests to the window — it is how the panel is dragged, and the traffic
-     lights sit in it out to x=46 — so the header grows to put its own controls
+     paints under it (FloatingPanelController). The traffic lights sit in that
+     top 19pt strip out to x=46, so the header grows to put its own controls
      below the strip and starts after the lights. */
   .native .header {
     height: 62px;
     padding: 26px 20px 10px 58px;
+  }
+  /* The web view swallows every click, the strip above included, so the page
+     marks its own title bar: pressing empty space in a [data-drag-region] moves
+     the window (see "Window drag" in the script). Title-bar manners to match —
+     an arrow, not an I-beam, and a press never starts a text selection. */
+  .native [data-drag-region] {
+    cursor: default;
+    -webkit-user-select: none;
+    user-select: none;
   }
 
   .header-left {
@@ -3068,7 +3076,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
 <body>
 
 <!-- ─── Header ─────────────────────────────────────────────── -->
-<div class="header">
+<div class="header" data-drag-region>
   <div class="header-left">
     <div class="status-dot" id="statusDot"></div>
     <h1>Meeting Copilot</h1>
@@ -3093,7 +3101,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
 
 <!-- ─── Stage View (full-screen presentation mode) ──────────── -->
 <div class="stage-view" id="stageView" role="region" aria-label="Stage view">
-  <div class="stage-top">
+  <div class="stage-top" data-drag-region>
     <span class="stage-rec" id="stageRec"></span>
     <div class="stage-agenda" id="stageAgenda"></div>
     <div class="stage-clock">
@@ -4879,6 +4887,24 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   function hasNativeBridge() {
     return typeof window.__copilotNativeBridge !== 'undefined';
   }
+
+  // ─── Window drag ──────────────────────────────────────────
+  // The page fills the whole panel, title bar included, and the web view takes
+  // every click, so without this the only grip is the window's thin border.
+  // A press on empty space in a [data-drag-region] (the header, Stage's top
+  // bar) hands the press to the app, which starts a native window drag, or on
+  // a double-click does what System Settings says a title bar does. Controls
+  // inside a region stay controls. Capture phase, so nothing below can eat it.
+  var DRAG_EXEMPT = 'button, a, input, select, textarea, label, summary, [onclick], [role="button"], [contenteditable], [data-no-drag]';
+  document.addEventListener('mousedown', function(e) {
+    if (e.button !== 0 || !hasNativeBridge() || !window.__copilotNativeBridge.startWindowDrag) return;
+    var t = e.target;
+    if (!t || !t.closest || !t.closest('[data-drag-region]') || t.closest(DRAG_EXEMPT)) return;
+    // macOS owns the mouse from here and WebKit never sees it come back up, so
+    // the press must not start a text selection or move focus.
+    e.preventDefault();
+    try { window.__copilotNativeBridge.startWindowDrag(); } catch (err) { /* older app build */ }
+  }, true);
 
   // Called by Swift when a native error occurs (e.g., missing Screen Recording
   // permission). Renders as a persistent banner the user can dismiss.
