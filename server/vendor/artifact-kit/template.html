@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+{{STYLE}}
+</style>
+</head>
+<body>
+<!-- Explanation-level radios. They live at <body> root because the CSS reaches the
+     content with `#lvl-*:checked ~ .wrap …`. Pure CSS — no JS involved. -->
+<input type="radio" name="lvl" id="lvl-5"  class="lvl-radio" aria-label="Explain like I'm 5">
+<input type="radio" name="lvl" id="lvl-14" class="lvl-radio" aria-label="Explain like I'm 14" checked>
+<input type="radio" name="lvl" id="lvl-i"  class="lvl-radio" aria-label="Explain like I'm an intern">
+<div class="wrap">
+
+  <header class="doc-header">
+    <p class="eyebrow">{{DATE}}</p>
+    <h1>{{TITLE}}</h1>
+    <p class="subtitle">{{SUBTITLE}}</p>
+  </header>
+
+  <!-- Explanation-level switch. HOUSE CONVENTION: this control is ALWAYS HORIZONTAL —
+       it is the deliberate exception to the vertical nav rail. Uncomment it (and wrap
+       each section's prose in .eli5 / .eli14 / .elii) for a multi-altitude artifact;
+       delete it and the three radios above for a single-altitude one. The third label
+       is audience-swappable ("Expert", "Architect") — the CLASS NAMES never change.
+  <div class="levelbar">
+    <div class="switch" role="group" aria-label="Explanation level">
+      <label for="lvl-5">ELI5</label>
+      <label for="lvl-14">ELI14</label>
+      <label for="lvl-i">ELII</label>
+    </div>
+    <div class="lvl-note">
+      <div class="eli5">Plain intuition. Everyday analogies, no jargon.</div>
+      <div class="eli14">Correct mechanics, with terms introduced as they are used.</div>
+      <div class="elii">Full depth — real names, trade-offs, edge cases, why it is built this way.</div>
+    </div>
+  </div>
+  -->
+
+  <div class="layout">
+
+    <aside class="rail">
+      <div class="tocbox">
+{{TOC}}
+      </div>
+    </aside>
+
+    <main>
+{{CONTENT}}
+    </main>
+
+  </div>
+
+  <footer class="doc-footer">
+    <span>{{TITLE}}</span>
+    <span>{{DATE}}</span>
+  </footer>
+
+</div>
+
+<script>
+// Progressive enhancement ONLY — heading anchors, copy buttons, reading position.
+// Nothing here is load-bearing: the nav and the level switch both work with JS off.
+(function () {
+  var main = document.querySelector('main');
+  if (!main) return;
+
+  function slug(s){return s.toLowerCase().replace(/[^\w]+/g,'-').replace(/^-+|-+$/g,'');}
+  var heads = main.querySelectorAll('h2, h3');
+  var tocItems = [];
+  heads.forEach(function (h) {
+    if (!h.id) h.id = slug(h.textContent);
+    var a = document.createElement('a');
+    a.className = 'anchor'; a.href = '#' + h.id; a.textContent = '#';
+    h.appendChild(a);
+    tocItems.push({ id: h.id, text: h.textContent.replace(/#$/,'').trim(), level: h.tagName.toLowerCase() });
+  });
+
+  // The nav is AUTHORED, not generated. This only fills one in when the file has
+  // none — a legacy artifact or a quick paste. Never build a second one.
+  if (tocItems.length >= 3 && !document.querySelector('nav.toc')) {
+    var nav = document.createElement('nav');
+    nav.className = 'toc';
+    var html = '<div class="label">Contents</div><ul>';
+    tocItems.forEach(function (i) {
+      html += '<li class="' + i.level + '"><a href="#' + i.id + '">' + i.text + '</a></li>';
+    });
+    nav.innerHTML = html + '</ul>';
+    var box = document.querySelector('.rail .tocbox');
+    if (box) box.appendChild(nav); else main.insertBefore(nav, main.firstChild);
+  }
+
+  // Reading position. Recomputed from geometry on each scroll frame, so it is right
+  // scrolling up as well as down. Two cases a fixed probe line gets wrong:
+  //  - the last sections are too short to ever reach the probe (the page bottoms
+  //    out first), so as the page nears its end the probe slides down to the
+  //    viewport's bottom edge, and the final sections light up in turn;
+  //  - a click on a section the page cannot scroll to the top must still light THAT
+  //    link, so a click pins it until the reader scrolls by hand (wheel/touch/key).
+  var links = document.querySelectorAll('.rail .toc a[href^="#"]');
+  if (links.length && window.requestAnimationFrame) {
+    var byId = {};
+    var idOf = function (a) {
+      var id = a.getAttribute('href').slice(1);
+      try { id = decodeURIComponent(id); } catch (e) {}
+      return id;
+    };
+    links.forEach(function (a) { byId[idOf(a)] = a; });
+    // Every element a nav link points at, heading or not (a section above <main>,
+    // a <details> block), in document order; headings-only missed those and lit
+    // the first heading instead when the page sat at the top.
+    var targets = [];
+    links.forEach(function (a) {
+      var el = document.getElementById(idOf(a));
+      if (el && targets.indexOf(el) < 0) targets.push(el);
+    });
+    targets.sort(function (x, y) {
+      return x.compareDocumentPosition(y) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+    });
+
+    if (targets.length) {
+      var PROBE = 120, current = null, pinned = null, ticking = false;
+      var mark = function (id) {
+        if (id === current) return;
+        current = id;
+        links.forEach(function (a) { a.classList.remove('is-active'); });
+        byId[id].classList.add('is-active');
+      };
+      var refresh = function () {
+        ticking = false;
+        if (pinned) return;
+        var vh = window.innerHeight;
+        var left = document.documentElement.scrollHeight - vh - window.scrollY;
+        var probe = PROBE;
+        if (left < vh) probe = PROBE + (vh - PROBE) * (1 - Math.max(left, 0) / vh);
+        var active = targets[0];
+        for (var i = 0; i < targets.length; i++) {
+          if (targets[i].getBoundingClientRect().top <= probe) active = targets[i]; else break;
+        }
+        mark(active.id);
+      };
+      var schedule = function () {
+        if (!ticking) { ticking = true; window.requestAnimationFrame(refresh); }
+      };
+      window.addEventListener('scroll', schedule, { passive: true });
+      window.addEventListener('resize', schedule);
+      links.forEach(function (a) {
+        a.addEventListener('click', function () { pinned = idOf(a); mark(pinned); });
+      });
+      ['wheel', 'touchstart', 'keydown'].forEach(function (ev) {
+        window.addEventListener(ev, function () {
+          if (pinned) { pinned = null; schedule(); }
+        }, { passive: true });
+      });
+      refresh();
+    }
+  }
+
+  document.querySelectorAll('pre').forEach(function (pre) {
+    var b = document.createElement('button');
+    b.className = 'copy-btn'; b.type = 'button'; b.textContent = 'copy';
+    b.addEventListener('click', function () {
+      var code = pre.querySelector('code');
+      var text = code ? code.innerText : pre.innerText;
+      navigator.clipboard.writeText(text).then(function () {
+        b.textContent = 'copied'; setTimeout(function () { b.textContent = 'copy'; }, 1200);
+      });
+    });
+    pre.appendChild(b);
+  });
+})();
+</script>
+</body>
+</html>

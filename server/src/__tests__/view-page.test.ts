@@ -5,11 +5,10 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import vm from 'node:vm';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createPresentRouter } from '../present/index.js';
-import { buildReaderPage, scriptSafeJson, viewContent, withNoindex } from '../present/view-page.js';
+import { buildReaderPage, viewContent, withNoindex } from '../present/view-page.js';
 import { PENDING_NOTE } from '../workers/deep-follow-up.js';
 
 const SESSION = 'ec13fd2d-12e5-42cb-8fc0-6f39b1ec46fa';
@@ -33,32 +32,51 @@ describe('viewContent', () => {
 });
 
 describe('buildReaderPage', () => {
-  it('cannot be broken out of by the markdown', () => {
-    const hostile = 'before </script><script>window.pwned=1</script> after <!-- x';
-    const page = buildReaderPage({ title: 'T', type: 'research', markdown: hostile, scripts: 'link' });
-    // Exactly the three script elements the template writes (two vendor + one inline).
-    expect(page.match(/<script\b/g)).toHaveLength(3);
-    expect(page).not.toContain('</script><script>window.pwned');
-    // And the JSON round-trips to the original text.
-    expect(JSON.parse(scriptSafeJson(hostile))).toBe(hostile);
+  const page = (markdown: string, extra: Partial<Parameters<typeof buildReaderPage>[0]> = {}) =>
+    buildReaderPage({ title: 'T', type: 'research', markdown, ...extra });
+
+  it('wears the HTML Artifact Kit', () => {
+    const out = page('## One\n\ntext\n\n## Two\n\n### Two a\n\n| a | b |\n|---|---|\n| 1 | 2 |');
+    expect(out).toContain('JetBrains Mono');
+    expect(out).toContain('prefers-color-scheme: dark');
+    expect(out).toContain('<div class="table-scroll"><table>');
+    // An authored nav, so it reads with JS off; no level radios on a one-altitude page.
+    expect(out).toContain('<li class="h2"><a href="#one">One</a></li>');
+    expect(out).toContain('<li class="h3"><a href="#two-a">Two a</a></li>');
+    expect(out).not.toContain('name="lvl"');
+    expect(out).not.toMatch(/{{[A-Z]+}}/);
   });
 
-  it('parses as JavaScript', () => {
-    const page = buildReaderPage({ title: 'T', type: 'research', markdown: 'a \u2028 b `c` ${d}', scripts: 'link' });
-    const inline = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
-    for (const code of inline) expect(() => new vm.Script(code)).not.toThrow();
+  it('keeps one h1 when the card uses #', () => {
+    const out = page('# Big\n\n## Small');
+    expect(out).toContain('<h2 id="big">Big</h2>');
+    expect(out).toContain('<h3 id="small">Small</h3>');
   });
 
-  it('inlines the libraries for a published page and asks to stay unindexed', () => {
-    const page = buildReaderPage({ title: 'T', type: 'research', markdown: 'x', scripts: 'inline', noindex: true });
-    expect(page).not.toContain('/vendor/js/');
-    expect(page).toContain('marked');
-    expect(page).toContain('DOMPurify');
-    expect(page).toContain('name="robots" content="noindex');
+  it('shows raw HTML as text and drops unsafe links', () => {
+    const out = page('before <script>window.pwned=1</script> [x](javascript:alert(1)) [ok](https://example.com) $& $1');
+    expect(out).not.toContain('<script>window.pwned');
+    expect(out).toContain('&lt;script&gt;window.pwned');
+    expect(out).not.toContain('javascript:alert');
+    expect(out).toContain('<a href="https://example.com" target="_blank" rel="noopener">ok</a>');
+    expect(out).toContain('$&amp; $1');
+  });
+
+  it('refreshes and stays unindexed only when asked', () => {
+    expect(page('x')).not.toContain('http-equiv="refresh"');
+    expect(page('x', { refresh: true, noindex: true })).toMatch(/http-equiv="refresh"[\s\S]*<\/head>/);
+    expect(page('x', { noindex: true })).toContain('name="robots" content="noindex');
+  });
+
+  it('drops a first line that restates the title', () => {
+    const out = page('### Research: best APIs?\n\n## Body', { title: 'Research: best APIs?' });
+    expect(out).not.toContain('<h3 id="research-best-apis">');
+    expect(out).toContain('<h2 id="body">Body</h2>');
+    expect(page('**Other**\n\ntext', { title: 'T' })).toContain('<strong>Other</strong>');
   });
 
   it('escapes the title', () => {
-    expect(buildReaderPage({ title: '<b>x</b>', type: 'research', markdown: 'x', scripts: 'link' })).toContain('&lt;b&gt;x&lt;/b&gt;');
+    expect(page('x', { title: '<b>x</b>' })).toContain('&lt;b&gt;x&lt;/b&gt;');
   });
 });
 
@@ -112,7 +130,7 @@ describe('GET /present/action/:id/view', () => {
     expect(res.headers.get('content-type')).toMatch(/text\/html/);
     const body = await res.text();
     expect(body).toContain('Live research');
-    expect(body).toContain('**Live answer**');
+    expect(body).toContain('<strong>Live answer</strong>');
     expect(body).toContain('http-equiv="refresh"');
     expect(res.headers.get('content-security-policy')).toBeNull();
   });
@@ -121,7 +139,7 @@ describe('GET /present/action/:id/view', () => {
     const res = await fetch(`${base}/present/action/stored-1/view?session=${SESSION}`);
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body).toContain('## From the store');
+    expect(body).toContain('From the store</h2>');
     expect(body).not.toContain('http-equiv="refresh"');
   });
 

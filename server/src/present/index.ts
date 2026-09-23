@@ -278,7 +278,6 @@ export function createPresentRouter(registry: WorkerRegistry, options: PresentRo
       type: found.action.type,
       completedAt: found.action.completedAt,
       markdown: content.markdown,
-      scripts: 'link',
       refresh: content.pending,
     }));
   });

@@ -41,5 +41,11 @@ cat > "$VENDOR/css/fonts.css" <<'EOF'
 @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 700; font-display: swap; src: url('/vendor/fonts/jetbrains-mono-v24-latin-700.woff2') format('woff2'); }
 EOF
 
+echo "── HTML Artifact Kit (the house look for pages that leave the dashboard)"
+# The reader page reads the kit live from ~/.claude/docs/html-design; this
+# snapshot is the fallback when that directory is missing. Re-run to refresh.
+mkdir -p "$VENDOR/artifact-kit"
+cp "$HOME/.claude/docs/html-design/style.css" "$HOME/.claude/docs/html-design/template.html" "$VENDOR/artifact-kit/"
+
 echo "── done:"
 ls -la "$VENDOR/js" "$VENDOR/css" "$VENDOR/fonts"

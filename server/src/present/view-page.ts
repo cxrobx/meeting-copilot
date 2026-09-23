@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import type { WorkerResult } from '../workers/types.js';
@@ -10,9 +12,8 @@ import { PENDING_NOTE } from '../workers/deep-follow-up.js';
  * published link falls back to it when the polish agent's page is unusable.
  *
  * Two shapes. A mockup (or any `html` artifact) is the page itself and is
- * sent as-is. Anything else is markdown and goes into a reader page that
- * renders it in the browser with the same marked + DOMPurify the dashboard
- * uses; the markdown rides in as JSON, never as HTML the server built.
+ * sent as-is. Anything else is markdown and goes into a reader page,
+ * rendered on the server, in the house look (the HTML Artifact Kit below).
  */
 
 export interface ViewableAction {
@@ -46,16 +47,6 @@ export function viewContent(action: ViewableAction): ViewContent | null {
   return { kind: 'markdown', markdown, pending: markdown.includes(PENDING_NOTE) };
 }
 
-/** JSON that is safe inside a <script> element: no `</script>`, no `<!--`. */
-export function scriptSafeJson(value: unknown): string {
-  return JSON.stringify(value)
-    .replace(/</g, '\\u003c')
-    .replace(/>/g, '\\u003e')
-    .replace(/&/g, '\\u0026')
-    .replace(/\u2028/g, '\\u2028')
-    .replace(/\u2029/g, '\\u2029');
-}
-
 export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
@@ -74,23 +65,140 @@ export function typeLabel(type: string): string {
   return TYPE_LABELS[type] ?? type;
 }
 
-function formatWhen(completedAt: ViewableAction['completedAt']): string {
+export function formatWhen(completedAt: ViewableAction['completedAt']): string {
   if (completedAt == null || completedAt === '') return '';
   const d = new Date(completedAt);
   if (Number.isNaN(d.getTime())) return '';
   return d.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
 }
 
-const VENDOR_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'vendor', 'js');
-let inlineScriptsCache: string | null = null;
+// ─── The house look: Chris's HTML Artifact Kit ─────────────────────────────
+// Every page a card becomes wears the kit that Onyx's Artifacts wear
+// (~/.claude/docs/html-design: Solarized cream, JetBrains Mono, headings
+// coloured by level, dark mode by prefers-color-scheme). It is read live so
+// a kit change reaches these pages too; server/vendor/artifact-kit is the
+// snapshot used when that directory is missing (scripts/vendor-assets.sh).
 
-/** The vendored marked + DOMPurify, inlined, for a page that leaves this machine. */
-function inlineScripts(): string {
-  if (inlineScriptsCache === null) {
-    const read = (name: string) => readFileSync(join(VENDOR_DIR, name), 'utf8').replace(/<\/script/gi, '<\\/script');
-    inlineScriptsCache = `<script>${read('marked.min.js')}</script>\n<script>${read('purify.min.js')}</script>`;
+const VENDOR_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'vendor');
+
+function kitFile(name: string): string {
+  const live = join(homedir(), '.claude', 'docs', 'html-design', name);
+  try {
+    return readFileSync(live, 'utf8');
+  } catch {
+    return readFileSync(join(VENDOR_DIR, 'artifact-kit', name), 'utf8');
   }
-  return inlineScriptsCache;
+}
+
+export interface TocEntry { id: string; text: string; level: 2 | 3 }
+
+export interface KitPageOptions {
+  title: string;
+  subtitle: string;
+  /** The eyebrow and footer line. */
+  date: string;
+  /** Body HTML for <main>. Trusted: the caller built or sanitized it. */
+  contentHtml: string;
+  toc: TocEntry[];
+  /** Reload every few seconds, while a deep follow-up is still coming. */
+  refresh?: boolean;
+  /** Published pages ask search engines to stay out. */
+  noindex?: boolean;
+}
+
+/**
+ * A page in the kit's own shell (template.html with style.css inlined). One
+ * altitude, so the level radios go, as the template says to. The nav is
+ * authored here from the headings, never left to the template's script: the
+ * page has to read with JS off (house convention 4).
+ */
+export function buildKitPage(opts: KitPageOptions): string {
+  const nav = opts.toc.length >= 3
+    ? '        <nav class="toc">\n          <div class="label">Contents</div>\n          <ul>\n' +
+      opts.toc.map((t) => `            <li class="h${t.level}"><a href="#${escapeHtml(t.id)}">${escapeHtml(t.text)}</a></li>`).join('\n') +
+      '\n          </ul>\n        </nav>'
+    : '';
+  const head = [
+    opts.noindex ? '<meta name="robots" content="noindex, nofollow">' : '',
+    opts.refresh ? '<meta http-equiv="refresh" content="5">' : '',
+  ].filter(Boolean).join('\n');
+  // Function replacers throughout: a `$` in the content must not be read as a
+  // replacement pattern.
+  return kitFile('template.html')
+    .replace(/<input type="radio" name="lvl"[^>]*>\n?/g, '')
+    .replace('<meta name="viewport" content="width=device-width, initial-scale=1">', (m) => (head ? `${m}\n${head}` : m))
+    .replace('{{STYLE}}', () => kitFile('style.css'))
+    .replace('{{TOC}}', () => nav)
+    .replace('{{CONTENT}}', () => opts.contentHtml)
+    .replace(/{{TITLE}}/g, () => escapeHtml(opts.title))
+    .replace(/{{SUBTITLE}}/g, () => escapeHtml(opts.subtitle))
+    .replace(/{{DATE}}/g, () => escapeHtml(opts.date));
+}
+
+// ─── Markdown → HTML, on the server ────────────────────────────────────────
+// The vendored browser build of marked, evaluated once in its own context
+// (the package is ESM, so `require` can't load its UMD). Raw HTML in the
+// markdown is shown as text and only web/mail links survive, so the page is
+// safe without DOMPurify and needs no script to read.
+
+let markedLib: any = null;
+function markedModule(): any {
+  if (!markedLib) {
+    const ctx: Record<string, any> = {};
+    ctx.globalThis = ctx;
+    vm.runInNewContext(readFileSync(join(VENDOR_DIR, 'js', 'marked.min.js'), 'utf8'), ctx);
+    markedLib = ctx.marked;
+  }
+  return markedLib;
+}
+
+const SAFE_HREF = /^(https?:|mailto:|#)/i;
+
+function slugify(text: string, used: Set<string>): string {
+  const base = text.toLowerCase().replace(/<[^>]+>/g, '').replace(/&[a-z#0-9]+;/g, '').replace(/[^\w]+/g, '-').replace(/^-+|-+$/g, '') || 'section';
+  let slug = base;
+  for (let n = 2; used.has(slug); n++) slug = `${base}-${n}`;
+  used.add(slug);
+  return slug;
+}
+
+/** Card markdown as kit-ready HTML plus its h2/h3 outline. */
+export function renderCardMarkdown(markdown: string): { html: string; toc: TocEntry[] } {
+  const { Marked } = markedModule();
+  // The page's own <h1> is the card title, so a card that uses `#` is shifted
+  // down a level to keep one h1 and let its sections become the h2s.
+  const shift = /^# /m.test(markdown) ? 1 : 0;
+  const toc: TocEntry[] = [];
+  const used = new Set<string>();
+  const marked = new Marked({
+    gfm: true,
+    renderer: {
+      html(token: { text: string }) {
+        return escapeHtml(token.text);
+      },
+      heading(this: any, token: { tokens: unknown[]; depth: number }) {
+        const level = Math.min(6, token.depth + shift);
+        const inner = this.parser.parseInline(token.tokens);
+        const text = inner.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
+        const id = slugify(text, used);
+        if (level === 2 || level === 3) toc.push({ id, text, level });
+        return `<h${level} id="${id}">${inner}</h${level}>\n`;
+      },
+      link(this: any, token: { href: string; title?: string | null; tokens: unknown[] }) {
+        const inner = this.parser.parseInline(token.tokens);
+        if (!SAFE_HREF.test(token.href)) return inner;
+        const external = /^https?:/i.test(token.href);
+        return `<a href="${escapeHtml(token.href)}"${token.title ? ` title="${escapeHtml(token.title)}"` : ''}${external ? ' target="_blank" rel="noopener"' : ''}>${inner}</a>`;
+      },
+      image(token: { href: string; text: string }) {
+        return /^https?:/i.test(token.href) ? `<img src="${escapeHtml(token.href)}" alt="${escapeHtml(token.text)}">` : escapeHtml(token.text);
+      },
+    },
+  });
+  const html = String(marked.parse(markdown))
+    .replace(/<table>/g, '<div class="table-scroll"><table>')
+    .replace(/<\/table>/g, '</table></div>');
+  return { html, toc };
 }
 
 export interface ReaderPageOptions {
@@ -98,81 +206,30 @@ export interface ReaderPageOptions {
   type: string;
   completedAt?: ViewableAction['completedAt'];
   markdown: string;
-  /**
-   * `link` loads the libraries from this server's /vendor (the local tab).
-   * `inline` embeds them, for a published page with no server behind it.
-   */
-  scripts: 'link' | 'inline';
-  /** Reload every few seconds, while a deep follow-up is still coming. */
   refresh?: boolean;
-  /** Published pages ask search engines to stay out. */
   noindex?: boolean;
 }
 
+/** Cards often open by restating their title; the page already shows it as the h1. */
+export function dropRepeatedTitle(markdown: string, title: string): string {
+  const norm = (s: string) => s.replace(/[*_`#:]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const m = /^\s*(?:#{1,6}\s+(.+)|\*\*(.+)\*\*)\s*(?:\n|$)/.exec(markdown);
+  if (!m || norm(m[1] ?? m[2]) !== norm(title)) return markdown;
+  return markdown.slice(m[0].length).replace(/^\s+/, '');
+}
+
+/** A markdown card as a kit page. */
 export function buildReaderPage(opts: ReaderPageOptions): string {
-  const scripts = opts.scripts === 'inline'
-    ? inlineScripts()
-    : '<script src="/vendor/js/marked.min.js"></script>\n<script src="/vendor/js/purify.min.js"></script>';
-  const meta = [typeLabel(opts.type), formatWhen(opts.completedAt)].filter(Boolean).join(' · ');
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
-${opts.noindex ? '<meta name="robots" content="noindex, nofollow">\n' : ''}${opts.refresh ? '<meta http-equiv="refresh" content="5">\n' : ''}<title>${escapeHtml(opts.title)}</title>
-<style>
-  :root {
-    --bg: 248 247 245; --surface: 255 255 255; --text: 30 25 15; --muted: 110 104 94;
-    --border: 30 25 15 / 0.12; --accent: 10 132 255;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: 28 26 23; --surface: 38 35 31; --text: 236 234 230; --muted: 160 156 150;
-      --border: 255 255 255 / 0.10; --accent: 255 69 58;
-    }
-  }
-  * { box-sizing: border-box; }
-  html { background: rgb(var(--bg)); }
-  body {
-    margin: 0; padding: 48px 20px 80px; color: rgb(var(--text));
-    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-  }
-  main { max-width: 760px; margin: 0 auto; }
-  .meta { font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: rgb(var(--muted)); margin-bottom: 8px; }
-  h1.title { font-size: 30px; line-height: 1.2; margin: 0 0 28px; letter-spacing: -0.01em; }
-  article h1 { font-size: 24px; } article h2 { font-size: 20px; } article h3 { font-size: 17px; }
-  article h1, article h2, article h3 { margin: 1.6em 0 0.5em; line-height: 1.3; }
-  article a { color: rgb(var(--accent)); }
-  article code { font: 0.9em "SF Mono", ui-monospace, Menlo, monospace; background: rgb(var(--border)); padding: 1px 5px; border-radius: 4px; }
-  article pre { background: rgb(var(--surface)); border: 1px solid rgb(var(--border)); border-radius: 8px; padding: 14px; overflow-x: auto; }
-  article pre code { background: none; padding: 0; }
-  article blockquote { margin: 1em 0; padding: 0 16px; border-left: 3px solid rgb(var(--accent)); color: rgb(var(--muted)); }
-  article table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
-  article th, article td { border: 1px solid rgb(var(--border)); padding: 6px 10px; text-align: left; }
-  article hr { border: 0; border-top: 1px solid rgb(var(--border)); margin: 2em 0; }
-  article img { max-width: 100%; }
-</style>
-${scripts}
-</head>
-<body>
-<main>
-  <div class="meta">${escapeHtml(meta)}</div>
-  <h1 class="title">${escapeHtml(opts.title)}</h1>
-  <article id="content"></article>
-</main>
-<script>
-  (function () {
-    var md = ${scriptSafeJson(opts.markdown)};
-    var el = document.getElementById('content');
-    if (typeof marked === 'undefined') { el.textContent = md; return; }
-    var html = marked.parse(md);
-    el.innerHTML = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(html) : html;
-    el.querySelectorAll('a[href^="http"]').forEach(function (a) { a.target = '_blank'; a.rel = 'noopener'; });
-  })();
-</script>
-</body>
-</html>`;
+  const { html, toc } = renderCardMarkdown(dropRepeatedTitle(opts.markdown, opts.title));
+  return buildKitPage({
+    title: opts.title,
+    subtitle: typeLabel(opts.type),
+    date: formatWhen(opts.completedAt),
+    contentHtml: html,
+    toc,
+    refresh: opts.refresh,
+    noindex: opts.noindex,
+  });
 }
 
 /** Add `<meta name="robots" content="noindex">` to a whole HTML document. */
