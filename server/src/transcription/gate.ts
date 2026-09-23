@@ -11,9 +11,9 @@
  *   - CLOSE → finalize: Grok decides utterance ends from the audio it receives,
  *     so with nothing arriving it would glue the next utterance on. Closing
  *     tells the caller to send `finalize`.
- * Anything the gate never opens for (a whisper-quiet "yeah") is not lost: the
- * streamer only skips the app's VAD chunks for stretches the gate sent, so
- * the rest goes to local Parakeet (see StreamingTranscriber.claimChunk).
+ * Speech too quiet to open it (a whisper-level "yeah") is not transcribed.
+ * Replaying three meetings put that at ~0.1% of words, below Grok's own
+ * run-to-run variation; routing it to Parakeet instead mostly added duplicates.
  */
 
 export interface GateOptions {

@@ -124,16 +124,14 @@ describe('StreamingTranscriber with the gate', () => {
     expect(Date.parse(seg.captureStartedAt!)).toBeGreaterThan(t0 + 20_000);
   });
 
-  it('never skips a chunk the gate did not send: quiet speech goes to the local backend', () => {
+  it('while the stream is healthy it owns gated stretches too: no local re-transcription, no duplicates', () => {
     const { st, sockets, now, feed } = setup();
     st.start('');
     sockets[1]!.server({ type: 'transcript.created' });
-    const t0 = now.t;
-    feed('meeting', ONSET, 40); // a whisper the gate never opens for
-    expect(st.claimChunk('meeting', t0, t0 + 4_000, 'whisper')).toBe(false); // → Parakeet
-    const t1 = now.t;
+    feed('meeting', ONSET, 40); // quiet enough that the gate stays shut
+    expect(st.claimChunk('meeting', now.t, 'quiet')).toBe(true); // held, not sent to Parakeet
     feed('meeting', SPEECH, 40);
-    expect(st.claimChunk('meeting', t1, t1 + 4_000, 'speech')).toBe(true); // stream has it
+    expect(st.claimChunk('meeting', now.t, 'speech')).toBe(true);
   });
 
   it('speech while the stream is down reconnects at once and sends the buffered start in order', () => {

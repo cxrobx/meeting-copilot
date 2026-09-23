@@ -148,9 +148,9 @@ describe('StreamingTranscriber', () => {
     const t0 = now.t;
     for (let i = 0; i < 60; i++) { st.pushFrame('meeting', Buffer.alloc(3200), t0 + i * 100); now.t = t0 + (i + 1) * 100; }
 
-    expect(st.claimChunk('meeting', t0, t0 + 2_000, 'chunk-A')).toBe(true);
+    expect(st.claimChunk('meeting', t0 + 2_000, 'chunk-A')).toBe(true);
     meeting.partial('covered words', { start: 0, duration: 3 }); // covers through t0 + 3 s
-    expect(st.claimChunk('meeting', t0 + 2_000, t0 + 5_500, 'chunk-B')).toBe(true);
+    expect(st.claimChunk('meeting', t0 + 5_500, 'chunk-B')).toBe(true);
 
     meeting.emit('error', new Error('socket reset'));
 
@@ -158,8 +158,8 @@ describe('StreamingTranscriber', () => {
     expect(replays).toEqual([{ source: 'meeting', chunks: ['chunk-B'] }]);
     // While down: a chunk the stream already covered is dropped, a new one is not.
     expect(st.isHealthy('meeting')).toBe(false);
-    expect(st.claimChunk('meeting', t0 + 1_000, t0 + 2_500, 'old')).toBe(true);
-    expect(st.claimChunk('meeting', t0 + 6_000, t0 + 9_000, 'new')).toBe(false);
+    expect(st.claimChunk('meeting', t0 + 2_500, 'old')).toBe(true);
+    expect(st.claimChunk('meeting', t0 + 9_000, 'new')).toBe(false);
   });
 
   it('is not healthy until the app actually sends frames (older app builds)', () => {
@@ -168,7 +168,7 @@ describe('StreamingTranscriber', () => {
     st.start('');
     sockets[0]!.server({ type: 'transcript.created' });
     expect(st.isHealthy('mic')).toBe(false);
-    expect(st.claimChunk('mic', Date.now() - 1_000, Date.now(), 'c')).toBe(false);
+    expect(st.claimChunk('mic', Date.now(), 'c')).toBe(false);
   });
 
   it('reconnects after a failure and finalizes open lines on stop', async () => {

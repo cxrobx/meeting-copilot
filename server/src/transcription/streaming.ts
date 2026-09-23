@@ -32,8 +32,6 @@ const DEFAULT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 const MAX_OPEN_WORDS = 80;
 /** Frames waiting for a (re)connecting stream: 10 s, oldest dropped past that. */
 const MAX_PENDING_FRAMES = 100;
-/** Slack when checking that the gate sent a chunk's whole time span. */
-const SENT_TOLERANCE_MS = 250;
 const BYTES_PER_SEC = 32_000; // 16 kHz mono PCM16
 
 export interface StreamingOptions {
@@ -94,8 +92,6 @@ interface SourceState<T> {
   /** All seconds sent this session, across reconnects. */
   billedSec: number;
   lastSentEnd: number | null;
-  /** Wall-clock ranges actually sent to a ready stream (merged). */
-  sentRanges: Array<[number, number]>;
 }
 
 function joinText(left: string, right: string): string {
@@ -256,9 +252,6 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
     state.sentSec += durMs / 1000;
     state.billedSec += durMs / 1000;
     state.lastSentEnd = frame.at + durMs;
-    const last = state.sentRanges.at(-1);
-    if (last && frame.at - last[1] <= 50) last[1] = frame.at + durMs;
-    else state.sentRanges.push([frame.at, frame.at + durMs]);
   }
 
   private flushPending(source: Source): void {
@@ -288,16 +281,14 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
    * the stream covers it (the chunk is held for replay); false means transcribe
    * it locally now.
    */
-  claimChunk(source: Source, captureStartedAtMs: number, captureEndedAtMs: number, chunk: TChunk): boolean {
+  claimChunk(source: Source, captureEndedAtMs: number, chunk: TChunk): boolean {
     const state = this.state(source);
-    const cutoff = this.now() - this.replayWindowMs;
-    state.sentRanges = state.sentRanges.filter((r) => r[1] >= cutoff);
-    // Only skip a chunk the gate actually SENT in full. Speech the gate never
-    // opened for (too quiet) falls through to the local backend: late, not lost.
-    const sent = state.sentRanges.some(
-      ([a, b]) => a <= captureStartedAtMs + SENT_TOLERANCE_MS && b >= captureEndedAtMs - SENT_TOLERANCE_MS,
-    );
-    if (this.isHealthy(source) && sent) {
+    // While the stream is healthy it owns the transcript, gated stretches
+    // included: sending the gate's leftovers to the local backend as well was
+    // tried and measured on three meetings, and it rescued ~0.1% of words
+    // while adding ~18 duplicate or junk words per word rescued.
+    if (this.isHealthy(source)) {
+      const cutoff = this.now() - this.replayWindowMs;
       state.held = state.held.filter((h) => h.endMs >= cutoff);
       state.held.push({ endMs: captureEndedAtMs, chunk });
       return true;
@@ -311,7 +302,7 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
       stream: null, lastFrameAt: 0, utterance: null, coveredUntil: 0, held: [], reconnectTimer: null,
       failures: 0, closedThrough: 0, carried: '',
       gate: this.opts.gate === false ? null : new NoiseGate(this.opts.gate ?? {}),
-      pending: [], pendingFinalize: false, timeline: [], sentSec: 0, billedSec: 0, lastSentEnd: null, sentRanges: [],
+      pending: [], pendingFinalize: false, timeline: [], sentSec: 0, billedSec: 0, lastSentEnd: null,
     };
   }
 

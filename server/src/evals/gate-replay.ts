@@ -5,11 +5,11 @@
  * Replays a recorded meeting (mic.wav + system.wav, 16 kHz mono PCM16, as
  * CXNotes writes them) through the live streaming path twice at once:
  *   - REFERENCE: every frame streamed to Grok (the ungated setup)
- *   - GATED:     frames through the noise gate, plus the local fallback: the
- *                app's utterance chunks the gate did not send go to Parakeet,
- *                as in production. The app cuts chunks with Silero VAD; here a
- *                speech detector more sensitive than the gate (6 dB over the
- *                floor vs 12) cuts them at 300 ms pauses, capped at 6 s
+ *   - GATED:     frames through the noise gate, with production's fallback:
+ *                the app's utterance chunks go to Parakeet only while the
+ *                stream is down. The app cuts chunks with Silero VAD; here a
+ *                detector more sensitive than the gate (6 dB over the floor
+ *                vs 12) cuts them at 300 ms pauses, capped at 6 s
  * then aligns the two transcripts word by word and lists every stretch the
  * reference has that the gated run lost. Billing is compared on seconds sent.
  *
@@ -117,7 +117,7 @@ async function main() {
     if (v.speech.length >= 3) { // ≥300 ms, like the app's minimum
       const pcm = Buffer.concat(v.speech);
       const endMs = v.startMs + v.speech.length * 100;
-      if (!gated.claimChunk(source, v.startMs, endMs, { source, startMs: v.startMs, pcm })) local(source, v.startMs, pcm);
+      if (!gated.claimChunk(source, endMs, { source, startMs: v.startMs, pcm })) local(source, v.startMs, pcm);
     }
     v.speech = []; v.quiet = 0;
   };
