@@ -28,6 +28,8 @@ export interface LiveJsonRequest {
   /** Hard deadline across direct providers and the CLI fallback. */
   totalTimeoutMs: number;
   maxOutputTokens?: number;
+  /** JSON text as the OpenAI path writes it. The fallbacks answer whole, without it. */
+  onTextDelta?: (delta: string) => void;
 }
 
 function isAbort(error: unknown, signal: AbortSignal): boolean {
@@ -72,6 +74,7 @@ export async function runLiveJson(request: LiveJsonRequest): Promise<LiveJsonRes
             model: request.openAiModel,
             reasoningEffort: 'none',
             maxOutputTokens: request.maxOutputTokens,
+            onTextDelta: request.onTextDelta,
           },
         );
         return {

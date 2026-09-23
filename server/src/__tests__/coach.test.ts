@@ -3,7 +3,9 @@ import {
   ASK_DEADLINE_MS,
   CoachMonitor,
   TYPE_COOLDOWN_MS,
+  coachAskPartialReader,
   detectMoment,
+  type CoachAskPartial,
   type CoachSuggestion,
 } from '../intelligence/coach.js';
 import { COACH_ASK_SYSTEM } from '../intelligence/prompts/coach.v1.js';
@@ -432,5 +434,93 @@ describe('CoachMonitor.askNow (Suggest)', () => {
     pending.resolve(result());
     await expect(ask).rejects.toThrow('Aborted');
     expect(shown).not.toHaveBeenCalled();
+  });
+});
+
+
+// Feed a JSON answer in small chunks, as a streaming model writes it.
+function chunks(text: string, size = 7): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
+  return out;
+}
+
+describe('coachAskPartialReader (Suggest streaming)', () => {
+  it('reports the phrasing as it grows, ending with the complete sentence', () => {
+    const seen: CoachAskPartial[] = [];
+    let clock = 0;
+    const read = coachAskPartialReader((p) => seen.push(p), () => (clock += 100));
+    for (const c of chunks(result())) read(c);
+    expect(seen.length).toBeGreaterThan(2);
+    expect(seen.at(-1)).toEqual({
+      headline: 'Reset the answer',
+      phrasing: 'Let me answer that more directly: the constraint is capacity, not willingness.',
+    });
+    for (const p of seen) expect(seen.at(-1)!.phrasing.startsWith(p.phrasing)).toBe(true);
+  });
+
+  it('reports nothing when the model has no suggestion', () => {
+    const seen: CoachAskPartial[] = [];
+    const read = coachAskPartialReader((p) => seen.push(p), () => 0);
+    for (const c of chunks(result({ hasSuggestion: false, phrasing: 'Not worth saying.' }))) read(c);
+    expect(seen).toEqual([]);
+  });
+
+  it('coalesces fast deltas but always reports the finished phrasing', () => {
+    const seen: CoachAskPartial[] = [];
+    const read = coachAskPartialReader((p) => seen.push(p), () => 0); // every delta in the same instant
+    for (const c of chunks(result(), 3)) read(c);
+    expect(seen.length).toBeLessThanOrEqual(2);
+    expect(seen.at(-1)!.phrasing).toBe('Let me answer that more directly: the constraint is capacity, not willingness.');
+  });
+
+  it('ignores text the model writes after the object (gotcha #21)', () => {
+    const seen: CoachAskPartial[] = [];
+    const read = coachAskPartialReader((p) => seen.push(p), () => 0);
+    for (const c of chunks(`${result()}"} {"hasSuggestion":true,"phrasing":"garbage`)) read(c);
+    expect(seen.at(-1)!.phrasing).toBe('Let me answer that more directly: the constraint is capacity, not willingness.');
+  });
+});
+
+describe('CoachMonitor.askNow streaming', () => {
+  const options = {
+    transcriptProvider: () => '[Meeting] What would the pilot cost us?\n[You] It depends on the scope, honestly.',
+    wordCountProvider: () => 20,
+    goalsProvider: () => 'Get a pilot date',
+  };
+
+  it('emits ask.partial while the answer streams, then the full card', async () => {
+    const events: string[] = [];
+    const triage = vi.fn(async (_p: string, _s: string, _sig?: AbortSignal, _t?: unknown, onTextDelta?: (d: string) => void) => {
+      const text = result();
+      for (const c of chunks(text, 20)) onTextDelta?.(c);
+      return text;
+    });
+    const monitor = new CoachMonitor({ triage });
+    monitor.on('ask.partial', () => events.push('partial'));
+    monitor.on('suggestion', () => events.push('suggestion'));
+    await monitor.askNow('', options);
+    expect(typeof triage.mock.calls[0]![4]).toBe('function');
+    expect(events[0]).toBe('partial');
+    expect(events.at(-1)).toBe('suggestion');
+  });
+
+  it('passes no stream reader to the unasked live coach', async () => {
+    vi.useFakeTimers();
+    try {
+      const triage = vi.fn().mockResolvedValue(result({ incidentType: 'pressure' }));
+      const monitor = new CoachMonitor({ triage });
+      const shown: CoachSuggestion[] = [];
+      monitor.on('suggestion', (x: CoachSuggestion) => shown.push(x));
+      monitor.start({ transcriptProvider: () => '', wordCountProvider: () => 100, agendaStatusProvider: () => null });
+      monitor.noteSegment('We need you to commit right now.', 'meeting', { final: true, segmentId: 'stream-1' });
+      await vi.advanceTimersByTimeAsync(300);
+      monitor.stop();
+      expect(triage).toHaveBeenCalled();
+      expect(shown).toHaveLength(1);
+      for (const call of triage.mock.calls as unknown[][]) expect(call[4]).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

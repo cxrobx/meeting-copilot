@@ -37,6 +37,7 @@
 | `feature.state` | Monitor on/off snapshot | `features { factcheck, coach }` |
 | `factcheck.flag` | Fact-check verdict on a claim | `flag { claim, verdict, correction?, sources? }` |
 | `coach.suggestion` | "Say next" coach tip; `asked: true` for a Suggest card, which stays until dismissed | `suggestion { kind, priority, headline, asked?, ... }` |
+| `coach.partial` | A Suggest answer while it is being written (OpenAI path only); the `coach.suggestion` that follows replaces it | `headline, phrasing` |
 | `coach.history` | Every coach card this session, sent on connect so a reload keeps them | `suggestions [ ... ]` |
 | `pulse.update` | A meeting pulse (every 5 min, or a close-out); also sent on connect | `pulse { mode, trigger, status, read, escalations[], closeOut[], missed[], minutesIn, minutesLeft }` |
 | `pulse.history` | Every pulse this session, sent on connect for the coach's Earlier list | `pulses [ ... ]` |

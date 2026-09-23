@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { MODEL_CONFIG } from '../model-config.js';
 import { runLiveJson } from './live-json.js';
 import { parseFirstJsonObject } from './first-json.js';
+import { scanTopLevel } from './partial-json.js';
 import {
   COACH_ASK_SYSTEM,
   COACH_SCHEMA,
@@ -170,7 +171,45 @@ type CoachTriage = (
   systemPrompt: string,
   signal?: AbortSignal,
   timeouts?: { providerTimeoutMs: number; totalTimeoutMs: number },
+  onTextDelta?: (delta: string) => void,
 ) => Promise<string>;
+
+/** A Suggest answer as it is written. Emitted as 'ask.partial'. */
+export interface CoachAskPartial {
+  headline: string;
+  phrasing: string;
+}
+
+// Coalesce 'ask.partial' so a fast model does not send one socket message per token.
+const ASK_PARTIAL_MIN_MS = 50;
+
+/**
+ * Reads the Suggest answer's JSON as it streams and reports the headline and
+ * phrasing whenever the phrasing grows. Nothing is reported unless the model
+ * has already said it has a suggestion: `hasSuggestion` is the schema's first
+ * field, so a "nothing to say" answer never flashes a half card.
+ */
+export function coachAskPartialReader(
+  emit: (partial: CoachAskPartial) => void,
+  now: () => number = Date.now,
+): (delta: string) => void {
+  let buffer = '';
+  let lastPhrasing = '';
+  let lastEmit = 0;
+  return (delta) => {
+    buffer += delta;
+    const fields = scanTopLevel(buffer);
+    if (fields.get('hasSuggestion')?.value !== true) return;
+    const phrasing = fields.get('phrasing')?.value;
+    if (typeof phrasing !== 'string' || !phrasing.trim() || phrasing === lastPhrasing) return;
+    const done = fields.get('phrasing')?.complete === true;
+    if (!done && now() - lastEmit < ASK_PARTIAL_MIN_MS) return;
+    lastPhrasing = phrasing;
+    lastEmit = now();
+    const headline = fields.get('headline')?.value;
+    emit({ headline: typeof headline === 'string' ? headline : '', phrasing });
+  };
+}
 
 export interface CoachStartOptions {
   transcriptProvider: () => string;
@@ -307,7 +346,7 @@ export class CoachMonitor extends EventEmitter {
     super();
     this.now = deps.now ?? Date.now;
     this.gate = deps.gate ?? jevMomentGate;
-    this.triage = deps.triage ?? (async (prompt, systemPrompt, signal, timeouts) => {
+    this.triage = deps.triage ?? (async (prompt, systemPrompt, signal, timeouts, onTextDelta) => {
       const result = await runLiveJson({
         prompt,
         systemPrompt,
@@ -321,6 +360,7 @@ export class CoachMonitor extends EventEmitter {
         providerTimeoutMs: timeouts?.providerTimeoutMs ?? 3_500,
         totalTimeoutMs: timeouts?.totalTimeoutMs ?? ADVICE_DEADLINE_MS,
         maxOutputTokens: 240,
+        onTextDelta,
       });
       return result.text;
     });
@@ -624,10 +664,14 @@ export class CoachMonitor extends EventEmitter {
     this.evalsRun++;
     let raw: string;
     try {
+      // Stream the answer: the phrasing shows as it is written, and the full
+      // card replaces it when the object closes and passes the checks below.
       raw = await this.triage(prompt, COACH_ASK_SYSTEM, signal, {
         providerTimeoutMs: ASK_PROVIDER_TIMEOUT_MS,
         totalTimeoutMs: ASK_DEADLINE_MS,
-      });
+      }, coachAskPartialReader((partial) => {
+        if (!signal.aborted) this.emit('ask.partial', partial);
+      }, this.now));
     } catch (error) {
       // Only cancelAsk() means "the meeting ended". The model call's own
       // deadline also surfaces as 'Aborted', and the user is waiting on it.

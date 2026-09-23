@@ -95,6 +95,12 @@ export async function openaiStructuredJson(
     maxOutputTokens?: number;
     /** Per-call token usage, for evals that report spend and cache hits. */
     onUsage?: (usage: { inputTokens: number; outputTokens: number; cachedTokens: number; latencyMs: number }) => void;
+    /**
+     * Stream the JSON as it is written. For a caller that shows a field before
+     * the object closes (Coach Ask shows the phrasing as it is written). Same
+     * request, same schema; the returned text is the same.
+     */
+    onTextDelta?: (delta: string) => void;
   } = {},
 ): Promise<string> {
   const client = getClient();
@@ -102,8 +108,7 @@ export async function openaiStructuredJson(
   const tag = options.label ?? 'triage';
   const model = options.model ?? TRIAGE_MODEL;
   const started = Date.now();
-  const res = await client.responses.create(
-    {
+  const body: OpenAI.Responses.ResponseCreateParamsNonStreaming = {
       model,
       input: [
         { role: 'system', content: systemPrompt },
@@ -122,15 +127,42 @@ export async function openaiStructuredJson(
       ...(options.maxOutputTokens
         ? { max_output_tokens: options.maxOutputTokens }
         : {}),
-    },
-    {
-      timeout: options.timeoutMs ?? 10_000,
+  };
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  let text: string;
+  let u: any;
+  let firstTokenMs = 0;
+  if (options.onTextDelta) {
+    // The SDK's `timeout` stops covering a stream once it opens, so the
+    // deadline rides the signal instead.
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, AbortSignal.timeout(timeoutMs)])
+      : AbortSignal.timeout(timeoutMs);
+    const stream = await client.responses.create({ ...body, stream: true }, { maxRetries: 0, signal });
+    text = '';
+    for await (const event of stream) {
+      if (event.type === 'response.output_text.delta') {
+        if (!firstTokenMs) firstTokenMs = Date.now() - started;
+        text += event.delta;
+        try {
+          options.onTextDelta(event.delta);
+        } catch {
+          // A display callback must not fail the call.
+        }
+      } else if (event.type === 'response.completed') {
+        u = event.response.usage;
+      }
+    }
+  } else {
+    const res = await client.responses.create(body, {
+      timeout: timeoutMs,
       maxRetries: 0,
       signal: options.signal,
-    },
-  );
+    });
+    text = res.output_text;
+    u = res.usage;
+  }
   const elapsed = Date.now() - started;
-  const u: any = res.usage;
   const prices = tokenPrices(model);
   recordLlmUsage({
     inputTokens: u?.input_tokens ?? 0,
@@ -139,7 +171,7 @@ export async function openaiStructuredJson(
     outputDollarsPerMillion: Number(process.env.COPILOT_OPENAI_OUTPUT_PER_MILLION || prices.output),
   });
   const cached = u?.input_tokens_details?.cached_tokens ?? 0;
-  log('api/openai', `${tag} model=${model} latencyMs=${elapsed} in=${u?.input_tokens ?? 0} out=${u?.output_tokens ?? 0} cached=${cached}`);
+  log('api/openai', `${tag} model=${model} latencyMs=${elapsed}${firstTokenMs ? ` ttftMs=${firstTokenMs}` : ''} in=${u?.input_tokens ?? 0} out=${u?.output_tokens ?? 0} cached=${cached}`);
   options.onUsage?.({
     inputTokens: u?.input_tokens ?? 0,
     outputTokens: u?.output_tokens ?? 0,
@@ -147,7 +179,7 @@ export async function openaiStructuredJson(
     latencyMs: elapsed,
   });
 
-  return res.output_text;
+  return text;
 }
 
 export async function openaiTriageJson(

@@ -96,8 +96,12 @@ function readPrimitive(buf: string, start: number): ReadResult {
   return { value, complete, end: i };
 }
 
-/** Scan the root object and return each depth-1 field's value + completeness. */
-function scanTopLevel(buf: string): Map<string, { value: any; complete: boolean }> {
+/**
+ * Scan the root object and return each depth-1 field's value + completeness.
+ * A string still being written comes back partial. Stops at the root's
+ * closing brace, so text a model writes after the object is never read.
+ */
+export function scanTopLevel(buf: string): Map<string, { value: any; complete: boolean }> {
   const fields = new Map<string, { value: any; complete: boolean }>();
   let i = 0;
   while (i < buf.length && buf[i] !== '{') i++;

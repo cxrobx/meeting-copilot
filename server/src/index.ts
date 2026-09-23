@@ -22,7 +22,7 @@ import { IntelligenceEngine } from './intelligence/index.js';
 import { setLlmBudgetExceededHandler } from './api/budget.js';
 import { AgendaTracker, type AgendaStatus } from './intelligence/agenda.js';
 import { FactCheckMonitor, type FactFlag } from './intelligence/factcheck.js';
-import { CoachMonitor, type CoachStartOptions, type CoachSuggestion } from './intelligence/coach.js';
+import { CoachMonitor, type CoachAskPartial, type CoachStartOptions, type CoachSuggestion } from './intelligence/coach.js';
 import { MeetingPulse, askAnswerText, type MeetingPulseResult, type PulseTrigger } from './intelligence/pulse.js';
 import { inCliLane } from './intelligence/cli-lane.js';
 import { WorkerRegistry } from './workers/registry.js';
@@ -215,6 +215,8 @@ type OutboundMessage =
       type: 'coach.suggestion';
       suggestion: CoachSuggestion;
     }
+  // A Suggest answer while it is being written; coach.suggestion replaces it.
+  | { type: 'coach.partial'; headline: string; phrasing: string }
   | {
       // Every card this session, sent on connect so a reload keeps the history.
       type: 'coach.history';
@@ -456,6 +458,9 @@ coach.on('suggestion', (suggestion: CoachSuggestion) => {
     latencyMs: suggestion.latencyMs,
   });
   broadcast({ type: 'coach.suggestion', suggestion });
+});
+coach.on('ask.partial', (partial: CoachAskPartial) => {
+  broadcast({ type: 'coach.partial', headline: partial.headline, phrasing: partial.phrasing });
 });
 coach.on('eval', (info: Record<string, unknown>) => {
   debugLog(`[Coach] ${JSON.stringify(info)}`);

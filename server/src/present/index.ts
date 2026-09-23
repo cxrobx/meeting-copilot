@@ -6456,6 +6456,8 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   var liveCoachCard = null;
   var askedCoachCard = null;
   var dismissedCoachIds = {};
+  // Closed while its answer was still being written: the finished card stays closed too.
+  var coachStreamDismissed = false;
 
   function coachStripHtml(s, which) {
     var incident = s.asked ? 'asked' : coachIncident(s);
@@ -6477,8 +6479,21 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     else stageClearCoach();
   }
 
+  // A Suggest answer while it is being written (coach.partial). The finished
+  // card from coach.suggestion replaces it.
+  function renderCoachPartial(p) {
+    if (coachStreamDismissed || !p || !p.phrasing) return;
+    askedCoachCard = { asked: true, streaming: true, headline: p.headline || '', phrasing: p.phrasing, why: '' };
+    renderCoachStrips();
+  }
+
   function renderCoachSuggestion(s) {
     addCoachHistory(s);
+    if (s.asked && coachStreamDismissed) {
+      coachStreamDismissed = false;
+      if (s.id) dismissedCoachIds[s.id] = 1;
+      return;
+    }
     // A reconnect replays the last card; one already dismissed stays gone.
     if (s.id && dismissedCoachIds[s.id]) return;
     var expiresAt = Number(s.expiresAt || 0);
@@ -6497,6 +6512,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   function dismissCoachCard(which) {
     var card = which === 'asked' ? askedCoachCard : liveCoachCard;
     if (card && card.id) dismissedCoachIds[card.id] = 1;
+    if (card && card.streaming) coachStreamDismissed = true;
     if (which === 'asked') {
       askedCoachCard = null;
     } else {
@@ -7722,6 +7738,10 @@ export const PRESENT_HTML = `<!DOCTYPE html>
           if (msg.suggestion) renderCoachSuggestion(msg.suggestion);
           break;
 
+        case 'coach.partial':
+          renderCoachPartial(msg);
+          break;
+
         case 'coach.history':
           setCoachHistory(msg.suggestions);
           break;
@@ -7750,8 +7770,14 @@ export const PRESENT_HTML = `<!DOCTYPE html>
 
         case 'ask.state':
           if (msg.phase === 'started') {
+            if (msg.kind === 'suggest') coachStreamDismissed = false;
             setAskBusy(msg.kind, true);
           } else {
+            // An answer that streamed in but then failed its checks, or came back empty.
+            if (msg.kind === 'suggest' && askedCoachCard && askedCoachCard.streaming) {
+              askedCoachCard = null;
+              renderCoachStrips();
+            }
             setAskBusy(msg.kind, false);
             if (msg.phase === 'failed') showToast((msg.title || 'The coach') + (msg.body ? ': ' + msg.body : ''), { error: true });
             else if (msg.empty) showToast(msg.body || 'Nothing worth saying right now.');
