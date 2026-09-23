@@ -28,6 +28,7 @@ import { standingGoals } from './session/reviewStore.js';
 import { isSessionId } from './session/ids.js';
 import { prepRequestFromBody } from './prep/gather.js';
 import { runMeetingPrep } from './prep/agent.js';
+import { listStagedPreps } from './prep/staged.js';
 import type { ContextItemConfig } from './context/index.js';
 
 interface RouteContext {
@@ -280,6 +281,17 @@ export function createRoutes(ctx: RouteContext): Router {
       res.json({ meetings: getUpcomingMeetings() });
     } catch (err) {
       res.json({ meetings: [], error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // Preps staged ahead of time (scripts/stage-prep.sh, the meeting-prep skill),
+  // soonest meeting first. The start form fills itself from the first one;
+  // `skipped` names files this build cannot read (e.g. a newer format).
+  router.get('/prep/staged', (_req, res) => {
+    try {
+      res.json(listStagedPreps());
+    } catch (err) {
+      res.json({ preps: [], skipped: [], error: err instanceof Error ? err.message : String(err) });
     }
   });
 

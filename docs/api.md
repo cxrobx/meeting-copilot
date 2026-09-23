@@ -20,6 +20,7 @@
 | `feature.toggle` | Toggle an opt-in monitor | `feature: 'factcheck'\|'coach', enabled` |
 | `meeting.goals` | Private coach-only goals for this meeting | `goals` |
 | `meeting.schedule` | Calendar end of a meeting started from an invite; the pulse runs its close-out 5 min before | `endsAt` (ISO or ms) |
+| `meeting.prep` | The start form's prep brief, sent once live. A staged prep's file moves into the session as `prep.json`; the brief (the one shown, else the file's) becomes a pinned context doc | `prepId?` (staged), `brief?`, `sources?` |
 | `pulse.request` | A pulse read now: `checkin` is "How am I doing?", `missed` is "Missed anything?", `closeout` (or no kind) is the Wrap-up check. Sent by the coach head and by the app's ⌃⌥1/⌃⌥2 hotkeys | `kind?` |
 | `coach.ask` | "Suggest": one coach card now, with the live coach on or off. Sent by the coach head and by ⌃⌥3 | `focus?` (the Quick Actions box) |
 
@@ -66,6 +67,7 @@
 | GET | `/sessions/:id/export?format=` | Export markdown/JSON |
 | DELETE | `/sessions/:id`, POST `/sessions/delete` | Delete session(s) |
 | POST | `/agenda/extract` | LLM agenda extraction from pasted notes |
+| GET | `/prep/staged` | Preps staged ahead of time (`scripts/stage-prep.sh`), soonest meeting first; the start form fills itself from the first. `{ preps: [], skipped: [{file, reason}] }` — `skipped` names files this build can't read |
 | POST | `/meeting/prep` | Pre-meeting prep: email/past-session/vault context + a web-research agent (subscription CLI) → brief + agenda. Body `{ title?, attendees?, notes?, meeting? }` (`meeting` = a `/calendar/upcoming` entry). Streams NDJSON: `{type:"progress",message}`… then `{type:"result",brief,agenda,sources,mode,stats}` or `{type:"error",message}`. Closing the response cancels the agent |
 | GET | `/present` | The dashboard (HTML) |
 | GET | `/present/actions` / `/present/transcript` / `/present/sessions` | Dashboard data (live or `?session=<id>` replay) |
@@ -86,5 +88,6 @@ Each session stores data at `~/.meeting-copilot/sessions/<uuid>/`:
 | `session.db` | SQLite — session, transcript, action, context_summary tables |
 | `events.jsonl` | Append-only event log |
 | `manifest.json` | Metadata snapshot for external tools (refreshed on late results) |
+| `prep.json` | The prep the session started from: a staged prep (moved here from `~/.meeting-copilot/staged/`) or the Prep button's brief (`origin: "form"`) |
 
 Server settings persist at `~/.meeting-copilot/settings.json` (file > env > defaults).

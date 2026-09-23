@@ -47,9 +47,10 @@ cd app/MeetingCopilot && swift build
 - **Intelligence**: gpt-6-luna triage via the OpenAI API (15s cadence) → Sonnet suggestions on the subscription CLI. Triage falls back to Haiku on the subscription CLI when the API is off (`COPILOT_LIVE_LLM_MODE=cli`) or fails twice. Context compression (the 5-min summaries fed back into triage) runs the same route
 - **Meeting pulse** (`intelligence/pulse.ts`): every 5 min, Opus 5.5 on the subscription CLI reads the whole meeting and updates one card: on track / drifting / stuck, up to 2 things to escalate, and what to settle before the end. A close-out pass runs 5 min before the calendar end (invite-started meetings), on wrap-up language after minute 10, or on the Wrap-up button, and the app raises a notification for it. It shares one CLI lane with the rolling summary (`intelligence/cli-lane.ts`) and always runs cold, since a warm session would carry the previous transcript. Costs no metered spend.
 - **Workers**: Research, Summary, Analysis, Mockup, CodeGen (all implemented)
+- **Staged preps** (`prep/staged.ts`; the `meeting-prep` skill in `skills/meeting-prep/`, linked into `~/.claude/skills/`): Claude prepares a session ahead of time: everything the start form takes plus a research brief, written through `scripts/stage-prep.sh` (the only writer; it checks the input) into `~/.meeting-copilot/staged/`. The form fills itself from the soonest one while untouched, so what is left at meeting time is one click on "Participants informed — Start Session". On Start the file moves into the session as `prep.json` and the brief becomes a pinned context doc (always in the suggestion context block). Works with the app closed
 - **UI**: Web dashboard at `/present` served in WKWebView — CX family design system shared with cxmail/cxtasks/cxnotes (Apple-blue accent in light, red `255 69 58` in dark — held over a dark vault too, see `DARK_ACCENT` in `present/vault-look.ts`; warm charcoal/off-white surfaces, SF system sans with JetBrains Mono reserved for data). Dark default + light toggle via `data-theme` on `<html>`, remembered in `localStorage['mc-theme']`. Full-screen **Stage** presentation mode is always dark.
 - **Storage**: SQLite per session at `~/.meeting-copilot/sessions/<id>/`
-- **Privacy**: No raw audio stored. Consent affirmation checkbox on the start form per session. Visible REC indicator.
+- **Privacy**: No raw audio stored. Consent affirmation per session: the start form's checkbox, or on a form filled from a staged prep, the "Participants informed — Start Session" button itself (a prep never carries consent). Visible REC indicator.
 
 ## Environment
 
@@ -84,6 +85,7 @@ cd server && npm run dev                 # Dev with tsx (hot reload)
 cd app/MeetingCopilot && swift build     # Build Swift app
 ./scripts/build-app.sh                   # Package signed .app → dist/ (does not install)
 ./scripts/ship.sh                        # Test, package, verify, confirm, install + relaunch
+./scripts/stage-prep.sh --list           # Preps waiting to fill the start form (--invites, --gather, <file.json>)
 ./scripts/replay.sh                      # Test with text fixtures
 ./scripts/replay-audio.sh <dir> --speed 4 --auto-approve  # Test with real audio
 open "/Applications/Meeting Copilot.app" # Launch packaged app

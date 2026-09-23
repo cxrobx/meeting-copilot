@@ -34,6 +34,8 @@ export interface ContextDoc {
   content: string;
   firstLine: string;
   sizeChars: number;
+  /** Always first in the context block, ahead of relevance ranking (the prep brief). */
+  pinned?: boolean;
 }
 
 export interface ContextItemInfo {
@@ -172,6 +174,11 @@ function readDocFile(filePath: string, dirPath: string, name: string): ContextDo
   }
 }
 
+/** Whether loadContextFile would read this file (folders are scanned for these). */
+export function isSupportedContextFile(filePath: string): boolean {
+  return SUPPORTED_EXTENSIONS.has(extname(filePath).toLowerCase());
+}
+
 export function loadContextFile(filePath: string): ContextDoc | null {
   if (!existsSync(filePath)) return null;
   if (!SUPPORTED_EXTENSIONS.has(extname(filePath).toLowerCase())) return null;
@@ -302,6 +309,8 @@ export function buildContextBlock(docs: ContextDoc[], relevanceHint?: string): s
   } else {
     ranked = docs; // Already sorted by mtime from scanContextDir
   }
+  // Pinned docs lead regardless of score (sort is stable, so the rest keep theirs).
+  ranked = [...ranked.filter((d) => d.pinned), ...ranked.filter((d) => !d.pinned)];
 
   const blocks: string[] = [];
   let totalChars = 0;

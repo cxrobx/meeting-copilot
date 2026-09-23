@@ -54,6 +54,7 @@ import { isOpenAiApiAvailable } from './api/openai.js';
 import { paidApiDisabled } from './api/killswitch.js';
 import { disposeAllWarmSessions } from './persistent-claude.js';
 import { getSettings } from './settings.js';
+import { attachPrepToSession, prepBriefDoc } from './prep/staged.js';
 import { LLM_CONFIG, MODEL_CONFIG } from './model-config.js';
 
 // Load environment — prefer ~/.meeting-copilot/.env so a packaged .app
@@ -128,6 +129,9 @@ type InboundMessage =
   | { type: 'meeting.goals'; goals: string }
   // The calendar end time of a meeting started from an invite (ISO or ms).
   | { type: 'meeting.schedule'; endsAt: string | number }
+  // The start form's prep, sent once the session is live: a staged prep's id
+  // (prepared ahead, prep/staged.ts) or the Prep button's brief.
+  | { type: 'meeting.prep'; prepId?: string; brief?: string; sources?: unknown }
   // The coach's question buttons and the app's hotkeys: a pulse read now.
   // No kind is the Wrap-up button (the only kind before 2026-09-22).
   | { type: 'pulse.request'; kind?: 'closeout' | 'checkin' | 'missed' }
@@ -1322,6 +1326,21 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       pulse.setEndsAt(endsAt);
       eventLogger?.log('meeting.schedule', { endsAt: new Date(endsAt).toISOString() });
       debugLog(`[Pulse] calendar end ${new Date(endsAt).toISOString()}`);
+      break;
+    }
+
+    case 'meeting.prep': {
+      if (!sessionActive || !sessionStore) break;
+      const attached = attachPrepToSession(message, sessionStore.directory);
+      if (message.prepId && attached?.origin !== 'staged') {
+        console.warn(`[Prep] staged prep ${message.prepId} not found — ${attached ? 'using the brief the form sent' : 'no brief for this session'}`);
+      }
+      if (!attached) break;
+      // First, so the triage manifest lists it before its cap; pinned, so the
+      // suggestion context block always carries it.
+      intelligence.setContextDocs([prepBriefDoc(attached.brief, sessionStore.directory), ...intelligence.getContextDocs()]);
+      eventLogger?.log('meeting.prep', { origin: attached.origin, prepId: attached.prepId, briefChars: attached.brief.length });
+      debugLog(`[Prep] ${attached.origin} brief attached (${attached.brief.length} chars)`);
       break;
     }
 

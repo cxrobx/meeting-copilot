@@ -1765,6 +1765,34 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   .cal-chip-time { color: var(--gb-subtext0); font-size: 11px; white-space: nowrap; }
   .cal-chip-fill { color: var(--gb-green); font-size: 11px; font-weight: 600; white-space: nowrap; }
 
+  /* A prep staged ahead of time (scripts/stage-prep.sh) filled this form */
+  .prep-banner {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    margin: 0 0 10px;
+    padding: 7px 10px;
+    border: 1px solid var(--gb-green);
+    border-radius: 4px;
+    background: var(--gb-surface0);
+    font-size: 11px;
+    color: var(--gb-subtext0);
+  }
+  .prep-banner strong { color: var(--gb-text); font-weight: 600; }
+  .prep-banner-clear {
+    margin-left: auto;
+    padding: 0;
+    border: none;
+    background: none;
+    font: inherit;
+    color: var(--gb-blue);
+    cursor: pointer;
+  }
+  .prep-banner-clear:hover { text-decoration: underline; }
+  .consent-note { margin-top: 8px; font-size: 10px; line-height: 1.4; color: var(--gb-overlay2); text-align: center; }
+  .ctx-from-prep { font-size: 10px; color: var(--gb-green); white-space: nowrap; }
+
   .idle-actions {
     display: flex;
     gap: 10px;
@@ -3236,6 +3264,9 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   // The calendar end of a meeting started from an invite chip; sent after the
   // session is live, the same way the goals are.
   var pendingEndsAt = null;
+  // The start form's prep brief, sent after the session is live the same way:
+  // { prepId, brief } for a staged prep, { brief, sources } for the Prep button's.
+  var pendingPrep = null;
 
   // ─── Coach: pulse, questions, answer card ─────────────────
   // Progressive disclosure. The coach head is one line: the latest pulse
@@ -3608,7 +3639,9 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     if (!prepResult || !prepResult.brief) { host.innerHTML = ''; return; }
     var st = prepResult.stats || {};
     var plural = function(n, w) { return (n || 0) + ' ' + w + (n === 1 ? '' : 's'); };
-    var meta = (prepResult.mode === 'web' ? 'researched' : 'from your records only — web research didn\u2019t finish') +
+    var meta = prepResult.mode === 'staged'
+      ? 'prepared ahead by Claude' + ((prepResult.sources || []).length ? ' \\u00b7 ' + plural(prepResult.sources.length, 'source') : '')
+      : (prepResult.mode === 'web' ? 'researched' : 'from your records only — web research didn\u2019t finish') +
       ' \u00b7 ' + plural(st.emails, 'email') + (st.pastMeetings ? ' \u00b7 ' + plural(st.pastMeetings, 'past meeting') : '') +
       (st.vaultNotes ? ' \u00b7 ' + plural(st.vaultNotes, 'note') : '');
     var sources = (prepResult.sources || []).filter(function(x) {
@@ -3919,6 +3952,13 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   // ─── Context Source Management ─────────────────────────────
   var ctxAddingType = null; // 'file' or 'folder' when input is visible
   var ctxError = ''; // error message to display
+  // Ticked paths, so a form rebuild (WS reconnect, settings save) keeps them.
+  // A staged prep ticks its own; reset when a session starts.
+  var ctxChecked = {};
+  document.addEventListener('change', function(e) {
+    var t = e.target;
+    if (t && t.classList && t.classList.contains('ctx-cb')) ctxChecked[t.value] = t.checked;
+  });
 
   window.refreshContextSources = function() {
     return fetch('/context-sources').then(function(r) { return r.json(); }).then(function(d) {
@@ -4043,14 +4083,29 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     if (!container) return;
 
     var html = '';
-    if (availableContextSources.length > 0) {
+    // A prep's paths that aren't in the saved list: ticked rows for this form
+    // only, never added to the list.
+    var saved = {};
+    availableContextSources.forEach(function(s) { saved[s.path] = true; });
+    var prepOnly = appliedPrep ? appliedPrep.contextPaths.filter(function(p) { return !saved[p]; }) : [];
+    if (availableContextSources.length > 0 || prepOnly.length > 0) {
       html += '<div class="ctx-list">';
+      prepOnly.forEach(function(p) {
+        var isFile = /\\.[a-z0-9]+$/i.test(p);
+        html += '<div class="ctx-item">' +
+          '<input type="checkbox" class="ctx-cb" value="' + escapeAttr(p) + '"' + (ctxChecked[p] ? ' checked' : '') + '>' +
+          '<span class="ctx-icon">' + (isFile ? '\uD83D\uDCC4' : '\uD83D\uDCC1') + '</span>' +
+          '<span class="ctx-name">' + escapeHtml(p.split('/').pop()) + '</span>' +
+          '<span class="ctx-path" title="' + escapeAttr(p) + '">' + escapeHtml(p.replace(/^\\/Users\\/[^\\/]+/, '~')) + '</span>' +
+          '<span class="ctx-from-prep">from prep</span>' +
+        '</div>';
+      });
       availableContextSources.forEach(function(s) {
         var icon = s.type === 'folder' ? '\uD83D\uDCC1' : '\uD83D\uDCC4';
         var name = s.label || s.path.split('/').pop();
         var shortPath = s.path.replace(/^\\/Users\\/[^\\/]+/, '~');
         html += '<div class="ctx-item">' +
-          '<input type="checkbox" class="ctx-cb" value="' + escapeHtml(s.path) + '">' +
+          '<input type="checkbox" class="ctx-cb" value="' + escapeHtml(s.path) + '"' + (ctxChecked[s.path] ? ' checked' : '') + '>' +
           '<span class="ctx-icon">' + icon + '</span>' +
           '<span class="ctx-name">' + escapeHtml(name) + '</span>' +
           '<span class="ctx-path" title="' + escapeHtml(s.path) + '">' + escapeHtml(shortPath) + '</span>' +
@@ -4586,11 +4641,31 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   function renderCalendarChips() {
     var host = document.getElementById('calChips');
     if (!host) return;
-    if (!upcomingMeetings.length) { host.innerHTML = ''; return; }
+    // Prepped meetings first; an invite with a prep shows only as the prep.
+    var preps = stagedPreps.slice(0, 3);
+    var covered = {};
+    preps.forEach(function(p) { if (p.eventUid) covered[p.eventUid] = true; });
+    var inviteIdx = [];
+    for (var j = 0; j < upcomingMeetings.length && inviteIdx.length < 3; j++) {
+      if (!upcomingMeetings[j].eventUid || !covered[upcomingMeetings[j].eventUid]) inviteIdx.push(j);
+    }
+    if (!preps.length && !inviteIdx.length) { host.innerHTML = ''; return; }
 
-    var html = '<div class="cal-chips"><span class="cal-chips-label">Upcoming on your calendar</span>';
-    var count = Math.min(upcomingMeetings.length, 3);
-    for (var i = 0; i < count; i++) {
+    var html = '<div class="cal-chips"><span class="cal-chips-label">' +
+      (preps.length ? 'Upcoming' : 'Upcoming on your calendar') + '</span>';
+    preps.forEach(function(p) {
+      var isApplied = appliedPrep !== null && appliedPrep.id === p.id;
+      var isSoon = p.startsAt && Date.parse(p.startsAt) - Date.now() < 10 * 60 * 1000;
+      html += '<button type="button" class="cal-chip prepped' + (isSoon ? ' soon' : '') + (isApplied ? ' applied' : '') +
+        '" data-prep-apply="' + escapeAttr(p.id) + '">' +
+        '<span aria-hidden="true">\\uD83D\\uDCCB</span>' +
+        '<span class="cal-chip-title">' + escapeHtml(p.title) + '</span>' +
+        '<span class="cal-chip-time">' + escapeHtml(prepWhen(p)) + '</span>' +
+        '<span class="cal-chip-fill">' + (isApplied ? 'Filled' : 'Prepped') + '</span>' +
+      '</button>';
+    });
+    for (var k = 0; k < inviteIdx.length; k++) {
+      var i = inviteIdx[k];
       var m = upcomingMeetings[i];
       var startMs = Date.parse(m.startsAt);
       // "soon" = starts within 10 min (or already started, within lookback)
@@ -4611,6 +4686,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   window.applyCalendarMeeting = function(i) {
     var m = upcomingMeetings[i];
     if (!m) return;
+    dropAppliedPrep(); // a different meeting: the prep's goals/projects/context aren't its
 
     if (appliedMeeting !== m) {
       prepResult = null; // a brief about someone else's meeting
@@ -4639,6 +4715,190 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     showToast('Prefilled from \\u201C' + m.title + '\\u201D \\u2014 Prep this meeting to research it');
   };
 
+  // ─── Staged preps (prepared ahead by Claude) ──────────────
+  // scripts/stage-prep.sh (the meeting-prep skill) leaves a finished session in
+  // ~/.meeting-copilot/staged/; GET /prep/staged lists them, soonest first. The
+  // form fills itself from the first one while it is untouched, so all that is
+  // left at meeting time is Start. The rest wait as chips.
+  var stagedPreps = [];
+  var appliedPrep = null;
+  var dismissedPrepIds = {}; // Cleared on this page: never auto-filled again
+
+  function prepWhen(prep) {
+    return prep.startsAt ? formatMeetingTime(prep.startsAt) : 'no time set';
+  }
+
+  // Nothing the user typed or picked would be overwritten.
+  function formIsPristine() {
+    function val(id) { var el = document.getElementById(id); return el ? el.value.trim() : ''; }
+    if (appliedPrep || appliedMeeting || prepResult || goalsTouched) return false;
+    if (val('startTitle') || val('startAttendees')) return false;
+    if (agendaState.kind !== 'raw' || currentTextareaValue().trim()) return false;
+    return selectedProjects.length === 0;
+  }
+
+  function refreshStagedPreps(autoFill) {
+    if (isReplay || !document.getElementById('startTitle')) return;
+    fetch('/prep/staged').then(function(r) { return r.json(); }).then(function(data) {
+      if (!document.getElementById('startTitle')) return; // a session started meanwhile
+      stagedPreps = (data && data.preps) || [];
+      if (appliedPrep) {
+        // Staged again (the skill redid it): the newer prep wins.
+        var fresh = stagedPreps.filter(function(p) { return p.id === appliedPrep.id; })[0];
+        if (fresh && fresh.createdAt !== appliedPrep.createdAt) {
+          applyStagedPrep(fresh);
+          showToast('Claude updated the prep for \\u201C' + fresh.title + '\\u201D');
+          return;
+        }
+      } else if (autoFill && formIsPristine()) {
+        var next = stagedPreps.filter(function(p) { return !dismissedPrepIds[p.id]; })[0];
+        if (next) { applyStagedPrep(next); return; }
+      }
+      renderCalendarChips();
+    }).catch(function() { /* the form works without it */ });
+  }
+
+  function applyStagedPrep(prep) {
+    // An agenda extraction or Prep run in flight would land on top of this.
+    if (agendaAbortController) {
+      try { agendaAbortController.abort(); } catch (e) {}
+    }
+    agendaExtractGen++;
+    appliedPrep = prep;
+
+    // The invite, when cxmail has it; otherwise the same shape from the prep.
+    // pendingEndsAt reads its end, and a re-prep reads its attendee emails.
+    var invite = null;
+    for (var i = 0; i < upcomingMeetings.length; i++) {
+      if (prep.eventUid && upcomingMeetings[i].eventUid === prep.eventUid) { invite = upcomingMeetings[i]; break; }
+    }
+    appliedMeeting = invite || {
+      eventUid: prep.eventUid, title: prep.title, description: '', location: null, meetLink: null,
+      startsAt: prep.startsAt, endsAt: prep.endsAt, organizerName: null, organizerEmail: null,
+      attendees: prep.attendees.filter(function(a) { return a.email; }), accounts: [],
+    };
+    appliedMeetingUid = prep.eventUid || null;
+
+    var title = document.getElementById('startTitle');
+    if (title) title.value = prep.title;
+    var attendees = document.getElementById('startAttendees');
+    if (attendees) attendees.value = prep.attendees.map(function(a) { return a.name; }).join(', ');
+    var goals = document.getElementById('startGoals');
+    if (goals && prep.goals) {
+      goals.value = prep.goals;
+      goals.rows = Math.min(7, Math.max(2, prep.goals.split('\\n').length * 2));
+      var hint = document.getElementById('startGoalsHint');
+      if (hint) hint.textContent = 'From the prep. Edit or clear.';
+    }
+    agendaRawSnapshot = '';
+    setAgendaState({ kind: 'extracted', items: prep.agenda.slice() });
+    prepResult = prep.brief ? { brief: prep.brief, sources: prep.sources, mode: 'staged', stats: {} } : null;
+    renderPrepBrief();
+    selectedProjects = prep.projects.slice();
+    renderProjectPicker();
+    ctxChecked = {};
+    prep.contextPaths.forEach(function(p) { ctxChecked[p] = true; });
+    renderContextList();
+    renderPrepBanner();
+    renderStartActions();
+    renderCalendarChips();
+  }
+
+  // Forget the applied prep's own fields: goals, projects, context, the banner
+  // and the one-click Start. Title, attendees and agenda are the caller's.
+  function dropAppliedPrep() {
+    if (!appliedPrep) return;
+    var goals = document.getElementById('startGoals');
+    if (goals && appliedPrep.goals && goals.value === appliedPrep.goals) {
+      goals.value = '';
+      var hint = document.getElementById('startGoalsHint');
+      if (hint) hint.textContent = '';
+    }
+    appliedPrep = null;
+    selectedProjects = [];
+    ctxChecked = {};
+    renderProjectPicker();
+    renderContextList();
+    renderPrepBanner();
+    renderStartActions();
+  }
+
+  // The banner's Clear: back to an empty form. The prep stays as a chip.
+  function clearAppliedPrep() {
+    if (!appliedPrep) return;
+    dismissedPrepIds[appliedPrep.id] = true;
+    dropAppliedPrep();
+    ['startTitle', 'startAttendees', 'startGoals'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+    appliedMeeting = null;
+    appliedMeetingUid = null;
+    prepResult = null;
+    renderPrepBrief();
+    agendaRawSnapshot = '';
+    setAgendaState({ kind: 'raw' });
+    goalsTouched = false;
+    prefillStandingGoals();
+    renderCalendarChips();
+  }
+
+  function renderPrepBanner() {
+    var host = document.getElementById('prepBanner');
+    if (!host) return;
+    if (!appliedPrep) { host.innerHTML = ''; return; }
+    var made = new Date(appliedPrep.createdAt);
+    var clock = made.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    var madeText = made.toDateString() === new Date().toDateString()
+      ? clock : made.toLocaleDateString([], { weekday: 'short' }) + ' ' + clock;
+    host.innerHTML = '<div class="prep-banner">' +
+      '<span><strong>Prepped by Claude</strong> \\u00b7 ' + escapeHtml(madeText) + '</span>' +
+      (appliedPrep.startsAt ? '<span>for ' + escapeHtml(formatMeetingTime(appliedPrep.startsAt)) + '</span>' : '') +
+      '<button type="button" class="prep-banner-clear" data-prep-clear="1">Clear</button>' +
+    '</div>';
+  }
+
+  // Consent affirmation, per session (CLAUDE.md, Privacy). A fresh form has
+  // the checkbox, and Start stays disabled until it is ticked. A prepped form
+  // folds it into the button: pressing "Participants informed — Start Session"
+  // is the affirmation, so a prepped meeting starts in one click.
+  function renderStartActions() {
+    var host = document.getElementById('startActions');
+    if (!host) return;
+    if (appliedPrep) {
+      host.innerHTML = '<div class="idle-actions">' +
+          '<button class="btn btn-green" id="startBtn" onclick="startSession(true)" disabled>' +
+            'Participants informed \\u2014 Start Session</button>' +
+        '</div>' +
+        '<div class="consent-note">Pressing Start confirms you\\u2019ve told participants this meeting uses an AI copilot.</div>';
+    } else {
+      host.innerHTML = '<label class="consent-row"><input type="checkbox" id="consentCheck" onchange="refreshStartButton()"> ' +
+          'I\\u2019ve informed participants this meeting uses an AI copilot</label>' +
+        '<div class="idle-actions">' +
+          '<button class="btn btn-green" id="startBtn" onclick="startSession()" disabled>Start Session</button>' +
+        '</div>';
+    }
+    refreshStartButton();
+  }
+
+  document.addEventListener('click', function(e) {
+    var el = e.target && e.target.closest ? e.target.closest('[data-prep-apply],[data-prep-clear]') : null;
+    if (!el) return;
+    if (el.hasAttribute('data-prep-clear')) { clearAppliedPrep(); return; }
+    var id = el.getAttribute('data-prep-apply');
+    if (appliedPrep && appliedPrep.id === id) return;
+    var prep = stagedPreps.filter(function(p) { return p.id === id; })[0];
+    if (prep) applyStagedPrep(prep);
+  });
+
+  // A prep staged while the form is open fills it on the next focus, or
+  // within 30 s (the panel doesn't always get a focus event).
+  window.addEventListener('focus', function() { refreshStagedPreps(true); });
+  document.addEventListener('visibilitychange', function() {
+    if (!document.hidden) refreshStagedPreps(true);
+  });
+  setInterval(function() { refreshStagedPreps(true); }, 30000);
+
   // ─── Menu bar commands ────────────────────────────────────
   // The native menu bar popover drives the dashboard through this one entry
   // point (SessionManager.runDashboardCommand). start / invite / history need
@@ -4654,6 +4914,18 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   }
 
   function applyCalendarMeetingByUid(uid) {
+    // A prep for that invite wins over re-extracting the invite. Fetched fresh:
+    // this runs right after a load, before refreshStagedPreps may have landed.
+    fetch('/prep/staged').then(function(r) { return r.json(); }).catch(function() { return null; }).then(function(data) {
+      if (data && data.preps) stagedPreps = data.preps;
+      for (var s = 0; s < stagedPreps.length; s++) {
+        if (stagedPreps[s].eventUid && stagedPreps[s].eventUid === uid) { applyStagedPrep(stagedPreps[s]); return; }
+      }
+      applyInviteByUid(uid);
+    });
+  }
+
+  function applyInviteByUid(uid) {
     function pick() {
       for (var i = 0; i < upcomingMeetings.length; i++) {
         if ((upcomingMeetings[i].eventUid || upcomingMeetings[i].title) === uid) {
@@ -4793,6 +5065,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       '<p>Start a session to begin capturing and analyzing your meeting.</p>' +
       '<div id="calChips"></div>' +
       '<div class="idle-form">' +
+        '<div id="prepBanner"></div>' +
         '<label>Title</label><input id="startTitle" placeholder="Weekly sync, 1:1, etc.">' +
         '<label>Agenda <span style="font-weight:400;text-transform:none;letter-spacing:0">(tracked live)</span></label>' +
         '<div id="agendaEditor"></div>' +
@@ -4804,13 +5077,8 @@ export const PRESENT_HTML = `<!DOCTYPE html>
         projectsHtml +
         contextHtml +
       '</div>' +
-      // Consent affirmation (architecture invariant #3: consent per session).
-      // Resets with every fresh form; Start stays disabled until checked.
-      '<label class="consent-row"><input type="checkbox" id="consentCheck" onchange="refreshStartButton()"> ' +
-        'I\\u2019ve informed participants this meeting uses an AI copilot</label>' +
-      '<div class="idle-actions">' +
-        '<button class="btn btn-green" id="startBtn" onclick="startSession()" disabled>Start Session</button>' +
-      '</div>' +
+      // Consent affirmation and Start: renderStartActions().
+      '<div id="startActions"></div>' +
       statusMsg +
       '<span class="sessions-link" onclick="showSessionHistory()">View Past Sessions</span>' +
     '</div></div>';
@@ -4820,9 +5088,12 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     renderAgendaEditor();
     renderPrepBrief();
     renderProjectPicker();
+    renderPrepBanner();
+    renderStartActions();
     refreshCalendarChips();
     prefillStandingGoals();
     restoreIdleForm(savedForm);
+    refreshStagedPreps(true);
   }
 
   // Workers only: things to make. The coach's questions, the wrap-up check,
@@ -4963,16 +5234,20 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     }
   };
 
-  window.startSession = function() {
+  window.startSession = function(affirmed) {
     // Block start while an extraction is in flight — Start Session must not
     // race against an about-to-settle extract.
     if (agendaState.kind === 'extracting') return;
 
-    // Consent affirmation is required per session (invariant #3). The button
-    // should already be disabled, but guard the programmatic path too.
+    // Consent affirmation is required per session: the checkbox, or on a
+    // prepped form the "Participants informed — Start Session" button itself,
+    // which passes affirmed=true. The button should already be disabled, but
+    // guard the programmatic paths (the header Start) too.
     var consentEl = document.getElementById('consentCheck');
-    if (consentEl && !consentEl.checked) {
-      showToast('Confirm the consent checkbox to start the session.', { error: true });
+    var consentOk = consentEl ? consentEl.checked : (appliedPrep ? affirmed === true : true);
+    if (!consentOk) {
+      showToast(consentEl ? 'Confirm the consent checkbox to start the session.'
+        : 'Press \\u201CParticipants informed \\u2014 Start Session\\u201D to start.', { error: true });
       return;
     }
 
@@ -4985,9 +5260,23 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     // A meeting started from an invite knows when it ends: the pulse runs its
     // close-out pass five minutes before.
     pendingEndsAt = appliedMeeting && appliedMeeting.endsAt ? appliedMeeting.endsAt : null;
+    // The brief reaches the copilot once the session is live (meeting.prep).
+    // A staged prep goes by id, so the server moves its file into the session;
+    // the brief on screen rides along (a re-prep on the form replaces it).
+    var shownBrief = prepResult && prepResult.brief ? prepResult.brief : '';
+    pendingPrep = appliedPrep || shownBrief ? {
+      prepId: appliedPrep ? appliedPrep.id : undefined,
+      brief: shownBrief || undefined,
+      sources: prepResult && prepResult.sources ? prepResult.sources : undefined,
+    } : null;
+    if (appliedPrep) {
+      var startedPrepId = appliedPrep.id;
+      stagedPreps = stagedPreps.filter(function(p) { return p.id !== startedPrepId; });
+    }
     // The brief belongs to this form; don't let it reappear on the next one.
     prepResult = null;
     appliedMeeting = null;
+    appliedPrep = null;
 
     // Projects come straight from the picker's state (selectedProjects, kept by
     // addProject/removeProject) rather than being scraped back out of the DOM.
@@ -4997,6 +5286,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     document.querySelectorAll('.ctx-cb:checked').forEach(function(cb) {
       selectedContextPaths.push(cb.value);
     });
+    ctxChecked = {};
 
     if (hasNativeBridge()) {
       window.__copilotNativeBridge.startSession({
@@ -5005,7 +5295,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
         attendees: attendees,
         projectNames: selectedProjects,
         contextPaths: selectedContextPaths,
-        consent: consentEl ? consentEl.checked : true,
+        consent: consentOk,
       });
       return;
     }
@@ -7652,6 +7942,10 @@ export const PRESENT_HTML = `<!DOCTYPE html>
             if (pendingEndsAt) {
               wsSend({ type: 'meeting.schedule', endsAt: pendingEndsAt });
               pendingEndsAt = null;
+            }
+            if (pendingPrep) {
+              wsSend(Object.assign({ type: 'meeting.prep' }, pendingPrep));
+              pendingPrep = null;
             }
           } else if (msg.state === 'archived') {
             // Session just ended — keep transcript visible so the user can
