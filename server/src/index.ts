@@ -793,7 +793,9 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       // While the live stream covers this source, hold the chunk (replayed
       // locally only if the stream fails) instead of transcribing it twice.
       const endMs = (message.captureEndedAt && Date.parse(message.captureEndedAt)) || Date.now();
-      if (streaming?.claimChunk(message.source, endMs, { wavBuffer, source: message.source, meta })) {
+      const startMs = (message.captureStartedAt && Date.parse(message.captureStartedAt))
+        || endMs - (message.audioDurationSec ?? 0) * 1000;
+      if (streaming?.claimChunk(message.source, startMs, endMs, { wavBuffer, source: message.source, meta })) {
         break;
       }
       await transcribeChunk(wavBuffer, message.source, meta, message.isContinuation ?? true);

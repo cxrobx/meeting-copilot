@@ -167,7 +167,12 @@ export function resolveTranscription(): TranscriptionPlan {
     console.log(`[Transcription] Streaming grok live, with ${localMode} covering any outage.`);
     return {
       provider: local,
-      streaming: new StreamingTranscriber<StreamChunk>({ apiKey, model: process.env.GROK_STT_MODEL }),
+      streaming: new StreamingTranscriber<StreamChunk>({
+        apiKey,
+        model: process.env.GROK_STT_MODEL,
+        // Noise gate: only speech is sent (and billed). COPILOT_STT_GATE=0 sends everything.
+        gate: process.env.COPILOT_STT_GATE === '0' ? false : {},
+      }),
     };
   }
   const primary = cloud === 'grok' ? new GrokProvider() : new DeepgramProvider();

@@ -20,10 +20,11 @@ class FakeSocket extends EventEmitter {
   }
 }
 
-function setup(now = { t: 1_000_000 }) {
+function setup(now = { t: 1_000_000 }, gate: false | object = false) {
   const sockets: FakeSocket[] = [];
   const st = new StreamingTranscriber<string>({
     apiKey: 'k',
+    gate: gate as false,
     now: () => now.t,
     backoffMs: [10_000],
     socketFactory: (url) => {
@@ -90,6 +91,21 @@ describe('StreamingTranscriber', () => {
     expect(events.map((e) => e.segment.text)).toContain('First part and more');
   });
 
+  it('a restated utterance with shifted punctuation replaces the locked text instead of doubling it', () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { st, sockets, events } = setup();
+    st.start('');
+    const m = sockets[1]!;
+    m.server({ type: 'transcript.created' });
+    // Real Grok sequence from the 2026-09-21 replay: the final restates the line with a comma moved.
+    m.partial('she had a lot of great things to say about like, it seems like you built something', { final: true });
+    m.partial('she had a lot of great things to say about, like, it seems like you built something cool.', { final: true, speech: true });
+    expect(events.at(-1)).toMatchObject({
+      final: true,
+      segment: { text: 'she had a lot of great things to say about, like, it seems like you built something cool.' },
+    });
+  });
+
   it('a long line closed on a locked chunk is not reopened by the speech_final repeat', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const { st, sockets, events } = setup();
@@ -106,6 +122,22 @@ describe('StreamingTranscriber', () => {
     expect(events.at(-1)!.segment.text).toBe('A new sentence');
   });
 
+  it('after the word cap closes a line, the rest of the utterance continues without repeating it', () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { st, sockets, events } = setup();
+    st.start('');
+    const m = sockets[0]!;
+    m.server({ type: 'transcript.created' });
+    st.pushFrame('mic', Buffer.alloc(3200)); // starts the audio timeline
+    const first = `${'one '.repeat(84)}end.`; // 85 words, closes at the cap
+    m.partial(first, { final: true, start: 0, duration: 30 });
+    // Real Grok: later events restate the whole utterance (formatting may shift).
+    m.partial(`${first.replace('end.', 'end,')} and then more words`, { start: 0, duration: 33 });
+    m.partial(`${first} And then more words.`, { final: true, speech: true, start: 0, duration: 34 });
+    const finals = events.filter((e) => e.final).map((e) => e.segment.text);
+    expect(finals).toEqual([first, 'And then more words.']);
+  });
+
   it('holds chunks while healthy and releases only what the stream did not cover when it fails', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -114,13 +146,11 @@ describe('StreamingTranscriber', () => {
     const meeting = sockets[1]!;
     meeting.server({ type: 'transcript.created' });
     const t0 = now.t;
-    st.pushFrame('meeting', Buffer.alloc(3200)); // audio offset 0 = t0
+    for (let i = 0; i < 60; i++) { st.pushFrame('meeting', Buffer.alloc(3200), t0 + i * 100); now.t = t0 + (i + 1) * 100; }
 
-    expect(st.claimChunk('meeting', t0 + 2_000, 'chunk-A')).toBe(true);
+    expect(st.claimChunk('meeting', t0, t0 + 2_000, 'chunk-A')).toBe(true);
     meeting.partial('covered words', { start: 0, duration: 3 }); // covers through t0 + 3 s
-    now.t += 1_000;
-    st.pushFrame('meeting', Buffer.alloc(3200));
-    expect(st.claimChunk('meeting', t0 + 6_000, 'chunk-B')).toBe(true);
+    expect(st.claimChunk('meeting', t0 + 2_000, t0 + 5_500, 'chunk-B')).toBe(true);
 
     meeting.emit('error', new Error('socket reset'));
 
@@ -128,8 +158,8 @@ describe('StreamingTranscriber', () => {
     expect(replays).toEqual([{ source: 'meeting', chunks: ['chunk-B'] }]);
     // While down: a chunk the stream already covered is dropped, a new one is not.
     expect(st.isHealthy('meeting')).toBe(false);
-    expect(st.claimChunk('meeting', t0 + 2_500, 'old')).toBe(true);
-    expect(st.claimChunk('meeting', t0 + 9_000, 'new')).toBe(false);
+    expect(st.claimChunk('meeting', t0 + 1_000, t0 + 2_500, 'old')).toBe(true);
+    expect(st.claimChunk('meeting', t0 + 6_000, t0 + 9_000, 'new')).toBe(false);
   });
 
   it('is not healthy until the app actually sends frames (older app builds)', () => {
@@ -138,7 +168,7 @@ describe('StreamingTranscriber', () => {
     st.start('');
     sockets[0]!.server({ type: 'transcript.created' });
     expect(st.isHealthy('mic')).toBe(false);
-    expect(st.claimChunk('mic', Date.now(), 'c')).toBe(false);
+    expect(st.claimChunk('mic', Date.now() - 1_000, Date.now(), 'c')).toBe(false);
   });
 
   it('reconnects after a failure and finalizes open lines on stop', async () => {

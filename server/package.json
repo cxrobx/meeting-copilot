@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "eval:audio": "tsx src/evals/real-audio-transcription.ts",
+    "eval:gate": "tsx src/evals/gate-replay.ts",
     "eval:coach": "tsx src/evals/recovery-coach-benchmark.ts",
     "eval:agenda": "tsx src/evals/agenda-reconcile-replay.ts",
     "eval:research": "tsx src/evals/fast-research-benchmark.ts",

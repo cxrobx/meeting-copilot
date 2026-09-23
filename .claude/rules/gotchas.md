@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 25 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 26 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -31,6 +31,7 @@ Organized by category. 25 items + recovery playbook, condensed format. Original 
 | 23 | Swift's `.iso8601` rejects the server's milliseconds — messages silently dropped | Frontend |
 | 24 | Dashboard JS is one scope — a second `var` silently replaces the first | Frontend |
 | 25 | The title bar doesn't drag the panel — the page does (`data-drag-region`) | Frontend |
+| 26 | Grok's stream restates the whole utterance — lines double unless compared by words | External APIs |
 | — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
@@ -197,6 +198,13 @@ this default.
 **Solution** (applied 2026-09-22): all live-path parsers go through `intelligence/first-json.ts`: each complete top-level object in order (string/escape-aware), the first that parses **and** passes the caller's shape check, with the old slice as the last resort. Never hand-roll `indexOf('{')`/`lastIndexOf('}')` for model output again.
 **Check**: `__tests__/first-json.test.ts` carries every real tail shape. `npm run eval:agenda` reports `schema` per model; a model swap that drops it below the baseline fails the gate.
 **Pattern**: `server/src/intelligence/first-json.ts`; callers in `agenda.ts`, `coach.ts`, `index.ts` (triage), `factcheck.ts`.
+
+### 26. Grok's Stream Restates the Whole Utterance — Lines Double Unless Compared by Words
+**Symptom**: A long answer appears twice in one transcript line, or a second line repeats the first before continuing.
+**Cause**: Grok's streaming events are cumulative: each partial, and the final `speech_final` event, carries the utterance from its start, and formatting shifts between them ("about like," → "about, like,"). Two places appended instead of replacing: an exact `startsWith(locked)` test missed the reworded repeat, and the 80-word cap closed a line while Grok's utterance went on, so the next event restated the closed text. Found by `npm run eval:gate` on the 2026-09-21 recording, where it cut apparent recall to 71%.
+**Solution** (applied 2026-09-23): `streaming.ts` compares by words (`restatesLocked`, ≥80% of the locked words in place). A restating final replaces the locked text; a restating partial is shown alone; text of cap-closed lines is `carried` and stripped (`dropLeadingWords`) from the rest of that utterance.
+**Check**: `__tests__/transcription-streaming.test.ts` replays both real shapes. `npm run eval:gate -- <recording> --noise` compares against a second ungated run; a duplication regression shows as ungated-vs-ungated recall collapsing.
+**Pattern**: `server/src/transcription/streaming.ts` (`onPartial`).
 
 ## Frontend (dashboard)
 

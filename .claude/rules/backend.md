@@ -64,6 +64,7 @@ cd server && npm start        # Run compiled dist/index.js
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
 | `XAI_API_KEY` | No | - | Grok cloud transcription — the default when `COPILOT_ALLOW_CLOUD_AUDIO=true` (metered) |
+| `COPILOT_STT_GATE` | No | on | `0` sends every frame; otherwise a noise gate (`transcription/gate.ts`: 500 ms look-ahead, 1.5 s hold, `finalize` on close) sends only speech. Check changes with `npm run eval:gate` |
 | `COPILOT_GROK_STREAMING` | No | on | `0` = per-chunk batch Grok instead of the live stream ($0.20/hr per stream; mic + meeting = two) |
 | `COPILOT_CLOUD_TRANSCRIPTION` | No | `grok` | `grok` \| `deepgram` \| `off` — cloud STT in front of the local backend |
 | `DEEPGRAM_API_KEY` | No | - | Deepgram cloud transcription (metered) |

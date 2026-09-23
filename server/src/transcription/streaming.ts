@@ -19,6 +19,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { GrokStream, keytermsFromPrompt, streamUrl, type GrokStreamEvent, type SocketFactory } from './grok-stream.js';
 import type { TranscriptSegment, TranscriptionProviderInfo } from './types.js';
+import { NoiseGate, type GateFrame, type GateOptions } from './gate.js';
 
 type Source = 'mic' | 'meeting';
 const SOURCES: Source[] = ['mic', 'meeting'];
@@ -29,6 +30,11 @@ const DEFAULT_REPLAY_WINDOW_MS = 20_000;
 const DEFAULT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 /** Close a long monologue at a locked sentence end, so one line doesn't grow forever. */
 const MAX_OPEN_WORDS = 80;
+/** Frames waiting for a (re)connecting stream: 10 s, oldest dropped past that. */
+const MAX_PENDING_FRAMES = 100;
+/** Slack when checking that the gate sent a chunk's whole time span. */
+const SENT_TOLERANCE_MS = 250;
+const BYTES_PER_SEC = 32_000; // 16 kHz mono PCM16
 
 export interface StreamingOptions {
   apiKey: string;
@@ -37,12 +43,16 @@ export interface StreamingOptions {
   now?: () => number;
   backoffMs?: number[];
   replayWindowMs?: number;
+  /** Noise gate settings, or false to send every frame (COPILOT_STT_GATE=0). */
+  gate?: GateOptions | false;
 }
 
 interface Utterance {
   id: string;
   locked: string;
   current: string;
+  /** `current` restates the locked text, so it is the whole line on its own. */
+  currentIsFull: boolean;
   firstSeenAt: number;
   audioStart: number | null; // wall ms
   audioEnd: number | null; // wall ms
@@ -61,15 +71,71 @@ interface SourceState<T> {
   coveredUntil: number;
   /** Audio end of the last closed line; events that end by then repeat it. */
   closedThrough: number;
+  /**
+   * Text of lines closed early (word cap) while Grok's utterance goes on. Grok
+   * keeps restating the utterance from its start, so this prefix is stripped
+   * from its later events until the utterance really ends (speech_final).
+   */
+  carried: string;
   held: HeldChunk<T>[];
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   failures: number;
+  gate: NoiseGate | null;
+  /** Gated frames waiting for the stream to become ready, sent in order then. */
+  pending: GateFrame[];
+  pendingFinalize: boolean;
+  /**
+   * Grok's timestamps count only audio it received, so gated gaps vanish from
+   * its timeline. Each run of contiguous frames starts a segment mapping
+   * "seconds sent on this connection" back to wall-clock time.
+   */
+  timeline: Array<{ offset: number; wall: number }>;
+  sentSec: number;
+  /** All seconds sent this session, across reconnects. */
+  billedSec: number;
+  lastSentEnd: number | null;
+  /** Wall-clock ranges actually sent to a ready stream (merged). */
+  sentRanges: Array<[number, number]>;
 }
 
 function joinText(left: string, right: string): string {
   if (!left) return right;
   if (!right) return left;
   return /^[,.;:!?)\]]/.test(right) ? left + right : `${left} ${right}`;
+}
+
+const normWords = (t: string) => t.toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean);
+
+/**
+ * Grok's later events repeat the whole utterance, but its formatting can shift
+ * between them ("about like," → "about, like,"), so an exact prefix test misses
+ * the repeat and the line doubles. Compare words instead: when `text` restates
+ * `locked`, it is the fresher full utterance and replaces it.
+ */
+/** Drop the first `n` normalized words from `text`, keeping its original formatting. */
+export function dropLeadingWords(text: string, n: number): string {
+  if (n <= 0) return text;
+  const tokens = text.split(/\s+/).filter(Boolean);
+  let seen = 0;
+  let i = 0;
+  while (i < tokens.length && seen < n) {
+    seen += normWords(tokens[i]!).length;
+    i++;
+  }
+  return tokens.slice(i).join(' ').replace(/^[,.;:!?]+\s*/, '');
+}
+
+export function restatesLocked(locked: string, text: string): boolean {
+  const l = normWords(locked);
+  const t = normWords(text);
+  if (l.length === 0 || t.length < l.length) return false;
+  let same = 0;
+  for (let i = 0; i < l.length; i++) if (l[i] === t[i]) same++;
+  return same / l.length >= 0.8;
+}
+
+function lineText(u: { locked: string; current: string; currentIsFull: boolean }): string {
+  return u.currentIsFull ? u.current : joinText(u.locked, u.current);
 }
 
 function wordCount(text: string): number {
@@ -127,6 +193,8 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
       const state = this.state(source);
       state.stream = null;
       state.held = [];
+      state.pending = [];
+      state.gate?.reset();
     }
   }
 
@@ -137,12 +205,82 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
       && this.now() - state.lastFrameAt <= FRAME_STALE_MS;
   }
 
-  /** Forward one PCM16 frame. */
-  pushFrame(source: Source, pcm: Buffer): void {
+  /**
+   * One PCM16 frame from the app. It goes through the noise gate; what the gate
+   * lets out is sent (or queued while the stream connects). `at` is when the
+   * frame's audio began; it defaults to one frame before arrival.
+   */
+  pushFrame(source: Source, pcm: Buffer, at?: number): void {
     if (!this.active) return;
     const state = this.state(source);
-    state.lastFrameAt = this.now();
-    state.stream?.sendFrame(pcm);
+    const now = this.now();
+    state.lastFrameAt = now;
+    const frame: GateFrame = { pcm, at: at ?? now - (pcm.length / BYTES_PER_SEC) * 1000 };
+    const result = state.gate ? state.gate.process(frame) : { send: [frame], closed: false };
+    for (const f of result.send) this.enqueue(source, f);
+    if (result.closed) {
+      if (state.stream?.ready && state.pending.length === 0) state.stream.finalize();
+      else state.pendingFinalize = true;
+    }
+  }
+
+  /** Seconds of audio actually sent to Grok (what xAI bills), per source. */
+  get sentSeconds(): Record<Source, number> {
+    return { mic: this.state('mic').billedSec, meeting: this.state('meeting').billedSec } as Record<Source, number>;
+  }
+
+  private enqueue(source: Source, frame: GateFrame): void {
+    const state = this.state(source);
+    if (state.stream?.ready && state.pending.length === 0) {
+      this.sendNow(source, frame);
+      return;
+    }
+    state.pending.push(frame);
+    if (state.pending.length > MAX_PENDING_FRAMES) state.pending.shift();
+    // Speech while the stream is down between retries: reconnect now rather
+    // than wait out the backoff. The queued frames go out once it is ready.
+    if (!state.stream) {
+      if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = null;
+      this.connect(source);
+    }
+  }
+
+  private sendNow(source: Source, frame: GateFrame): void {
+    const state = this.state(source);
+    if (!state.stream?.sendFrame(frame.pcm)) return;
+    const durMs = (frame.pcm.length / BYTES_PER_SEC) * 1000;
+    if (state.lastSentEnd === null || Math.abs(frame.at - state.lastSentEnd) > 50) {
+      state.timeline.push({ offset: state.sentSec, wall: frame.at });
+    }
+    state.sentSec += durMs / 1000;
+    state.billedSec += durMs / 1000;
+    state.lastSentEnd = frame.at + durMs;
+    const last = state.sentRanges.at(-1);
+    if (last && frame.at - last[1] <= 50) last[1] = frame.at + durMs;
+    else state.sentRanges.push([frame.at, frame.at + durMs]);
+  }
+
+  private flushPending(source: Source): void {
+    const state = this.state(source);
+    const queued = state.pending;
+    state.pending = [];
+    for (const f of queued) this.sendNow(source, f);
+    if (state.pendingFinalize) {
+      state.pendingFinalize = false;
+      state.stream?.finalize();
+    }
+  }
+
+  /** Map a Grok offset (seconds sent on this connection) to wall-clock ms. */
+  private wallAt(state: SourceState<TChunk>, offsetSec: number): number {
+    let seg = state.timeline[0];
+    if (!seg) return this.now();
+    for (const s of state.timeline) {
+      if (s.offset <= offsetSec + 1e-6) seg = s;
+      else break;
+    }
+    return seg.wall + (offsetSec - seg.offset) * 1000;
   }
 
   /**
@@ -150,21 +288,31 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
    * the stream covers it (the chunk is held for replay); false means transcribe
    * it locally now.
    */
-  claimChunk(source: Source, captureEndedAtMs: number, chunk: TChunk): boolean {
+  claimChunk(source: Source, captureStartedAtMs: number, captureEndedAtMs: number, chunk: TChunk): boolean {
     const state = this.state(source);
-    if (!this.isHealthy(source)) {
-      // Unhealthy, but the stream already produced text past this chunk's end:
-      // it is a duplicate of what the transcript already has.
-      return captureEndedAtMs <= state.coveredUntil;
-    }
     const cutoff = this.now() - this.replayWindowMs;
-    state.held = state.held.filter((h) => h.endMs >= cutoff);
-    state.held.push({ endMs: captureEndedAtMs, chunk });
-    return true;
+    state.sentRanges = state.sentRanges.filter((r) => r[1] >= cutoff);
+    // Only skip a chunk the gate actually SENT in full. Speech the gate never
+    // opened for (too quiet) falls through to the local backend: late, not lost.
+    const sent = state.sentRanges.some(
+      ([a, b]) => a <= captureStartedAtMs + SENT_TOLERANCE_MS && b >= captureEndedAtMs - SENT_TOLERANCE_MS,
+    );
+    if (this.isHealthy(source) && sent) {
+      state.held = state.held.filter((h) => h.endMs >= cutoff);
+      state.held.push({ endMs: captureEndedAtMs, chunk });
+      return true;
+    }
+    // The stream already produced text past this chunk's end: a duplicate.
+    return captureEndedAtMs <= state.coveredUntil;
   }
 
   private freshState(): SourceState<TChunk> {
-    return { stream: null, lastFrameAt: 0, utterance: null, coveredUntil: 0, held: [], reconnectTimer: null, failures: 0, closedThrough: 0 };
+    return {
+      stream: null, lastFrameAt: 0, utterance: null, coveredUntil: 0, held: [], reconnectTimer: null,
+      failures: 0, closedThrough: 0, carried: '',
+      gate: this.opts.gate === false ? null : new NoiseGate(this.opts.gate ?? {}),
+      pending: [], pendingFinalize: false, timeline: [], sentSec: 0, billedSec: 0, lastSentEnd: null, sentRanges: [],
+    };
   }
 
   private state(source: Source): SourceState<TChunk> {
@@ -182,12 +330,17 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
     const state = this.state(source);
     const stream = new GrokStream(this.opts.apiKey, this.url, this.opts.socketFactory, this.now);
     state.stream = stream;
+    state.timeline = [];
+    state.sentSec = 0;
+    state.lastSentEnd = null;
     stream.on('ready', () => {
+      if (state.stream !== stream) return;
       state.failures = 0;
       console.log(`[Streaming] ${source} stream ready`);
+      this.flushPending(source);
     });
     stream.on('partial', (event: GrokStreamEvent) => {
-      if (state.stream === stream) this.onPartial(source, stream, event);
+      if (state.stream === stream) this.onPartial(source, event);
     });
     stream.once('closed', (error?: Error) => {
       if (state.stream === stream) this.onClosed(source, error);
@@ -195,40 +348,53 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
     stream.connect();
   }
 
-  private onPartial(source: Source, stream: GrokStream, event: GrokStreamEvent): void {
+  private onPartial(source: Source, event: GrokStreamEvent): void {
     const state = this.state(source);
-    const base = stream.audioStartedAt ?? this.now();
-    const audioStart = base + event.start * 1000;
-    const audioEnd = base + (event.start + event.duration) * 1000;
+    const audioStart = this.wallAt(state, event.start);
+    const audioEnd = this.wallAt(state, event.start + event.duration);
     if (event.text) state.coveredUntil = Math.max(state.coveredUntil, audioEnd);
+
+    // Strip what an early-closed line already carried from this utterance.
+    let eventText = event.text;
+    if (state.carried) {
+      if (restatesLocked(state.carried, eventText)) {
+        eventText = dropLeadingWords(eventText, normWords(state.carried).length);
+      }
+      if (event.speechFinal) state.carried = '';
+      if (!eventText) {
+        if (event.speechFinal) this.closeUtterance(source);
+        return;
+      }
+    }
 
     let u = state.utterance;
     if (!u) {
-      if (!event.text) return;
-      // Grok repeats a locked chunk's text in its speech_final event. If the
-      // line was already closed (long-monologue guard), that repeat must not
-      // open a duplicate line.
+      eventText = eventText.replace(/^[,.;:!?]+\s*/, ''); // a new line never starts with punctuation
+      if (!eventText) return;
+      // An event that ends where the last closed line ended only repeats it.
       if (audioEnd <= state.closedThrough + 50) return;
-      u = { id: randomUUID(), locked: '', current: '', firstSeenAt: this.now(), audioStart, audioEnd };
+      u = { id: randomUUID(), locked: '', current: '', currentIsFull: false, firstSeenAt: this.now(), audioStart, audioEnd };
       state.utterance = u;
     }
     u.audioEnd = audioEnd;
 
-    // Partials are cumulative within an utterance. If one ever repeats text
-    // that is already locked, keep only what is new.
-    let text = event.text;
-    if (u.locked && text.startsWith(u.locked)) text = text.slice(u.locked.length).trim();
-
+    // Partials are cumulative within an utterance. An event that restates the
+    // locked text is the whole utterance again: it replaces, never appends.
+    const text = eventText;
+    const restates = u.locked !== '' && restatesLocked(u.locked, text);
     if (event.isFinal) {
-      u.locked = joinText(u.locked, text);
+      u.locked = restates ? text : joinText(u.locked, text);
       u.current = '';
+      u.currentIsFull = false;
     } else {
       u.current = text;
+      u.currentIsFull = restates;
     }
 
-    const full = joinText(u.locked, u.current);
+    const full = lineText(u);
     const longAndDone = event.isFinal && wordCount(full) >= MAX_OPEN_WORDS && /[.?!]["')\]]?$/.test(full);
     if (event.speechFinal || longAndDone) {
+      if (longAndDone && !event.speechFinal) state.carried = joinText(state.carried, full);
       this.closeUtterance(source);
     } else if (full) {
       this.emit('segment', { segment: this.toSegment(source, u), final: false });
@@ -267,7 +433,7 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
   }
 
   private toSegment(source: Source, u: Utterance): TranscriptSegment {
-    const text = joinText(u.locked, u.current);
+    const text = lineText(u);
     const audioDurationSec = u.audioStart !== null && u.audioEnd !== null
       ? Math.max(0, (u.audioEnd - u.audioStart) / 1000)
       : 0;

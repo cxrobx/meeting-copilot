@@ -56,6 +56,7 @@ cd app/MeetingCopilot && swift build
 
 - `XAI_API_KEY` — Grok Voice Transcribe 2.0, the default cloud transcription (needs `COPILOT_ALLOW_CLOUD_AUDIO=true`; local Parakeet takes over per chunk on failure)
 - `COPILOT_GROK_STREAMING=0` — per-chunk batch Grok instead of live streaming (app side: `MC_STREAM_FRAMES=0` stops sending frames)
+- `COPILOT_STT_GATE=0` — turn off the noise gate in front of the Grok stream (xAI bills every second sent, per channel, silence included)
 - `DEEPGRAM_API_KEY` — optional, only with `COPILOT_CLOUD_TRANSCRIPTION=deepgram`
 - `OPENAI_API_KEY` — **metered.** Present in `~/.meeting-copilot/.env`, and the live path prefers it
 - `TYPESAFE_API_KEY` — **metered.** Jev gate in front of the coach's generative call

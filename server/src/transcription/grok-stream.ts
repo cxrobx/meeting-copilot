@@ -106,6 +106,13 @@ export class GrokStream extends EventEmitter {
     return true;
   }
 
+  /** End the current utterance now (the noise gate closed). */
+  finalize(): void {
+    if (this.ready && this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify({ type: 'finalize' }));
+    }
+  }
+
   /** Ask Grok to finish, wait up to `timeoutMs` for the last events, then close. */
   async finish(timeoutMs = 1_500): Promise<void> {
     if (this.ended || !this.socket) return;
