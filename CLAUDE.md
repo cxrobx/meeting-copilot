@@ -126,7 +126,6 @@ Full list in `.claude/rules/architecture.md`.
 - 2026-03-24: Claude CLI has no `--max-tokens` flag — use `--max-budget-usd` for cost control
 - 2026-03-24: WAV chunks sent to whisper-server need proper 44-byte WAV headers, not raw PCM
 - 2026-03-24: WKWebView needs `NSAllowsLocalNetworking` in Info.plist + health polling before loading localhost URLs
-- 2026-03-24: Gemini 3 Flash Preview is best triage model (42% hit rate, accurate reasoning); Haiku too lenient, GPT 5.4 Mini too eager (100% hit rate)
 - 2026-03-24: CSS `zoom` property via JS works for browser-style Cmd+/- zoom in WKWebView; `allowsMagnification` only does bitmap scaling
 - 2026-03-24: 3-column layout requires fixed-height grid container (`height: calc(100vh - header)`) with each column having independent `overflow-y: auto`
 - 2026-03-10: Shared transcript protocol added — `server/src/session/shared.ts` writes presence + JSONL, notes4chris reads at processing time
