@@ -15,7 +15,10 @@ export const MODEL_CONFIG = {
   // is the same thing that binned 13% of real coach evaluations as stale.
   // gpt-6-luna since 2026-09-22: same eval, 100/100 again, p95 1.9s.
   coach: process.env.COPILOT_COACH_MODEL || 'gpt-6-luna',
-  geminiTriage: process.env.COPILOT_GEMINI_TRIAGE_MODEL || 'gemini-3.5-flash-lite',
+  // Context compression (intelligence/compression.ts): the paragraph that
+  // carries the meeting past triage's 5-minute window. Subscription Haiku
+  // when the API is off.
+  compression: process.env.COPILOT_COMPRESSION_MODEL || 'gpt-6-luna',
   fastResearch: process.env.COPILOT_RESEARCH_MODEL || 'gpt-6-luna',
   haiku: process.env.COPILOT_HAIKU_MODEL || 'claude-haiku-4-5-20251001',
   suggestion: process.env.COPILOT_SUGGEST_MODEL || process.env.COPILOT_SUGGESTION_MODEL || 'claude-sonnet-5',

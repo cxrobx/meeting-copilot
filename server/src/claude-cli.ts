@@ -1,57 +1,10 @@
 import { execFile, spawn } from 'node:child_process';
-import { EventEmitter } from 'node:events';
 import { promisify } from 'node:util';
 import { createInterface } from 'node:readline';
 import { runWarm } from './persistent-claude.js';
 import { MODEL_CONFIG } from './model-config.js';
-import { safeErrorMessage } from './logging.js';
 
 const execFileAsync = promisify(execFile);
-
-/**
- * Health signals from the CLI fallback layer. index.ts forwards these to the
- * dashboard as `intelligence.error` so tier degradation is visible instead of
- * silently eating latency.
- * Events: 'degraded' { source: 'cli', message, until } · 'recovered' { source: 'cli' }
- */
-export const cliHealth = new EventEmitter();
-
-// ─── Gemini circuit breaker ─────────────────────────────────────────────────
-// Gemini is tier 1 of the triage chain but is a cold spawn — a hung binary
-// used to stall every 15s eval cycle for up to 30s before Haiku got a chance.
-// Two consecutive failures open the breaker for 5 minutes (Haiku serves
-// directly); the next success closes it.
-const GEMINI_TRIAGE_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.GEMINI_TRIAGE_TIMEOUT_MS);
-  // Default 12s: must fail comfortably inside one 15s eval cadence.
-  return Number.isFinite(raw) && raw > 0 ? raw : 12_000;
-})();
-const GEMINI_BREAKER_FAILURES = 2;
-const GEMINI_BREAKER_COOLDOWN_MS = 5 * 60_000;
-let geminiConsecutiveFailures = 0;
-let geminiDisabledUntil = 0;
-let geminiBreakerOpen = false;
-
-function noteGeminiFailure(err: unknown): void {
-  geminiConsecutiveFailures++;
-  if (geminiConsecutiveFailures >= GEMINI_BREAKER_FAILURES && !geminiBreakerOpen) {
-    geminiBreakerOpen = true;
-    geminiDisabledUntil = Date.now() + GEMINI_BREAKER_COOLDOWN_MS;
-    const message = `Gemini triage circuit open after ${geminiConsecutiveFailures} failures (${safeErrorMessage(err)}) — using Haiku for ${Math.round(GEMINI_BREAKER_COOLDOWN_MS / 60_000)} min`;
-    console.warn(`[CLI] ${message}`);
-    cliHealth.emit('degraded', { source: 'cli', message, until: geminiDisabledUntil });
-  }
-}
-
-function noteGeminiSuccess(): void {
-  geminiConsecutiveFailures = 0;
-  if (geminiBreakerOpen) {
-    geminiBreakerOpen = false;
-    geminiDisabledUntil = 0;
-    console.log('[CLI] Gemini triage recovered — circuit closed');
-    cliHealth.emit('recovered', { source: 'cli' });
-  }
-}
 
 /**
  * Calls `claude` CLI in headless mode (--print) to use the user's
@@ -170,130 +123,26 @@ export async function claudeChat(
 }
 
 /**
- * Triage call with fallback chain:
- *   1. Gemini CLI — fast + smart
- *   2. Claude Haiku — reliable fallback
+ * Quick JSON call on the subscription: Haiku via the `claude` CLI. Used by
+ * live triage only when the OpenAI path is off or has failed twice, and by
+ * fact-check, which stays off paid APIs by design.
+ *
+ * Gemini used to go first here. The Gemini CLI stopped authenticating
+ * (`IneligibleTierError`: Google ended the free individual tier for it), so
+ * every call failed, fell through to Haiku, and after two failures the
+ * circuit breaker pinned a "degraded" badge on the dashboard that could never
+ * clear. Haiku was doing the work all along.
  */
 export async function claudeTriage(
   prompt: string,
   systemPrompt: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  // 1. Try Gemini Flash — unless the breaker is open (recent hang/failures).
-  if (Date.now() >= geminiDisabledUntil) {
-    try {
-      const out = await geminiTriage(prompt, systemPrompt, signal);
-      noteGeminiSuccess();
-      return out;
-    } catch (err) {
-      // An external abort is the caller's doing, not a Gemini fault.
-      if (signal?.aborted) throw new Error('Aborted');
-      noteGeminiFailure(err);
-      /* fall through */
-    }
-  }
-
-  // 2. Try Haiku
-  try {
-    return await claudeChat(prompt, {
-      systemPrompt,
-      model: MODEL_CONFIG.haiku,
-      signal,
-    });
-  } catch { /* fall through */ }
-
-  throw new Error('Triage providers unavailable');
-}
-
-/**
- * Triage via Gemini CLI.
- */
-async function geminiTriage(
-  prompt: string,
-  systemPrompt: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  const combinedPrompt = `${systemPrompt}\n\n${prompt}`;
-
-  const controller = new AbortController();
-  if (signal) {
-    if (signal.aborted) throw new Error('Aborted');
-    signal.addEventListener('abort', () => controller.abort());
-  }
-
-  const { stdout } = await execFileAsync('gemini', [
-    '-m', MODEL_CONFIG.geminiTriage,
-    '-p', combinedPrompt,
-    '-o', 'json',
-  ], {
-    maxBuffer: 5 * 1024 * 1024,
-    timeout: GEMINI_TRIAGE_TIMEOUT_MS,
-    signal: controller.signal,
-    env: { ...process.env },
+  return claudeChat(prompt, {
+    systemPrompt,
+    model: MODEL_CONFIG.haiku,
+    signal,
   });
-
-  // Gemini JSON output: { session_id, response, stats }
-  try {
-    const parsed = JSON.parse(stdout);
-    if (parsed.response && typeof parsed.response === 'string') {
-      return parsed.response;
-    }
-  } catch { /* fall through */ }
-
-  // Try to extract response from partial output
-  const stripped = stdout.replace(/\x1b\].*?(?:\x07|\x1b\\)/gs, '').trim();
-  const jsonStart = stripped.indexOf('{');
-  const jsonEnd = stripped.lastIndexOf('}');
-  if (jsonStart >= 0 && jsonEnd > jsonStart) {
-    const parsed = JSON.parse(stripped.slice(jsonStart, jsonEnd + 1));
-    if (parsed.response) return parsed.response;
-  }
-
-  throw new Error('No response in gemini output');
-}
-
-/**
- * Triage via Codex CLI using the configured OpenAI triage model.
- */
-async function codexTriage(
-  prompt: string,
-  systemPrompt: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  const combinedPrompt = `${systemPrompt}\n\n${prompt}`;
-
-  const controller = new AbortController();
-  if (signal) {
-    if (signal.aborted) throw new Error('Aborted');
-    signal.addEventListener('abort', () => controller.abort());
-  }
-
-  const { stdout } = await execFileAsync('codex', [
-    'exec',
-    '-m', MODEL_CONFIG.triage,
-    '--ephemeral',
-    '--skip-git-repo-check',
-    '--json',
-    combinedPrompt,
-  ], {
-    maxBuffer: 5 * 1024 * 1024,
-    timeout: 30_000,
-    signal: controller.signal,
-    env: { ...process.env },
-  });
-
-  // Parse JSONL output — find the agent_message item
-  const lines = stdout.trim().split('\n');
-  for (const line of lines) {
-    try {
-      const evt = JSON.parse(line);
-      if (evt.type === 'item.completed' && evt.item?.type === 'agent_message' && evt.item?.text) {
-        return evt.item.text;
-      }
-    } catch { /* skip non-JSON lines */ }
-  }
-
-  throw new Error('No agent_message in codex output');
 }
 
 /**

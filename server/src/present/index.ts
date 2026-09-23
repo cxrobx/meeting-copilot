@@ -4314,11 +4314,13 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   }
 
   // ─── Intelligence error badge ──────────────────────────────
-  // Realtime failures (triage/suggest/agenda/coach/factcheck/CLI tier) used
-  // to vanish into server.log; now they count into a small ⚠ badge next to
-  // the status row. A degraded tier pins the badge until recovery.
+  // Realtime failures (triage/suggest/agenda/coach/factcheck/compression)
+  // used to vanish into server.log; now they count into a small ⚠ badge next
+  // to the status row. A degraded message means the AI has stopped (only
+  // the budget lockout sends it) and pins the badge until the session changes.
   var intelErrors = [];
   var intelDegraded = false;
+  var intelDegradedMessage = '';
   var intelWarnEl = document.getElementById('intelWarn');
   var intelWarnCountEl = document.getElementById('intelWarnCount');
   var intelPopEl = null;
@@ -4344,13 +4346,20 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   setInterval(refreshIntelWarn, 30000); // decay old errors off the badge
 
   function noteIntelError(msg) {
-    if (msg.recovered) {
-      intelDegraded = false;
-    } else {
-      intelErrors.push({ source: msg.source || 'triage', message: msg.message || 'error', at: msg.at || Date.now() });
-      if (intelErrors.length > 20) intelErrors.shift();
-      if (msg.degraded) intelDegraded = true;
+    intelErrors.push({ source: msg.source || 'triage', message: msg.message || 'error', at: msg.at || Date.now() });
+    if (intelErrors.length > 20) intelErrors.shift();
+    if (msg.degraded) {
+      intelDegraded = true;
+      intelDegradedMessage = msg.message || '';
     }
+    refreshIntelWarn();
+  }
+
+  // Per meeting: a stop in one meeting must not greet the next one.
+  function resetIntelWarn() {
+    intelErrors = [];
+    intelDegraded = false;
+    intelDegradedMessage = '';
     refreshIntelWarn();
   }
 
@@ -4366,7 +4375,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     intelPopEl.className = 'intel-pop';
     if (recent.length === 0) {
       intelPopEl.textContent = intelDegraded
-        ? 'A triage tier is degraded \\u2014 suggestions still flow via the fallback model.'
+        ? (intelDegradedMessage || 'The copilot\\u2019s AI is stopped for this session.')
         : 'No recent errors.';
     } else {
       recent.forEach(function(err) {
@@ -4842,6 +4851,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     window.dismissCoach();
     window.clearCoachHistory();
     window.clearPulse();
+    resetIntelWarn();
     resultsEl.innerHTML = '';
     tocEntries.innerHTML = '';
     transcriptFeed.innerHTML = '';
@@ -7569,6 +7579,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
             if (sessionState !== 'idle') window.newMeeting();
             break;
           }
+          if (msg.sessionId && sessionId && msg.sessionId !== sessionId) resetIntelWarn();
           sessionState = msg.state;
           sessionId = msg.sessionId || sessionId;
           // Adopt the server's authoritative start time whenever it sends one.

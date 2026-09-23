@@ -51,7 +51,6 @@ import { isAnthropicApiAvailable } from './api/anthropic.js';
 import { isOpenAiApiAvailable } from './api/openai.js';
 import { paidApiDisabled } from './api/killswitch.js';
 import { disposeAllWarmSessions } from './persistent-claude.js';
-import { cliHealth } from './claude-cli.js';
 import { getSettings } from './settings.js';
 import { LLM_CONFIG, MODEL_CONFIG } from './model-config.js';
 
@@ -67,7 +66,7 @@ if (existsSync(USER_ENV_PATH)) {
 
 // ─── Background-CLI marker ────────────────────────────────────────────────
 // Every realtime AI call (triage/suggest/agenda/coach/factcheck) and every
-// worker spawns the `claude`/`gemini`/`codex` CLI in headless --print mode.
+// worker spawns the `claude` CLI in headless --print mode.
 // Each spawn inherits this env var, which propagates to any hooks those CLIs
 // run (e.g. a user's global Stop hook that plays a sound). User hooks should
 // no-op when MEETING_COPILOT is set so a live meeting isn't a wall of dings.
@@ -243,13 +242,12 @@ type OutboundMessage =
       // silent monitor errors are visible in the dashboard instead of only
       // in server.log.
       type: 'intelligence.error';
-      source: 'triage' | 'suggest' | 'compression' | 'agenda' | 'factcheck' | 'coach' | 'cli' | 'budget';
+      source: 'triage' | 'suggest' | 'compression' | 'agenda' | 'factcheck' | 'coach' | 'budget';
       message: string;
       at: number; // epoch ms
-      /** True when a whole tier/monitor is being skipped, not just one failure. */
+      /** Pins the badge for the rest of the session: the AI has stopped, not
+       *  just failed once. Only the budget lockout sets it. */
       degraded?: boolean;
-      /** True when a previously degraded source recovered. */
-      recovered?: boolean;
     };
 
 // ─── App State ─────────────────────────────────────────────────────────────
@@ -1869,15 +1867,6 @@ setLlmBudgetExceededHandler((limit) => {
   const message = `LLM budget exhausted (${limit}) — suggestions, agenda and coach are stopped for this session.`;
   debugLog(`[budget] ${message}`);
   broadcast({ type: 'intelligence.error', source: 'budget', message, at: Date.now(), degraded: true });
-});
-
-// CLI-tier health: the Gemini triage circuit breaker opening/closing. Degraded
-// pins the dashboard badge until recovery.
-cliHealth.on('degraded', (data: { message: string }) => {
-  broadcast({ type: 'intelligence.error', source: 'cli', message: data.message, at: Date.now(), degraded: true });
-});
-cliHealth.on('recovered', () => {
-  broadcast({ type: 'intelligence.error', source: 'cli', message: 'Gemini triage recovered', at: Date.now(), recovered: true });
 });
 
 // ─── Startup ───────────────────────────────────────────────────────────────

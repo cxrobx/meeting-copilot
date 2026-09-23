@@ -20,7 +20,7 @@ paths:
 ```
 server/src/
 ├── index.ts           # Main entry — Express + WebSocket server
-├── claude-cli.ts      # CLI fallback chain (gemini→haiku→codex) + Gemini circuit breaker
+├── claude-cli.ts      # Subscription `claude` CLI calls (Haiku quick JSON, suggest, workers)
 ├── persistent-claude.ts # Warm `claude` session pool for tool-less calls
 ├── settings.ts        # ~/.meeting-copilot/settings.json (cadence/TTL/monitors/retention)
 ├── calendar/          # Upcoming meetings read-only from cxmail's invite DB (start-form auto-fill)
@@ -71,7 +71,7 @@ cd server && npm start        # Run compiled dist/index.js
 | `COPILOT_PORT` | No | 17890 | TCP port (the Swift app honors it too via ServerConfig) |
 | `SHARE_TRANSCRIPT` | No | true | Set to `false` to disable shared transcript writing |
 | `SUGGESTION_TTL_MS` | No | 60000 | Legacy default for suggestion TTL |
-| `GEMINI_TRIAGE_TIMEOUT_MS` | No | 12000 | Tier-1 triage timeout before Haiku fallback |
+| `COPILOT_COMPRESSION_MODEL` | No | `gpt-6-luna` | Context compression (5-min summaries fed into triage); subscription Haiku when the API is off |
 | `COPILOT_DISABLE_PAID_API` | No | - | `1` = hard zero-API-spend (CLIs/subscription only) |
 | `COPILOT_PULSE` | No | on | `0` turns off the meeting pulse (5-min big-picture read + close-out) |
 | `COPILOT_PULSE_MODEL` | No | `claude-opus-5-5` | Model for the pulse, on the subscription CLI |

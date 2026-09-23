@@ -33,7 +33,7 @@
 | `session.state` | Authoritative session state | `state, sessionId?, message?, startedAt?, title?` |
 | `agenda.status` | Agenda coverage update (8s cadence) | `status { items, missing }` |
 | `intelligence.status` | Eval-loop phase indicator | `phase: 'idle'\|'evaluating'\|'generating'` |
-| `intelligence.error` | Realtime intelligence failure / tier degradation | `source, message, at, degraded?, recovered?` |
+| `intelligence.error` | Realtime intelligence failure; `degraded` = the AI stopped for the session (budget lockout only) | `source, message, at, degraded?` |
 | `feature.state` | Monitor on/off snapshot | `features { factcheck, coach }` |
 | `factcheck.flag` | Fact-check verdict on a claim | `flag { claim, verdict, correction?, sources? }` |
 | `coach.suggestion` | "Say next" coach tip; `asked: true` for a Suggest card, which stays until dismissed | `suggestion { kind, priority, headline, asked?, ... }` |

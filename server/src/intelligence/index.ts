@@ -5,6 +5,7 @@ import { isOpenAiApiAvailable, openaiTriageJson } from '../api/openai.js';
 import { isAnthropicApiAvailable, anthropicSuggestStream } from '../api/anthropic.js';
 import { LLM_CONFIG, MODEL_CONFIG } from '../model-config.js';
 import { parseFirstJsonObject } from './first-json.js';
+import { summarizeOldContext } from './compression.js';
 import { LlmBudgetExceededError, resetLlmBudget } from '../api/budget.js';
 import { parsePartialSuggestion, type PartialSuggestion } from './partial-json.js';
 import type { TranscriptSegment } from '../transcription/types.js';
@@ -53,6 +54,8 @@ export class IntelligenceEngine extends EventEmitter {
   private suggestionApiDisabledUntil = 0;
   private recentWindowHashes: string[] = [];
   private recentActionSuggestions: Array<{ title: string; triggerQuote: string }> = [];
+  /** Replaceable in tests; see intelligence/compression.ts. */
+  private summarizeContext: (transcript: string) => Promise<string | null> = summarizeOldContext;
   private contextSummaries: Array<{
     summary: string;
     windowStart: number;
@@ -407,8 +410,8 @@ export class IntelligenceEngine extends EventEmitter {
     );
 
     // In auto/api mode, prefer the direct structured API for predictable live
-    // latency. `COPILOT_LIVE_LLM_MODE=cli` forces the subscription-backed
-    // Gemini → Haiku fallback chain when incremental cost matters more.
+    // latency. `COPILOT_LIVE_LLM_MODE=cli` forces subscription-backed Haiku
+    // when incremental cost matters more.
     const useApi = LLM_CONFIG.liveTransport !== 'cli'
       && isOpenAiApiAvailable()
       && Date.now() >= this.triageApiDisabledUntil;
@@ -625,39 +628,42 @@ export class IntelligenceEngine extends EventEmitter {
       .map((s) => `${s.label} ${s.text}`)
       .join('\n');
 
+    // start() swaps in a fresh array, so a reply that lands after the meeting
+    // ended or changed is dropped rather than written into the next one.
+    const summaries = this.contextSummaries;
+    const stale = () => !this.running || summaries !== this.contextSummaries;
     try {
-      const summary = await claudeTriage(
-        oldText,
-        'Summarize this meeting transcript excerpt into a concise paragraph preserving key decisions, action items, and topics discussed. Be factual and specific.',
-      );
+      const summary = await this.summarizeContext(oldText);
+      if (stale()) return;
+      // No summary keeps the segments; the next pass takes them with the newer ones.
+      if (!summary) throw new Error('no summary in the model reply');
 
-      if (summary) {
-        const summaryRecord = {
-          summary,
-          windowStart: oldSegments[0]!.timestamp,
-          windowEnd: oldSegments[oldSegments.length - 1]!.timestamp,
-          createdAt: Date.now(),
-        };
+      const summaryRecord = {
+        summary,
+        windowStart: oldSegments[0]!.timestamp,
+        windowEnd: oldSegments[oldSegments.length - 1]!.timestamp,
+        createdAt: Date.now(),
+      };
 
-        this.contextSummaries.push(summaryRecord);
-        // Bound prompt growth on multi-hour meetings — only the last 2 are
-        // re-injected into the eval window; older ones live in SQLite.
-        if (this.contextSummaries.length > 10) {
-          this.contextSummaries.splice(0, this.contextSummaries.length - 10);
-        }
-
-        if (this.contextSummaryCallback) {
-          this.contextSummaryCallback(summaryRecord);
-        }
-
-        this.emit('intelligence.compression', summaryRecord);
-
-        // Remove compressed segments
-        this.segments = this.segments.filter(
-          (s) => s.timestamp >= cutoff,
-        );
+      this.contextSummaries.push(summaryRecord);
+      // Bound prompt growth on multi-hour meetings — only the last 2 are
+      // re-injected into the eval window; older ones live in SQLite.
+      if (this.contextSummaries.length > 10) {
+        this.contextSummaries.splice(0, this.contextSummaries.length - 10);
       }
+
+      if (this.contextSummaryCallback) {
+        this.contextSummaryCallback(summaryRecord);
+      }
+
+      this.emit('intelligence.compression', summaryRecord);
+
+      // Remove compressed segments
+      this.segments = this.segments.filter(
+        (s) => s.timestamp >= cutoff,
+      );
     } catch (error) {
+      if (stale()) return;
       this.emit('intelligence.error', {
         error: `Context compression failed: ${error instanceof Error ? error.message : String(error)}`,
       });

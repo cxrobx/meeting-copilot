@@ -198,7 +198,7 @@ export class FactCheckMonitor extends EventEmitter {
     this.lastRunAt = Date.now();
 
     // Stage 1: extract claims
-    // CLI-only (subscription, no paid API): Gemini → Haiku → Codex chain.
+    // CLI-only (subscription, no paid API): Haiku via the `claude` CLI.
     this.extractionsRun++;
     const extractPrompt = buildFactcheckExtractPrompt(window, this.checkedClaimTexts.slice(-15));
     const raw = await claudeTriage(

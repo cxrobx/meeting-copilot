@@ -6,7 +6,7 @@
 |-----------|------------|
 | App | SwiftUI menubar app + WKWebView dashboard (Swift Package Manager) |
 | Server | Node.js + TypeScript (Express, WebSocket) |
-| AI Triage | Gemini 3 Flash Preview → Haiku 4.5 → GPT 5.4 Mini (fallback chain via CLIs) |
+| AI Triage | gpt-6-luna via the OpenAI API; Haiku 4.5 on the subscription CLI when the API is off or failing |
 | AI Suggest | Claude Sonnet 4.6 (via `claude --print`) |
 | Database | better-sqlite3 per-session SQLite |
 | Audio | Core Audio process tap (meeting, macOS 14.2+; ScreenCaptureKit fallback) + AVAudioEngine (mic) — see gotcha #20 |
