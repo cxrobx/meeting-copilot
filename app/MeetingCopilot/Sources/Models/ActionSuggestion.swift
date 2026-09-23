@@ -4,28 +4,44 @@ import Foundation
 
 enum ActionType: String, Codable {
     case research
+    case fastResearch = "fast-research"
     case summary
     case mockup
     case codegen
     case analysis
+    case review
+    /// A worker type this build doesn't know yet. Without it, one new server
+    /// type fails the whole `action.suggested` decode and the card is lost.
+    case other
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ActionType(rawValue: raw) ?? .other
+    }
 
     var icon: String {
         switch self {
-        case .research: return "magnifyingglass"
-        case .summary:  return "doc.text"
-        case .mockup:   return "paintbrush"
-        case .codegen:  return "chevron.left.forwardslash.chevron.right"
-        case .analysis: return "chart.bar"
+        case .research:     return "magnifyingglass"
+        case .fastResearch: return "bolt"
+        case .summary:      return "doc.text"
+        case .mockup:       return "paintbrush"
+        case .codegen:      return "chevron.left.forwardslash.chevron.right"
+        case .analysis:     return "chart.bar"
+        case .review:       return "checkmark.seal"
+        case .other:        return "sparkles"
         }
     }
 
     var displayName: String {
         switch self {
-        case .research: return "Research"
-        case .summary:  return "Summary"
-        case .mockup:   return "Mockup"
-        case .codegen:  return "Code Generation"
-        case .analysis: return "Analysis"
+        case .research:     return "Research"
+        case .fastResearch: return "Fast research"
+        case .summary:      return "Summary"
+        case .mockup:       return "Mockup"
+        case .codegen:      return "Code Generation"
+        case .analysis:     return "Analysis"
+        case .review:       return "Self-review"
+        case .other:        return "Action"
         }
     }
 }
@@ -116,5 +132,6 @@ struct Artifact: Codable, Identifiable {
         case markdown
         case image
         case code
+        case html
     }
 }

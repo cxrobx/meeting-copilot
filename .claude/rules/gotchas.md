@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 22 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 23 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -28,6 +28,7 @@ Organized by category. 22 items + recovery playbook, condensed format. Original 
 | 20 | Phone / FaceTime calls invisible to ScreenCaptureKit — meeting track is a Core Audio process tap | Environment |
 | 21 | gpt-6-luna writes past its JSON object — parse the first complete object | External APIs |
 | 22 | Dashboard JS lives in a TS template literal — escapes decode twice | Frontend |
+| 23 | Swift's `.iso8601` rejects the server's milliseconds — messages silently dropped | Frontend |
 | — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
@@ -203,6 +204,13 @@ this default.
 **Solution**: Write every escape doubled for the browser (`'\\n'`, `'\\u2014'`, `\\'`), as the rest of the file does. Never a backtick or `${` in the embedded JS.
 **Check**: `__tests__/present-script.test.ts` extracts each inline `<script>` from `PRESENT_HTML` and parses it with `vm.Script`. It fails on exactly this bug (verified by reintroducing it).
 **Pattern**: `server/src/present/index.ts` (`export const PRESENT_HTML`).
+
+### 23. Swift's `.iso8601` Rejects the Server's Milliseconds — Messages Silently Dropped
+**Symptom**: The app's word count stays 0, suggestion banners (Approve/Dismiss) never appear, and the menu bar's Copilot list stays empty, while the dashboard shows everything. Nothing in `app.log`.
+**Cause**: The server stamps dates with JS `toISOString()`, which always carries milliseconds (`…05.123Z`). `JSONDecoder`'s `.iso8601` strategy rejects fractional seconds, so every `transcript.update` and `action.suggested` threw, and the failure was a `print` to stderr, which never reaches `app.log` (#15). Two more of the same kind: `ActionType` had no `fast-research` (the default suggested type) or `review`, and an `html` artifact failed `action.status`, leaving a finished action "running".
+**Solution** (applied 2026-09-22): `JSONDecoder.copilotDecoder` takes ISO with or without milliseconds, and epoch ms. `ActionType` falls back to `.other`, `action.status` decodes its `result` with `try?` so the state always lands, and decode failures go to `appLog`. Behaviour that was designed but dormant is now live: suggestion banners fire when the panel isn't frontmost, and session end waits (60 s grace at most) for running actions.
+**Check**: `Tests/ServerMessageTests.swift` decodes real wire payloads with the app's own decoder, never a bare `JSONDecoder()`. With the old strategy it fails 4 of 8 (verified). A new server message or field the app reads gets a real-payload case there.
+**Pattern**: `app/MeetingCopilot/Sources/Core/Network/WebSocketClient.swift` (`copilotDecoder`), `Models/ActionSuggestion.swift`, `Models/Messages.swift`.
 
 ---
 

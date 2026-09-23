@@ -94,9 +94,11 @@ enum ServerMessage: Decodable {
     case metrics(DebugMetrics)
     /// The meeting pulse's close-out pass found things to settle before the call ends.
     case pulseCloseOut(body: String)
+    /// The meeting pulse's latest big-picture read (every ~5 min).
+    case pulseUpdate(MeetingPulse)
 
     private enum CodingKeys: String, CodingKey {
-        case type, segment, action, actionId, state, result, sessionId, data, body
+        case type, segment, action, actionId, state, result, sessionId, data, body, pulse
     }
 
     init(from decoder: Decoder) throws {
@@ -113,7 +115,10 @@ enum ServerMessage: Decodable {
         case "action.status":
             let actionId = try container.decode(String.self, forKey: .actionId)
             let state = try container.decode(ActionState.self, forKey: .state)
-            let result = try container.decodeIfPresent(ActionResult.self, forKey: .result)
+            // The app only needs the state; a result shape it can't read
+            // (a new artifact type) must not throw the state change away, or
+            // a finished action stays "running" and session end waits it out.
+            let result = (try? container.decodeIfPresent(ActionResult.self, forKey: .result)) ?? nil
             self = .actionStatus(actionId: actionId, state: state, result: result)
         case "session.state":
             let state = try container.decode(SessionState.self, forKey: .state)
@@ -125,11 +130,47 @@ enum ServerMessage: Decodable {
         case "pulse.closeout":
             let body = try container.decode(String.self, forKey: .body)
             self = .pulseCloseOut(body: body)
+        case "pulse.update":
+            // The dashboard renders the pulse; the app only mirrors it in the
+            // menu bar, so a shape it can't read degrades to "no pulse yet"
+            // rather than a decode failure.
+            if let pulse = try? container.decode(MeetingPulse.self, forKey: .pulse) {
+                self = .pulseUpdate(pulse)
+            } else {
+                self = .metrics(DebugMetrics(transcriptLatencyMs: nil, activeWorkers: nil, audioBufferSizeBytes: nil, serverUptime: nil))
+            }
         default:
             // Ignore unknown message types gracefully
             self = .metrics(DebugMetrics(transcriptLatencyMs: nil, activeWorkers: nil, audioBufferSizeBytes: nil, serverUptime: nil))
         }
     }
+}
+
+// MARK: - Meeting Pulse
+
+/// The meeting pulse's read of the whole meeting — `MeetingPulseResult` in
+/// server/src/intelligence/pulse.ts. Only the fields the menu bar shows.
+struct MeetingPulse: Decodable, Equatable {
+    struct Item: Decodable, Equatable {
+        let text: String
+        let why: String?
+    }
+
+    enum Status: String, Decodable {
+        case onTrack = "on_track"
+        case drifting
+        case stuck
+    }
+
+    let id: String
+    let status: Status
+    let read: String
+    let escalations: [Item]
+    /// Minutes to the calendar end when this read was taken; nil unless the
+    /// meeting was started from an invite.
+    let minutesLeft: Double?
+    /// Epoch milliseconds on the wire.
+    let createdAt: Date
 }
 
 // MARK: - Debug Metrics

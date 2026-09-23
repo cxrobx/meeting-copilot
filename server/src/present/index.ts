@@ -4347,6 +4347,71 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     showToast('Prefilled from \\u201C' + m.title + '\\u201D \\u2014 Prep this meeting to research it');
   };
 
+  // ─── Menu bar commands ────────────────────────────────────
+  // The native menu bar popover drives the dashboard through this one entry
+  // point (SessionManager.runDashboardCommand). start / invite / history need
+  // the idle start form, which a past-session view doesn't have, so from
+  // there they reload the live dashboard and finish after the reload (#mb=).
+  function whenStartForm(then) {
+    var tries = 0;
+    (function poll() {
+      var title = document.getElementById('startTitle');
+      if (title) { then(title); return; }
+      if (++tries < 50) setTimeout(poll, 100);
+    })();
+  }
+
+  function applyCalendarMeetingByUid(uid) {
+    function pick() {
+      for (var i = 0; i < upcomingMeetings.length; i++) {
+        if ((upcomingMeetings[i].eventUid || upcomingMeetings[i].title) === uid) {
+          window.applyCalendarMeeting(i);
+          return true;
+        }
+      }
+      return false;
+    }
+    if (pick()) return;
+    fetch('/calendar/upcoming').then(function(r) { return r.json(); }).then(function(data) {
+      upcomingMeetings = (data && data.meetings) || [];
+      renderCalendarChips();
+      if (!pick()) showToast('That invite is no longer on your calendar', { error: true });
+    }).catch(function() {});
+  }
+
+  window.__copilotMenubar = function(cmd, arg) {
+    if (cmd === 'session') {
+      if (arg) window.location.href = '/present?session=' + encodeURIComponent(arg);
+      return;
+    }
+    if (cmd === 'settings') {
+      if (!document.getElementById('settingsModal')) window.openSettings();
+      return;
+    }
+    if (cmd !== 'start' && cmd !== 'invite' && cmd !== 'history') return;
+    if (isReplay) {
+      window.location.href = '/present#mb=' + encodeURIComponent(cmd) + (arg ? ':' + encodeURIComponent(arg) : '');
+      return;
+    }
+    whenStartForm(function(title) {
+      if (cmd === 'history') { window.showSessionHistory(); return; }
+      if (cmd === 'invite' && arg) applyCalendarMeetingByUid(arg);
+      title.focus();
+      title.scrollIntoView({ block: 'center' });
+    });
+  };
+
+  (function resumeMenubarCommand() {
+    var hash = window.location.hash;
+    if (isReplay || hash.indexOf('#mb=') !== 0) return;
+    var rest = hash.slice(4);
+    var sep = rest.indexOf(':');
+    var cmd = decodeURIComponent(sep < 0 ? rest : rest.slice(0, sep));
+    var arg = sep < 0 ? null : decodeURIComponent(rest.slice(sep + 1));
+    window.history.replaceState(null, '', '/present');
+    window.__copilotMenubar(cmd, arg);
+  })();
+
   // What the user has typed into the start form, across a rebuild.
   // showIdleState rebuilds the whole form on every idle updateUI (a WS
   // reconnect, a settings save), and Title, Attendees, Goals, the agenda box

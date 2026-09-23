@@ -12,9 +12,8 @@ struct MeetingCopilotApp: App {
         MenuBarExtra {
             MenuBarView(
                 sessionManager: appDelegate.sessionManager,
-                onStartSession: { appDelegate.showPanelAndFocusStart() },
-                onTogglePanel: { appDelegate.togglePanel() },
-                onQuit: { NSApplication.shared.terminate(nil) }
+                feed: appDelegate.menuBarFeed,
+                actions: appDelegate.menuBarActions
             )
         } label: {
             MenuBarLabel(sessionManager: appDelegate.sessionManager)
@@ -104,6 +103,7 @@ struct MenuBarLabel: View {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let sessionManager = SessionManager()
+    let menuBarFeed = MenuBarFeed()
     private let floatingPanelController = FloatingPanelController()
     private var hasShownPermissions = false
     private var terminationInProgress = false
@@ -233,10 +233,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// title, agenda, projects, and context, so front the panel and put the
     /// caret in the form instead of starting with an empty payload.
     func showPanelAndFocusStart() {
+        showPanelAndRun("start")
+    }
+
+    /// Front the panel, then hand the dashboard a menu bar command
+    /// (`SessionManager.runDashboardCommand`).
+    private func showPanelAndRun(_ command: String, _ argument: String? = nil) {
         showPanel()
         // The web view must be in the key window for .focus() to take.
         NSApp.activate(ignoringOtherApps: true)
-        sessionManager.focusWebStartForm()
+        sessionManager.runDashboardCommand(command, argument)
+    }
+
+    var menuBarActions: MenuBarActions {
+        MenuBarActions(
+            startSession: { [weak self] in self?.showPanelAndFocusStart() },
+            setUpInvite: { [weak self] key in self?.showPanelAndRun("invite", key) },
+            openSession: { [weak self] id in self?.showPanelAndRun("session", id) },
+            openHistory: { [weak self] in self?.showPanelAndRun("history") },
+            togglePanel: { [weak self] in self?.togglePanel() },
+            openSettings: { [weak self] in self?.showPanelAndRun("settings") },
+            openSessionsFolder: {
+                Self.openFolder("~/.meeting-copilot/sessions")
+            },
+            openNotesFolder: {
+                // Summaries are filed here when auto-save is on (workers/summary.ts).
+                Self.openFolder("~/Documents/CX/Meetings", fallback: "~/Documents/CX")
+            },
+            quit: { NSApplication.shared.terminate(nil) }
+        )
+    }
+
+    private static func openFolder(_ path: String, fallback: String? = nil) {
+        let expanded = NSString(string: path).expandingTildeInPath
+        if FileManager.default.fileExists(atPath: expanded) {
+            NSWorkspace.shared.open(URL(fileURLWithPath: expanded, isDirectory: true))
+        } else if let fallback {
+            openFolder(fallback)
+        } else {
+            appLog("[MenuBar] Folder not found: \(expanded)")
+        }
     }
 
     // MARK: - Permissions

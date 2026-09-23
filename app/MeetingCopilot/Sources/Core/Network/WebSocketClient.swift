@@ -160,7 +160,10 @@ actor WebSocketClient {
             let serverMessage = try JSONDecoder.copilotDecoder.decode(ServerMessage.self, from: data)
             onMessage?(serverMessage)
         } catch {
-            print("[WebSocket] Failed to decode message: \(error)")
+            // appLog, not print: stderr never reaches app.log (gotcha #15), and
+            // a print here is how every transcript.update and action.suggested
+            // failed to decode for months without anyone seeing it.
+            appLog("[WebSocket] Failed to decode message: \(error)")
         }
     }
 
@@ -226,9 +229,33 @@ enum WebSocketError: Error, LocalizedError {
 extension JSONDecoder {
     static let copilotDecoder: JSONDecoder = {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = .custom(decodeServerDate)
         return decoder
     }()
+
+    /// The server stamps dates with JS `toISOString()`, which always carries
+    /// milliseconds (`2026-09-22T19:04:05.123Z`). Foundation's `.iso8601`
+    /// strategy rejects fractional seconds outright, so it failed the whole
+    /// message. Accept both forms, and epoch milliseconds too.
+    private static func decodeServerDate(_ decoder: Decoder) throws -> Date {
+        let container = try decoder.singleValueContainer()
+        if let ms = try? container.decode(Double.self) {
+            return Date(timeIntervalSince1970: ms / 1000)
+        }
+        let text = try container.decode(String.self)
+        if let date = fractionalISO.date(from: text) ?? plainISO.date(from: text) {
+            return date
+        }
+        throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unrecognised date: \(text)")
+    }
+
+    private static let fractionalISO: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private static let plainISO = ISO8601DateFormatter()
 }
 
 extension JSONEncoder {

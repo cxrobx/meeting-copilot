@@ -51,6 +51,8 @@ final class AudioCaptureManager: NSObject {
     var currentOutputDevice: String = "Unknown"
     var currentInputDevice: String = "Unknown"
     var audioLevel: Float = 0.0
+    /// Per-track peaks for the menu bar's level bars (see `LevelMeter`).
+    let levelMeter = LevelMeter()
 
     // MARK: - Private State
 
@@ -481,6 +483,7 @@ final class AudioCaptureManager: NSObject {
         }
 
         captureHealth.recordMeeting(peak: peak)
+        levelMeter.recordMeeting(peak)
 
         meetingPeakWindow = max(meetingPeakWindow, peak)
         let now = Date()
@@ -706,6 +709,7 @@ final class AudioCaptureManager: NSObject {
                     }
 
                     self.captureHealth.recordMic(peak: localPeak)
+                    self.levelMeter.recordMic(localPeak)
 
                     micPeakWindow = max(micPeakWindow, localPeak)
                     let now = Date()
@@ -1154,6 +1158,38 @@ final class CaptureHealth {
         micNonZero = 0
         meetingBuffers = 0
         meetingNonZero = 0
+    }
+}
+
+// MARK: - Level Meter
+
+/// The loudest sample on each track since the menu bar last looked. Written
+/// from the two capture threads, drained about four times a second by the
+/// popover's level bars — and only while the popover is open. Kept apart from
+/// `audioLevel` on purpose: that one is observed, so publishing both tracks
+/// through it would re-render SwiftUI ~90 times a second.
+final class LevelMeter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var mic: Float = 0
+    private var meeting: Float = 0
+
+    func recordMic(_ peak: Float) {
+        lock.lock(); defer { lock.unlock() }
+        mic = max(mic, peak)
+    }
+
+    func recordMeeting(_ peak: Float) {
+        lock.lock(); defer { lock.unlock() }
+        meeting = max(meeting, peak)
+    }
+
+    /// The peaks since the last drain, then zero.
+    func drain() -> (mic: Float, meeting: Float) {
+        lock.lock(); defer { lock.unlock() }
+        let peaks = (mic: mic, meeting: meeting)
+        mic = 0
+        meeting = 0
+        return peaks
     }
 }
 

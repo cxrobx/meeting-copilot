@@ -64,6 +64,11 @@ final class SessionManager {
     var meetingTitle: String = ""
     var meetingAgenda: String = ""
     var meetingAttendees: String = ""
+    /// The meeting pulse's latest read of THIS session (menu bar mirror).
+    var latestPulse: MeetingPulse? = nil
+    /// The capture watchdog's latest warning (a track gone silent), shown in
+    /// the menu bar's live card until the session ends.
+    var captureWarning: String? = nil
 
     // MARK: - Dependencies
 
@@ -272,6 +277,7 @@ final class SessionManager {
                     // while they can still do something about it.
                     Task { @MainActor in
                         appLog("[Session] Capture warning: \(message)")
+                        self?.captureWarning = message
                         self?.surfaceError(message)
                     }
                 }
@@ -427,6 +433,8 @@ final class SessionManager {
         meetingTitle = ""
         meetingAgenda = ""
         meetingAttendees = ""
+        latestPulse = nil
+        captureWarning = nil
         currentSession = nil
         _ = handleStateTransition(to: .idle)
     }
@@ -447,9 +455,35 @@ final class SessionManager {
     /// while a session is live (the idle overlay, and #startTitle with it, is
     /// not in the DOM) or before the page loads.
     func focusWebStartForm() {
-        let js = "(function(){var el=document.getElementById('startTitle');" +
-            "if(el){el.focus();el.scrollIntoView({block:'center'});}})();"
+        runDashboardCommand("start")
+    }
+
+    /// Menu bar → dashboard: `start`, `invite <uid>`, `session <id>`,
+    /// `history`, `settings`. The page's `window.__copilotMenubar` owns the
+    /// details — it waits for the start form, and leaves a past-session view
+    /// first when the command needs the live dashboard.
+    func runDashboardCommand(_ command: String, _ argument: String? = nil) {
+        let args: [Any] = [command, argument ?? NSNull()]
+        guard let data = try? JSONSerialization.data(withJSONObject: args),
+              let json = String(data: data, encoding: .utf8) else { return }
+        // json is `["cmd", "arg"]` — strip the brackets to pass two arguments.
+        let js = "window.__copilotMenubar && window.__copilotMenubar(\(json.dropFirst().dropLast()));"
         runDashboardJS?(js)
+    }
+
+    /// The menu bar's Ask box: the same ⚡ Fast path as the dashboard's Quick
+    /// Actions (a manual trigger runs without an approval step — the typed
+    /// question is the approval). Returns false when the socket is down.
+    func askCopilot(_ question: String) async -> Bool {
+        let prompt = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, state == .live || state == .degraded else { return false }
+        do {
+            try await webSocketClient.send(.actionTrigger(actionType: "fast-research", prompt: prompt))
+            return true
+        } catch {
+            appLog("[Session] Ask send failed: \(error)")
+            return false
+        }
     }
 
     func surfaceError(_ message: String) {
@@ -619,6 +653,13 @@ final class SessionManager {
 
         case .pulseCloseOut(let body):
             NotificationManager.shared.postCloseOutNotification(body: body)
+
+        case .pulseUpdate(let pulse):
+            // On connect the server replays the last pulse it has, which is
+            // the PREVIOUS meeting's until this one's first read lands.
+            guard let startedAt = currentSession?.startedAt,
+                  pulse.createdAt >= startedAt.addingTimeInterval(-5) else { break }
+            latestPulse = pulse
         }
     }
 }
