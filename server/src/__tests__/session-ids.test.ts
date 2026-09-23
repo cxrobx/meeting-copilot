@@ -67,7 +67,7 @@ describe('session-id routes refuse traversal', () => {
     expect((await fetch(`${base}/sessions/${id}`, { method: 'DELETE' })).status).toBe(400);
   });
 
-  it.each(['/present/actions', '/present/transcript', '/present/coach'])('GET %s?session=../../etc → 400', async (path) => {
+  it.each(['/present/actions', '/present/transcript', '/present/coach', '/present/pulse'])('GET %s?session=../../etc → 400', async (path) => {
     expect((await fetch(`${base}${path}?session=${encodeURIComponent('../../etc')}`)).status).toBe(400);
   });
 

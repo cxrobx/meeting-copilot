@@ -92,9 +92,11 @@ enum ServerMessage: Decodable {
     case actionStatus(actionId: String, state: ActionState, result: ActionResult?)
     case sessionState(SessionState, sessionId: String?)
     case metrics(DebugMetrics)
+    /// The meeting pulse's close-out pass found things to settle before the call ends.
+    case pulseCloseOut(body: String)
 
     private enum CodingKeys: String, CodingKey {
-        case type, segment, action, actionId, state, result, sessionId, data
+        case type, segment, action, actionId, state, result, sessionId, data, body
     }
 
     init(from decoder: Decoder) throws {
@@ -120,6 +122,9 @@ enum ServerMessage: Decodable {
         case "metrics":
             let metrics = try container.decode(DebugMetrics.self, forKey: .data)
             self = .metrics(metrics)
+        case "pulse.closeout":
+            let body = try container.decode(String.self, forKey: .body)
+            self = .pulseCloseOut(body: body)
         default:
             // Ignore unknown message types gracefully
             self = .metrics(DebugMetrics(transcriptLatencyMs: nil, activeWorkers: nil, audioBufferSizeBytes: nil, serverUptime: nil))

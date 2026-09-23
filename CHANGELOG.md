@@ -10,6 +10,7 @@ All notable changes to Meeting Copilot will be documented in this file.
 
 ### Added
 
+- Meeting pulse: every 5 minutes Opus 5.5, on the subscription CLI, reads the whole meeting and updates one card: on track, drifting or stuck with the reason, up to two things to escalate, and what to close out before the end. A close-out pass runs 5 minutes before the calendar end (meetings started from an invite), on wrap-up language after minute 10 ("before we go", "one last thing"), or on the new Wrap-up button in Quick Actions. The app raises a "Before this call ends" notification for it. Pulses are saved with the session and replay shows the last one. It shares one lane with the rolling summary so two `claude` processes never spawn at once. It costs no metered spend; `COPILOT_PULSE=0` turns it off.
 - `npm run eval:agenda` replays real sessions through the exact production reconcile call and gates a model against a baseline (`--baseline <model>`, or `--baseline-from <report.json>` to reuse a paid baseline run).
 
 - The start form pre-fills your private goals, which the coach reads, with what your last five self-reviews keep repeating: a score of 2/5 or lower in at least half of them, a talk share over 55%, or a missing next step. Today that is concision (4 of 5), talk share (3 of 5) and next step (4 of 5), with the evidence under the box. It is worked out without a model, never overwrites anything typed, and can be edited or cleared.

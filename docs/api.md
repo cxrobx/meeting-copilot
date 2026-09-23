@@ -18,6 +18,8 @@
 | `action.trigger` | Manually fire a worker (Quick Actions) | `actionType, prompt?, cardContent?, baseWireframe?, baseHtml?` |
 | `feature.toggle` | Toggle an opt-in monitor | `feature: 'factcheck'\|'coach', enabled` |
 | `meeting.goals` | Private coach-only goals for this meeting | `goals` |
+| `meeting.schedule` | Calendar end of a meeting started from an invite; the pulse runs its close-out 5 min before | `endsAt` (ISO or ms) |
+| `pulse.request` | The Wrap-up button: run a close-out pulse now | — |
 
 ### Server → Client Messages
 
@@ -35,6 +37,10 @@
 | `factcheck.flag` | Fact-check verdict on a claim | `flag { claim, verdict, correction?, sources? }` |
 | `coach.suggestion` | "Say next" coach tip | `suggestion { kind, priority, headline, ... }` |
 | `coach.history` | Every coach card this session, sent on connect so a reload keeps them | `suggestions [ ... ]` |
+| `pulse.update` | A meeting pulse (every 5 min, or a close-out); also sent on connect | `pulse { mode, trigger, status, read, escalations[], closeOut[], minutesIn, minutesLeft }` |
+| `pulse.running` | A pulse is being read (20–40s on Opus) | `mode`, `trigger` |
+| `pulse.failed` | A pulse could not be read | `reason` |
+| `pulse.closeout` | A close-out found things to settle; the app raises a notification | `body` |
 | `metrics` | Debug metrics snapshot | `data` |
 
 ## REST Endpoints
@@ -59,6 +65,7 @@
 | GET | `/present` | The dashboard (HTML) |
 | GET | `/present/actions` / `/present/transcript` / `/present/sessions` | Dashboard data (live or `?session=<id>` replay) |
 | GET | `/present/coach?session=<uuid>` | Coach cards a stored session showed (from `coach_suggestion`; older sessions fall back to the event log's headlines) |
+| GET | `/present/pulse?session=<uuid>` | Meeting pulses a stored session produced, oldest first (`[]` before 2026-09-22) |
 | GET | `/present/events` | SSE fallback (replay only; suggested/running/completed) |
 | POST | `/present/ask` | Highlight-to-ask (SSE token stream) |
 | POST | `/present/review` | On-demand Opus self-review for a session |

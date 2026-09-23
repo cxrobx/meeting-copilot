@@ -80,6 +80,28 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         center.removePendingNotificationRequests(withIdentifiers: ["suggestion-\(actionId)"])
     }
 
+    /// The meeting pulse's close-out pass: what to settle before the call ends.
+    /// One banner at a time (a newer close-out replaces the older), and it
+    /// respects the panel-visible gate like suggestions do. Tapping it opens
+    /// the panel, where the full list is.
+    func postCloseOutNotification(body: String) {
+        guard hasPermission else { return }
+        if let gate = shouldPresentBanner, !gate() { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Before this call ends"
+        content.body = body
+        content.sound = .default
+        content.threadIdentifier = "pulse"
+
+        let request = UNNotificationRequest(
+            identifier: "pulse-closeout",
+            content: content,
+            trigger: nil
+        )
+        center.add(request)
+    }
+
     /// Fires when the supervisor has exhausted its automatic restart budget.
     /// Surfaces to the user via macOS Notification Center so they know to
     /// check logs / quit-and-relaunch — otherwise the failure is silent.

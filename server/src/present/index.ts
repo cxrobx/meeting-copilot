@@ -13,6 +13,7 @@ import { claudeSuggest } from '../claude-cli.js';
 import { buildSignalRegexSources, QUESTION_STARTS } from './signals.js';
 import { hideSupersededRollingSummaries } from './replay-actions.js';
 import { readStoredCoach } from './replay-coach.js';
+import { readStoredPulses } from './replay-pulse.js';
 import { isSessionId } from '../session/ids.js';
 import { applyVaultLook, getVaultLook } from './vault-look.js';
 
@@ -250,6 +251,25 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
       res.json({ suggestions: readStoredCoach(sessionDir), sessionId });
     } catch (err) {
       res.status(500).json({ error: 'Failed to read coach history', detail: String(err) });
+    }
+  });
+
+  // ─── GET /present/pulse — meeting pulses a stored session produced ──
+  router.get('/present/pulse', (req, res) => {
+    const sessionId = req.query.session as string | undefined;
+    if (!isSessionId(sessionId)) {
+      res.status(400).json({ error: 'session must be a session id' });
+      return;
+    }
+    const sessionDir = join(homedir(), '.meeting-copilot', 'sessions', sessionId);
+    if (!existsSync(sessionDir)) {
+      res.status(404).json({ error: 'Session not found', sessionId });
+      return;
+    }
+    try {
+      res.json({ pulses: readStoredPulses(sessionDir), sessionId });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to read pulses', detail: String(err) });
     }
   });
 
@@ -2267,6 +2287,46 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   }
 
   .goals-hint { font-size: 10px; line-height: 1.4; color: var(--gb-overlay2); margin: -4px 0 8px; }
+
+  /* ─── Meeting pulse ─────────────────────────────────────────
+     One card, updated in place every 5 minutes: how it is going, what to
+     escalate, what to settle before the call ends. The close-out pass turns
+     the border warm so it reads as the end-of-call list. */
+  #pulseSlot:empty { display: none; }
+  .pulse-card {
+    background: var(--gb-surface0);
+    border: 1px solid var(--gb-surface2);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+  }
+  .pulse-card.closeout { border-color: var(--gb-peach); box-shadow: 0 0 0 1px var(--gb-peach) inset; }
+  .pulse-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .pulse-label {
+    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--gb-subtext0);
+  }
+  .pulse-card.closeout .pulse-label { color: var(--gb-peach); }
+  .pulse-status {
+    font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+    padding: 2px 7px; border-radius: 4px; color: #fff; background: var(--gb-green);
+  }
+  .pulse-status.drifting { background: var(--gb-yellow); }
+  .pulse-status.stuck { background: var(--gb-red); }
+  .pulse-meta { font-family: var(--font-mono); font-size: 10px; color: var(--gb-overlay2); margin-left: auto; }
+  .pulse-running { font-size: 10px; color: var(--gb-blue); }
+  .pulse-read { font-size: 13px; line-height: 1.5; color: var(--gb-text); margin-top: 8px; }
+  .pulse-section { margin-top: 10px; }
+  .pulse-section-title {
+    font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--gb-subtext0); margin-bottom: 4px;
+  }
+  .pulse-section.escalate .pulse-section-title { color: var(--gb-red); }
+  .pulse-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .pulse-list li { font-size: 12px; line-height: 1.45; color: var(--gb-text); padding-left: 16px; position: relative; }
+  .pulse-list li::before { content: '\\25A2'; position: absolute; left: 0; color: var(--gb-overlay2); }
+  .pulse-section.escalate .pulse-list li::before { content: '!'; color: var(--gb-red); font-weight: 700; left: 4px; }
+  .pulse-why { display: block; font-size: 11px; color: var(--gb-subtext0); }
   .goals-hint:empty { display: none; }
 
   /* ─── Coach history ─────────────────────────────────────────
@@ -3039,6 +3099,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     </div>
     <div id="coachSlot"></div>
     <div id="coachHistory"></div>
+    <div id="pulseSlot"></div>
     <div id="results"></div>
   </div>
 
@@ -3108,6 +3169,75 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   var factFlagCards = new Map();
   var coachExpireTimer = null;
   var pendingGoals = '';
+  // The calendar end of a meeting started from an invite chip; sent after the
+  // session is live, the same way the goals are.
+  var pendingEndsAt = null;
+
+  // ─── Meeting pulse ─────────────────────────────────────────
+  var pulseSlot = document.getElementById('pulseSlot');
+  var latestPulse = null;
+  var pulseRunning = null; // 'pulse' | 'closeout' while a read is in flight
+  var PULSE_STATUS = { on_track: 'On track', drifting: 'Drifting', stuck: 'Stuck' };
+
+  function pulseList(title, items, cls) {
+    if (!items || !items.length) return '';
+    return '<div class="pulse-section ' + cls + '">' +
+      '<div class="pulse-section-title">' + escapeHtml(title) + '</div>' +
+      '<ul class="pulse-list">' + items.map(function(i) {
+        return '<li>' + escapeHtml(i.text || '') +
+          (i.why ? '<span class="pulse-why">' + escapeHtml(i.why) + '</span>' : '') + '</li>';
+      }).join('') + '</ul></div>';
+  }
+
+  function renderPulse() {
+    if (!pulseSlot) return;
+    var p = latestPulse;
+    if (!p && !pulseRunning) { pulseSlot.innerHTML = ''; return; }
+    var closeout = (p && p.mode === 'closeout') || pulseRunning === 'closeout';
+    var running = pulseRunning
+      ? '<span class="pulse-running">' + (pulseRunning === 'closeout' ? 'Checking what to close out\\u2026' : 'Reading the meeting\\u2026') + '</span>'
+      : '';
+    var meta = '';
+    if (p) {
+      meta = p.minutesIn + ' min in' +
+        (p.minutesLeft !== null && p.minutesLeft !== undefined ? ' \\u00b7 ' + Math.max(0, p.minutesLeft) + ' left' : '') +
+        ' \\u00b7 ' + formatTime(new Date(p.createdAt).toISOString());
+    }
+    pulseSlot.innerHTML = '<div class="pulse-card' + (closeout ? ' closeout' : '') + '">' +
+      '<div class="pulse-head">' +
+        '<span class="pulse-label">' + (closeout ? 'Close out' : 'Pulse') + '</span>' +
+        (p ? '<span class="pulse-status ' + escapeHtml(p.status) + '">' + escapeHtml(PULSE_STATUS[p.status] || p.status) + '</span>' : '') +
+        running +
+        (meta ? '<span class="pulse-meta">' + escapeHtml(meta) + '</span>' : '') +
+      '</div>' +
+      (p ? '<div class="pulse-read">' + escapeHtml(p.read) + '</div>' +
+        pulseList('Escalate now', p.escalations, 'escalate') +
+        pulseList(p.mode === 'closeout' ? 'Before the call ends' : 'Close out before the end', p.closeOut, 'closeout-list')
+        : '') +
+    '</div>';
+  }
+
+  function setPulse(p) {
+    latestPulse = p || null;
+    pulseRunning = null;
+    renderPulse();
+  }
+
+  window.clearPulse = function() {
+    latestPulse = null;
+    pulseRunning = null;
+    renderPulse();
+  };
+
+  // The Wrap-up button: a close-out read now (~30s on Opus).
+  window.requestWrapUp = function() {
+    if (!wsSend({ type: 'pulse.request' })) {
+      showToast('Not connected \\u2014 the wrap-up check was not sent.', { error: true });
+      return;
+    }
+    pulseRunning = 'closeout';
+    renderPulse();
+  };
 
   // ─── State ──────────────────────────────────────────────────
   var params = new URLSearchParams(window.location.search);
@@ -4356,6 +4486,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
         '<button class="btn btn-ghost" onclick="triggerAction(\\'mockup\\')" title="UI wireframe from the discussion (type a screen in the box first)">Mockup</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'codegen\\')" title="Generate code from the discussion">Code</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'review\\')" title="Self-review: how you did so far">Review</button>' +
+        '<button class="btn btn-ghost" onclick="requestWrapUp()" title="Close-out check: what to settle before the call ends (about 30s, Opus 5.5)">Wrap-up</button>' +
       '</div>' +
     '</div>';
   }
@@ -4390,6 +4521,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     factFlagCards.clear();
     window.dismissCoach();
     window.clearCoachHistory();
+    window.clearPulse();
     resultsEl.innerHTML = '';
     tocEntries.innerHTML = '';
     transcriptFeed.innerHTML = '';
@@ -4492,6 +4624,9 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     // Goals ride a separate meeting.goals message once the session is live, so
     // the same path works whether start goes through the native bridge or WS.
     pendingGoals = ((document.getElementById('startGoals') || {}).value || '').trim();
+    // A meeting started from an invite knows when it ends: the pulse runs its
+    // close-out pass five minutes before.
+    pendingEndsAt = appliedMeeting && appliedMeeting.endsAt ? appliedMeeting.endsAt : null;
     // The brief belongs to this form; don't let it reappear on the next one.
     prepResult = null;
     appliedMeeting = null;
@@ -7082,6 +7217,10 @@ export const PRESENT_HTML = `<!DOCTYPE html>
               wsSend({ type: 'meeting.goals', goals: pendingGoals });
               pendingGoals = '';
             }
+            if (pendingEndsAt) {
+              wsSend({ type: 'meeting.schedule', endsAt: pendingEndsAt });
+              pendingEndsAt = null;
+            }
           } else if (msg.state === 'archived') {
             // Session just ended — keep transcript visible so the user can
             // review what was said. Only stop the running clock. Agenda
@@ -7111,6 +7250,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
             showAllSegments = false;
             window.dismissCoach();
             window.clearCoachHistory();
+            window.clearPulse();
           }
           updateUI();
           break;
@@ -7171,6 +7311,25 @@ export const PRESENT_HTML = `<!DOCTYPE html>
 
         case 'coach.history':
           setCoachHistory(msg.suggestions);
+          break;
+
+        case 'pulse.update':
+          setPulse(msg.pulse);
+          if (msg.pulse && msg.pulse.mode === 'closeout') {
+            var toSettle = (msg.pulse.closeOut || []).length + (msg.pulse.escalations || []).length;
+            if (toSettle > 0) showToast('Close-out ready: ' + toSettle + ' thing' + (toSettle === 1 ? '' : 's') + ' to settle before the call ends.');
+          }
+          break;
+
+        case 'pulse.running':
+          pulseRunning = msg.mode || 'pulse';
+          renderPulse();
+          break;
+
+        case 'pulse.failed':
+          if (pulseRunning === 'closeout') showToast('The wrap-up check could not read the meeting \\u2014 try again.', { error: true });
+          pulseRunning = null;
+          renderPulse();
           break;
 
         case 'intelligence.error':
@@ -7287,6 +7446,15 @@ export const PRESENT_HTML = `<!DOCTYPE html>
         }
         headerTitle.innerHTML = '<span style="cursor:pointer;color:var(--gb-blue);margin-right:8px" onclick="window.location.href=\\'/present\\'">&larr; Back</span> Session Replay';
       });
+
+    // The last meeting pulse — for a just-ended call, the close-out list.
+    fetch('/present/pulse?session=' + encodeURIComponent(replaySessionId))
+      .then(function(r) { return r.ok ? r.json() : { pulses: [] }; })
+      .then(function(data) {
+        var pulses = data.pulses || [];
+        if (pulses.length) setPulse(pulses[pulses.length - 1]);
+      })
+      .catch(function() { /* replay still works without it */ });
 
     // Coach cards — open in replay, where reading them back is the point.
     fetch('/present/coach?session=' + encodeURIComponent(replaySessionId))

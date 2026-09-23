@@ -23,6 +23,10 @@ export const MODEL_CONFIG = {
   // Pre-meeting prep agent (prep/agent.ts) — web research on the subscription CLI.
   prep: process.env.COPILOT_PREP_MODEL || 'claude-sonnet-5',
   review: process.env.COPILOT_REVIEW_MODEL || 'claude-opus-5',
+  // Meeting pulse (intelligence/pulse.ts): a big-picture read every 5 minutes on
+  // the subscription CLI, so depth matters more than latency or cost. Chris's
+  // call 2026-09-22: Opus 5.5, not Sonnet.
+  pulse: process.env.COPILOT_PULSE_MODEL || 'claude-opus-5-5',
 } as const;
 
 export type LlmTransportMode = 'api' | 'cli' | 'auto';

@@ -73,6 +73,8 @@ cd server && npm start        # Run compiled dist/index.js
 | `SUGGESTION_TTL_MS` | No | 60000 | Legacy default for suggestion TTL |
 | `GEMINI_TRIAGE_TIMEOUT_MS` | No | 12000 | Tier-1 triage timeout before Haiku fallback |
 | `COPILOT_DISABLE_PAID_API` | No | - | `1` = hard zero-API-spend (CLIs/subscription only) |
+| `COPILOT_PULSE` | No | on | `0` turns off the meeting pulse (5-min big-picture read + close-out) |
+| `COPILOT_PULSE_MODEL` | No | `claude-opus-5-5` | Model for the pulse, on the subscription CLI |
 | `COPILOT_MAX_LLM_DOLLARS_PER_SESSION` | No | 10 | The only lifetime stop for a session's metered AI |
 | `COPILOT_MAX_LLM_REQUESTS_PER_MINUTE` | No | 240 | Runaway-loop pause (one-minute window), never a lockout |
 | `COPILOT_MAX_LLM_TOKENS_PER_MINUTE` | No | 2000000 | Runaway-loop pause (one-minute window), never a lockout |

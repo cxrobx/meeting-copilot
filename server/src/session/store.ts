@@ -59,6 +59,45 @@ export interface ContextSummaryRecord {
  * meeting: on screen each one lasts 8–30s and the next replaces it, and the
  * event log only ever kept the headline — never the words it suggested.
  */
+/** A meeting pulse as it was shown (intelligence/pulse.ts owns the shape). */
+export interface PulseRecord {
+  id: string;
+  mode: 'pulse' | 'closeout';
+  trigger: string;
+  status: 'on_track' | 'drifting' | 'stuck';
+  read: string;
+  escalations: Array<{ text: string; why: string }>;
+  closeOut: Array<{ text: string; why: string }>;
+  minutesIn: number;
+  minutesLeft: number | null;
+  latencyMs: number;
+  createdAt: number;
+}
+
+export function pulseFromRow(row: Record<string, any>): PulseRecord {
+  const list = (v: unknown) => {
+    try {
+      const parsed = JSON.parse(String(v ?? '[]'));
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+  return {
+    id: row.id,
+    mode: row.mode,
+    trigger: row.trigger,
+    status: row.status,
+    read: row.read,
+    escalations: list(row.escalations),
+    closeOut: list(row.closeOut),
+    minutesIn: row.minutesIn,
+    minutesLeft: row.minutesLeft ?? null,
+    latencyMs: row.latencyMs ?? 0,
+    createdAt: row.createdAt,
+  };
+}
+
 export interface CoachSuggestionRecord {
   id: string;
   sessionId: string;
@@ -170,12 +209,29 @@ export class SessionStore {
         FOREIGN KEY (sessionId) REFERENCES session(id)
       );
 
+      CREATE TABLE IF NOT EXISTS pulse (
+        id TEXT PRIMARY KEY,
+        sessionId TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        trigger TEXT NOT NULL,
+        status TEXT NOT NULL,
+        read TEXT NOT NULL,
+        escalations TEXT NOT NULL DEFAULT '[]',
+        closeOut TEXT NOT NULL DEFAULT '[]',
+        minutesIn INTEGER NOT NULL,
+        minutesLeft INTEGER,
+        latencyMs INTEGER NOT NULL DEFAULT 0,
+        createdAt INTEGER NOT NULL,
+        FOREIGN KEY (sessionId) REFERENCES session(id)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_transcript_session ON transcript(sessionId);
       CREATE INDEX IF NOT EXISTS idx_transcript_timestamp ON transcript(timestamp);
       CREATE INDEX IF NOT EXISTS idx_action_session ON action(sessionId);
       CREATE INDEX IF NOT EXISTS idx_action_state ON action(state);
       CREATE INDEX IF NOT EXISTS idx_context_summary_session ON context_summary(sessionId);
       CREATE INDEX IF NOT EXISTS idx_coach_suggestion_session ON coach_suggestion(sessionId);
+      CREATE INDEX IF NOT EXISTS idx_pulse_session ON pulse(sessionId);
     `);
   }
 
@@ -353,6 +409,25 @@ export class SessionStore {
     ).all(this.sessionId) as CoachSuggestionRecord[];
   }
 
+  addPulse(p: PulseRecord): void {
+    this.db.prepare(
+      `INSERT OR IGNORE INTO pulse
+         (id, sessionId, mode, trigger, status, read, escalations, closeOut, minutesIn, minutesLeft, latencyMs, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      p.id, this.sessionId, p.mode, p.trigger, p.status, p.read,
+      JSON.stringify(p.escalations), JSON.stringify(p.closeOut),
+      p.minutesIn, p.minutesLeft, p.latencyMs, p.createdAt,
+    );
+  }
+
+  getPulses(): PulseRecord[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM pulse WHERE sessionId = ? ORDER BY createdAt ASC',
+    ).all(this.sessionId) as Array<Record<string, any>>;
+    return rows.map(pulseFromRow);
+  }
+
   getSession(): SessionRecord | undefined {
     const stmt = this.db.prepare('SELECT * FROM session WHERE id = ?');
     return stmt.get(this.sessionId) as SessionRecord | undefined;
@@ -360,6 +435,7 @@ export class SessionStore {
 
   deleteSession(): void {
     this.db.prepare('DELETE FROM coach_suggestion WHERE sessionId = ?').run(this.sessionId);
+    this.db.prepare('DELETE FROM pulse WHERE sessionId = ?').run(this.sessionId);
     this.db.prepare('DELETE FROM context_summary WHERE sessionId = ?').run(this.sessionId);
     this.db.prepare('DELETE FROM action WHERE sessionId = ?').run(this.sessionId);
     this.db.prepare('DELETE FROM transcript WHERE sessionId = ?').run(this.sessionId);

@@ -616,6 +616,9 @@ final class SessionManager {
         case .metrics:
             // Store for debug panel if needed
             break
+
+        case .pulseCloseOut(let body):
+            NotificationManager.shared.postCloseOutNotification(body: body)
         }
     }
 }

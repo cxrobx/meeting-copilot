@@ -319,6 +319,13 @@ export async function claudeSuggest(
     model?: string;
     /** Tool-using calls default to 8 turns. */
     maxTurns?: number;
+    /**
+     * Skip the warm session. A warm process keeps its earlier turns in context
+     * (it recycles every few turns), which is fine for small stateless calls
+     * and wrong for one whose prompt is most of a transcript: the next call
+     * would read the previous transcript too.
+     */
+    cold?: boolean;
   },
 ): Promise<string> {
   const model = options?.model ?? MODEL_CONFIG.worker;
@@ -326,7 +333,7 @@ export async function claudeSuggest(
   // Warm fast-path: tool-less suggestions reuse a persistent session (deltas are
   // forwarded as they stream). Tool-using calls (research/analysis) skip this
   // and use the cold spawn below, which can load WebSearch/WebFetch/etc.
-  if (!allowedTools?.length) {
+  if (!allowedTools?.length && !options?.cold) {
     try {
       const text = await runWarm(prompt, {
         model,

@@ -23,6 +23,8 @@ import { setLlmBudgetExceededHandler } from './api/budget.js';
 import { AgendaTracker, type AgendaStatus } from './intelligence/agenda.js';
 import { FactCheckMonitor, type FactFlag } from './intelligence/factcheck.js';
 import { CoachMonitor, type CoachSuggestion } from './intelligence/coach.js';
+import { MeetingPulse, type MeetingPulseResult } from './intelligence/pulse.js';
+import { inCliLane } from './intelligence/cli-lane.js';
 import { WorkerRegistry } from './workers/registry.js';
 import { ResearchWorker } from './workers/research.js';
 import { FastResearchWorker } from './workers/fast-research.js';
@@ -118,7 +120,11 @@ type InboundMessage =
       baseHtml?: string;
     }
   | { type: 'feature.toggle'; feature: 'factcheck' | 'coach'; enabled: boolean }
-  | { type: 'meeting.goals'; goals: string };
+  | { type: 'meeting.goals'; goals: string }
+  // The calendar end time of a meeting started from an invite (ISO or ms).
+  | { type: 'meeting.schedule'; endsAt: string | number }
+  // The Wrap-up button: run a close-out pulse now.
+  | { type: 'pulse.request' };
 
 // Messages TO Swift app
 type OutboundMessage =
@@ -210,6 +216,11 @@ type OutboundMessage =
       type: 'coach.history';
       suggestions: CoachSuggestion[];
     }
+  | { type: 'pulse.update'; pulse: MeetingPulseResult }
+  | { type: 'pulse.running'; mode: 'pulse' | 'closeout'; trigger: string }
+  | { type: 'pulse.failed'; reason: string }
+  // A close-out with something to settle — the app raises a notification.
+  | { type: 'pulse.closeout'; body: string }
   | {
       // Realtime intelligence failure — surfaced so tier degradation and
       // silent monitor errors are visible in the dashboard instead of only
@@ -320,6 +331,54 @@ let sessionCoachSuggestions: CoachSuggestion[] = [];
 // The user's private goals for this meeting — coach-only context. Content is
 // deliberately NOT logged to the session JSONL (only its length).
 let meetingGoals = '';
+
+// ─── Meeting pulse (intelligence/pulse.ts) ─────────────────────────────────
+// A big-picture read every 5 minutes on the subscription CLI, and a close-out
+// pass near the end. COPILOT_PULSE=0 turns it off.
+const pulse = new MeetingPulse();
+let sessionPulses: MeetingPulseResult[] = [];
+
+pulse.on('running', (d: { mode: 'pulse' | 'closeout'; trigger: string }) => {
+  broadcast({ type: 'pulse.running', mode: d.mode, trigger: d.trigger });
+});
+pulse.on('failed', (d: { mode: string; trigger: string; reason: string; latencyMs: number }) => {
+  debugLog(`[Pulse] ${d.mode} (${d.trigger}) failed after ${d.latencyMs}ms: ${d.reason}`);
+  eventLogger?.log('pulse.failed', d);
+  broadcast({ type: 'pulse.failed', reason: d.reason });
+});
+pulse.on('skipped', (d: { reason: string }) => {
+  eventLogger?.log('pulse.skipped', d);
+});
+pulse.on('pulse', (p: MeetingPulseResult) => {
+  sessionPulses.push(p);
+  try {
+    sessionStore?.addPulse(p);
+  } catch (err) {
+    debugLog(`[Pulse] failed to persist: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  eventLogger?.log('pulse', {
+    id: p.id,
+    mode: p.mode,
+    trigger: p.trigger,
+    status: p.status,
+    escalations: p.escalations.length,
+    closeOut: p.closeOut.length,
+    latencyMs: p.latencyMs,
+  });
+  debugLog(`[Pulse] ${p.mode} (${p.trigger}) ${p.status} · ${p.escalations.length} escalate · ${p.closeOut.length} close-out · ${p.latencyMs}ms`);
+  broadcast({ type: 'pulse.update', pulse: p });
+  if (p.mode === 'closeout' && p.closeOut.length + p.escalations.length > 0) {
+    const first = [...p.escalations, ...p.closeOut].slice(0, 2).map((i) => i.text);
+    broadcast({ type: 'pulse.closeout', body: first.join(' · ') });
+  }
+});
+
+function agendaForPulse(): string {
+  if (!lastAgendaStatus || lastAgendaStatus.items.length === 0) return '';
+  const lines = lastAgendaStatus.items.map((i) => `[${i.state}] ${i.text}`);
+  if (lastAgendaStatus.missing.length) lines.push(`Possibly missing: ${lastAgendaStatus.missing.join('; ')}`);
+  return lines.join('\n');
+}
 
 factCheck.on('flag', (flag: FactFlag) => {
   sessionFactFlags.push(flag);
@@ -528,6 +587,10 @@ function handleWsConnection(ws: WebSocket, label: string): void {
   }
   if (sessionCoachSuggestions.length > 0) {
     ws.send(JSON.stringify({ type: 'coach.history', suggestions: sessionCoachSuggestions }));
+  }
+  const latestPulse = sessionPulses[sessionPulses.length - 1];
+  if (latestPulse) {
+    ws.send(JSON.stringify({ type: 'pulse.update', pulse: latestPulse }));
   }
 
   ws.on('message', async (raw) => {
@@ -808,7 +871,9 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         rollingSummaryAbort = abort;
         try {
           debugLog('[RollingSummary] Refreshing summary...');
-          const result = await summaryWorker.execute(
+          // Takes turns with the meeting pulse: two timer-driven CLI calls
+          // must not spawn at once (intelligence/cli-lane.ts).
+          const result = await inCliLane(() => summaryWorker.execute(
             {
               transcript: fullTranscript,
               scope: 'full',
@@ -820,7 +885,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
               attendees: session?.attendees,
             },
             abort.signal,
-          );
+          ));
 
           if (result.success && !abort.signal.aborted) {
             if (rollingSummaryId) {
@@ -867,6 +932,23 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
           if (rollingSummaryAbort === abort) rollingSummaryAbort = null;
         }
       }, ROLLING_SUMMARY_INTERVAL_MS);
+
+      // Meeting pulse: first read at 5 minutes, close-out near the end.
+      sessionPulses = [];
+      if (process.env.COPILOT_PULSE !== '0') {
+        const startedSession = sessionStore.getSession();
+        const store = sessionStore;
+        pulse.start({
+          title: startedSession?.title ?? message.title ?? '',
+          attendees: startedSession?.attendees ?? message.attendees ?? '',
+          startedAt: startedSession?.startedAt ?? Date.now(),
+          transcriptProvider: () => store.getTranscript().map((r) => `${r.label} ${r.text}`).join('\n'),
+          wordCountProvider: () => store.getTranscript().reduce((sum, r) => sum + (r.wordCount || 0), 0),
+          goalsProvider: () => meetingGoals,
+          agendaProvider: agendaForPulse,
+          coachProvider: () => sessionCoachSuggestions.map((s) => s.headline),
+        });
+      }
 
       break;
     }
@@ -924,6 +1006,8 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         rollingSummaryAbort = null;
         rollingSummaryId = null;
         rollingSummaryWordCount = 0;
+        // The self-review takes over from here; a pulse mid-flight is dropped.
+        pulse.stop();
 
         // Run a final agenda evaluation so the wrap-up state is captured before stop
         try {
@@ -1119,6 +1203,22 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       // Privacy: goals can contain negotiation positions — log length only.
       eventLogger?.log('meeting.goals', { length: meetingGoals.length });
       debugLog(`[Coach] meeting goals set (${meetingGoals.length} chars)`);
+      break;
+    }
+
+    case 'meeting.schedule': {
+      const endsAt = typeof message.endsAt === 'number' ? message.endsAt : Date.parse(String(message.endsAt));
+      if (!Number.isFinite(endsAt)) break;
+      pulse.setEndsAt(endsAt);
+      eventLogger?.log('meeting.schedule', { endsAt: new Date(endsAt).toISOString() });
+      debugLog(`[Pulse] calendar end ${new Date(endsAt).toISOString()}`);
+      break;
+    }
+
+    case 'pulse.request': {
+      if (!sessionActive || !pulse.isRunning()) break;
+      eventLogger?.log('pulse.request', {});
+      pulse.requestCloseOut();
       break;
     }
 
@@ -1592,6 +1692,10 @@ transcriptStitcher.on(
     // Coach sees stable open-segment updates as well as the final cohesive
     // turn. This lets meeting-side pressure/questions start inference before
     // the stitcher's silence timeout, while mic answer review waits for final.
+    // Wrap-up language ("before we go", "one last thing") starts a close-out
+    // pulse. Final turns only: an open line is still being transcribed.
+    if (final && pulse.isRunning()) pulse.noteSegment(segment.text);
+
     if (coach.isRunning()) {
       coach.noteSegment(segment.text, segment.source, {
         final,
