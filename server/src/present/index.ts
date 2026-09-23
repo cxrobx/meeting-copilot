@@ -17,6 +17,7 @@ import { readStoredPulses } from './replay-pulse.js';
 import { isSessionId } from '../session/ids.js';
 import { applyVaultLook, getVaultLook } from './vault-look.js';
 import { buildReaderPage, viewContent, type ViewableAction } from './view-page.js';
+import { readPublished, type PublishJobs } from '../publish/index.js';
 
 // ─── Highlight-to-ask prompts ───────────────────────────────────────────────
 const ASK_SYSTEM: Record<string, string> = {
@@ -111,6 +112,8 @@ export function findAction(
 export interface PresentRouterOptions {
   /** The live session, or the last one once it has ended. */
   getSessionId?: () => string | undefined;
+  /** Publish-as-link; its routes 503 without it. */
+  publish?: PublishJobs;
 }
 
 export function createPresentRouter(registry: WorkerRegistry, options: PresentRouterOptions = {}): Router {
@@ -280,6 +283,42 @@ export function createPresentRouter(registry: WorkerRegistry, options: PresentRo
       markdown: content.markdown,
       refresh: content.pending,
     }));
+  });
+
+  // ─── Publish a card as a public link (publish/index.ts) ──────────────
+  // POST starts a job and answers 202; progress arrives as WS publish.state.
+  // The dashboard's second click on "Publish link" is the approval.
+  const badSession = (req: { query: Record<string, unknown> }) =>
+    req.query.session !== undefined && !isSessionId(req.query.session);
+
+  router.get('/present/published', (req, res) => {
+    if (badSession(req)) { res.status(400).json({ error: 'session must be a session id' }); return; }
+    const sessionId = sessionFor(req);
+    const records = sessionId ? readPublished(sessionId) : {};
+    const live = Object.fromEntries(Object.entries(records).filter(([, r]) => !r.revokedAt));
+    res.json({ records: live, busy: options.publish?.busy ?? null, jobs: options.publish?.states() ?? {} });
+  });
+
+  router.post('/present/action/:id/publish', (req, res) => {
+    if (!options.publish) { res.status(503).json({ error: 'Publishing is not set up on this server.' }); return; }
+    if (badSession(req)) { res.status(400).json({ error: 'session must be a session id' }); return; }
+    let result: ReturnType<PublishJobs['start']>;
+    try {
+      result = options.publish.start(req.params.id, sessionFor(req));
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+      return;
+    }
+    if (!result.ok) { res.status(result.status).json({ error: result.error }); return; }
+    res.status(result.status).json(result.status === 200 ? { record: result.record } : { started: true });
+  });
+
+  router.delete('/present/action/:id/publish', async (req, res) => {
+    if (!options.publish) { res.status(503).json({ error: 'Publishing is not set up on this server.' }); return; }
+    if (badSession(req)) { res.status(400).json({ error: 'session must be a session id' }); return; }
+    const result = await options.publish.revoke(req.params.id, sessionFor(req));
+    if (!result.ok) { res.status(result.status).json({ error: result.error }); return; }
+    res.json({ revoked: true });
   });
 
   // ─── GET /present/transcript — transcript segments for stored session ─
@@ -2115,6 +2154,31 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     cursor: pointer;
   }
   .card-expand:hover { color: rgb(var(--accent)); border-color: rgb(var(--accent) / 0.35); }
+  .card-publish {
+    flex-shrink: 0;
+    border: 1px solid rgb(var(--text-primary) / 0.14);
+    background: none;
+    color: var(--gb-subtext1);
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .card-publish:hover:not(:disabled) { color: rgb(var(--accent)); border-color: rgb(var(--accent) / 0.35); }
+  .card-publish.confirm, .card-publish.confirm:hover:not(:disabled) { background: rgb(var(--accent)); border-color: rgb(var(--accent)); color: rgb(var(--accent-ink)); font-weight: 600; }
+  .card-publish:disabled { opacity: 0.55; cursor: default; }
+  .mc-pub-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    color: var(--gb-subtext1);
+    margin: -4px 0 10px;
+  }
+  .mc-pub-row .btn { padding: 2px 8px; font-size: 11px; }
+  .mc-pub-url { font-family: var(--font-mono); color: rgb(var(--accent)); word-break: break-all; }
+  .mc-pub-error { color: var(--gb-red); }
 
   .card-body {
     font-size: 13px;
@@ -5776,6 +5840,181 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
   };
 
+  // ─── Publish a card as a public link ──────────────────────
+  // Two clicks: "Publish link" turns into "Publish publicly?", and the second
+  // click is the approval (no confirm(), which the app's web view may not
+  // show). Progress arrives as WS publish.state; the finished link is copied
+  // and stays on the card, re-read from GET /present/published on load.
+  var mcPub = {}; // actionId -> { phase, url, error, confirm }
+  var mcPubConfirmTimer = null;
+
+  function mcSessionQuery() {
+    return replaySessionId ? '?session=' + encodeURIComponent(replaySessionId) : '';
+  }
+
+  function mcPubPending(action) {
+    var arts = (action.result && action.result.artifacts) || [];
+    return arts.some(function(a) { return String(a.content || '').indexOf('Deep research is still reading') !== -1; });
+  }
+
+  function mcPubCopy(url) {
+    function done() { showToast('Link copied'); }
+    function legacy() {
+      var ta = document.createElement('textarea');
+      ta.value = url;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) { showToast('Copy failed — select the link instead', { error: true }); }
+      ta.remove();
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(done, legacy);
+    else legacy();
+  }
+
+  function mcPubPaint(id, cardEl) {
+    var card = cardEl || actionCards.get(id);
+    if (!card) return;
+    var st = mcPub[id] || {};
+    var btn = card.querySelector('[data-mc-publish]');
+    if (btn) {
+      var working = st.phase === 'polishing' || st.phase === 'uploading';
+      btn.style.display = st.phase === 'done' ? 'none' : '';
+      btn.disabled = working || btn.hasAttribute('data-mc-pending');
+      btn.classList.toggle('confirm', !!st.confirm);
+      btn.textContent = btn.hasAttribute('data-mc-pending') ? 'Publish after deep research'
+        : working ? 'Publishing\\u2026'
+        : st.confirm ? 'Publish publicly?'
+        : st.phase === 'failed' ? 'Retry publish' : 'Publish link';
+    }
+    var row = card.querySelector('[data-mc-pub-row]');
+    if (!row) return;
+    if (st.phase === 'polishing' || st.phase === 'uploading') {
+      row.innerHTML = '<span class="spinner"></span> ' + (st.phase === 'polishing' ? 'Polishing the page\\u2026' : 'Uploading\\u2026');
+      row.style.display = '';
+    } else if (st.phase === 'done' && st.url) {
+      row.innerHTML = '<a class="mc-pub-url" href="' + escapeHtml(st.url) + '" target="_blank" rel="noopener">' + escapeHtml(st.url) + '</a>' +
+        '<button class="btn btn-ghost" data-mc-pub-copy="' + escapeHtml(id) + '">Copy</button>' +
+        '<button class="btn btn-ghost" data-mc-pub-revoke="' + escapeHtml(id) + '">Unpublish</button>';
+      row.style.display = '';
+    } else if (st.phase === 'failed') {
+      row.innerHTML = '<span class="mc-pub-error">Publish failed: ' + escapeHtml(st.error || 'unknown error') + '</span>';
+      row.style.display = '';
+    } else {
+      row.innerHTML = '';
+      row.style.display = 'none';
+    }
+  }
+
+  function mcPubSet(id, next) {
+    mcPub[id] = next;
+    mcPubPaint(id);
+  }
+
+  function mcPubLoad() {
+    return fetch('/present/published' + mcSessionQuery()).then(function(r) { return r.ok ? r.json() : null; }).then(function(data) {
+      if (!data || !data.records) return;
+      Object.keys(data.records).forEach(function(id) {
+        var cur = mcPub[id];
+        if (cur && (cur.phase === 'polishing' || cur.phase === 'uploading')) return;
+        mcPubSet(id, { phase: 'done', url: data.records[id].url });
+      });
+      // A job in flight or just finished, for a page that missed publish.state
+      // (replay has no WebSocket). A 'done' job is already in records.
+      Object.keys(data.jobs || {}).forEach(function(id) {
+        var job = data.jobs[id];
+        var cur = mcPub[id] || {};
+        var working = cur.phase === 'polishing' || cur.phase === 'uploading';
+        if (job.phase === 'failed' && working) mcPubSet(id, { phase: 'failed', error: job.error });
+        else if (job.phase === 'uploading' && cur.phase === 'polishing') mcPubSet(id, { phase: 'uploading' });
+        else if (job.phase === 'done' && working && job.url) { mcPubSet(id, { phase: 'done', url: job.url }); mcPubCopy(job.url); }
+      });
+    }).catch(function() {});
+  }
+
+  // Poll while a job runs; stops on its own once no card is working.
+  var mcPubPollTimer = null;
+  function mcPubPoll() {
+    if (mcPubPollTimer) return;
+    mcPubPollTimer = setInterval(function() {
+      var working = Object.keys(mcPub).some(function(id) { return mcPub[id].phase === 'polishing' || mcPub[id].phase === 'uploading'; });
+      if (!working) { clearInterval(mcPubPollTimer); mcPubPollTimer = null; return; }
+      mcPubLoad();
+    }, 2500);
+  }
+
+  function mcPubStart(id) {
+    mcPubSet(id, { phase: 'polishing' });
+    mcPubPoll();
+    fetch('/present/action/' + encodeURIComponent(id) + '/publish' + mcSessionQuery(), { method: 'POST' })
+      .then(function(r) { return r.json().then(function(body) { return { status: r.status, body: body }; }); })
+      .then(function(res) {
+        if (res.status === 200 && res.body.record) {
+          mcPubSet(id, { phase: 'done', url: res.body.record.url });
+          mcPubCopy(res.body.record.url);
+        } else if (res.status !== 202) {
+          mcPubSet(id, { phase: 'failed', error: res.body.error || ('HTTP ' + res.status) });
+        }
+      })
+      .catch(function(e) { mcPubSet(id, { phase: 'failed', error: String(e) }); });
+  }
+
+  function mcPubRevoke(id) {
+    fetch('/present/action/' + encodeURIComponent(id) + '/publish' + mcSessionQuery(), { method: 'DELETE' })
+      .then(function(r) { return r.json().then(function(body) { return { ok: r.ok, body: body }; }); })
+      .then(function(res) {
+        if (res.ok) { mcPubSet(id, {}); showToast('Link taken down'); }
+        else showToast(res.body.error || 'Unpublish failed', { error: true });
+      })
+      .catch(function(e) { showToast(String(e), { error: true }); });
+  }
+
+  // From WS publish.state.
+  function mcPubOnState(msg) {
+    if (msg.phase === 'done') {
+      mcPubSet(msg.actionId, { phase: 'done', url: msg.url });
+      if (msg.url) mcPubCopy(msg.url);
+    } else if (msg.phase === 'revoked') {
+      mcPubSet(msg.actionId, {});
+    } else {
+      mcPubSet(msg.actionId, { phase: msg.phase, error: msg.error });
+    }
+  }
+
+  document.addEventListener('click', function(e) {
+    var t = e.target && e.target.closest ? e.target : null;
+    if (!t) return;
+    var pub = t.closest('[data-mc-publish]');
+    var copy = t.closest('[data-mc-pub-copy]');
+    var revoke = t.closest('[data-mc-pub-revoke]');
+    if (!pub && !copy && !revoke) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (copy) {
+      var cst = mcPub[copy.getAttribute('data-mc-pub-copy')];
+      if (cst && cst.url) mcPubCopy(cst.url);
+      return;
+    }
+    if (revoke) { mcPubRevoke(revoke.getAttribute('data-mc-pub-revoke')); return; }
+    var id = pub.getAttribute('data-mc-publish');
+    var st = mcPub[id] || {};
+    if (st.phase === 'polishing' || st.phase === 'uploading' || pub.disabled) return;
+    if (!st.confirm) {
+      Object.keys(mcPub).forEach(function(other) {
+        if (other !== id && mcPub[other] && mcPub[other].confirm) mcPubSet(other, Object.assign({}, mcPub[other], { confirm: false }));
+      });
+      mcPubSet(id, Object.assign({}, st, { confirm: true }));
+      clearTimeout(mcPubConfirmTimer);
+      mcPubConfirmTimer = setTimeout(function() {
+        if (mcPub[id] && mcPub[id].confirm) mcPubSet(id, Object.assign({}, mcPub[id], { confirm: false }));
+      }, 5000);
+      return;
+    }
+    clearTimeout(mcPubConfirmTimer);
+    mcPubStart(id);
+  });
+
   // ─── Highlight-to-Ask (transcript selection) ──────────────
   // Highlight transcript text → right-click → Fact check / Explain / Custom
   // prompt. Opens a floating panel anchored to the selection that streams
@@ -6702,9 +6941,11 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       '<span class="card-title">' + escapeHtml(action.title) + '</span>' +
       '<span class="card-time">' + formatTime(action.completedAt) + '</span>' +
       (mcCanExpand(action)
-        ? '<button class="card-expand" data-mc-expand="' + escapeHtml(action.id) + '" title="Open in a browser tab" aria-label="Open in a browser tab">\u2197</button>'
+        ? '<button class="card-publish" data-mc-publish="' + escapeHtml(action.id) + '"' + (mcPubPending(action) ? ' data-mc-pending' : '') + ' title="Publish a polished copy at a public link">Publish link</button>' +
+          '<button class="card-expand" data-mc-expand="' + escapeHtml(action.id) + '" title="Open in a browser tab" aria-label="Open in a browser tab">\u2197</button>'
         : '') +
-    '</div>';
+    '</div>' +
+    (mcCanExpand(action) ? '<div class="mc-pub-row" data-mc-pub-row style="display:none"></div>' : '');
 
     var body = '';
 
@@ -6770,6 +7011,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     }
 
     card.innerHTML = header + body;
+    mcPubPaint(action.id, card);
     // Summaries write sub-headings as a paragraph that is all bold
     // ("**Backgrounds and rapport**") rather than ###; mark those so they take
     // the vault's h3 hue instead of reading as black body text.
@@ -7965,6 +8207,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       // A reconnect means the server may have restarted, or been away long
       // enough for the vault's theme to have moved. Cheap when nothing changed.
       if (window.refreshVaultLook) window.refreshVaultLook();
+      mcPubLoad();
       // Enable start button if on idle screen (respects agenda extraction state)
       refreshStartButton();
       var connMsg = idleOverlay.querySelector('p[style*="red"]');
@@ -8234,6 +8477,10 @@ export const PRESENT_HTML = `<!DOCTYPE html>
           }
           break;
 
+        case 'publish.state':
+          mcPubOnState(msg);
+          break;
+
         case 'agenda.status':
           if (msg.status) renderAgendaStatus(msg.status);
           break;
@@ -8300,6 +8547,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
         if (data.actions && data.actions.length > 0) {
           data.actions.forEach(renderAction);
           if (params.get('ended') === '1') focusFinalSummary(data.actions);
+          mcPubLoad();
         }
         headerTitle.innerHTML = '<span style="cursor:pointer;color:var(--gb-blue);margin-right:8px" onclick="window.location.href=\\'/present\\'">&larr; Back</span> Session Replay';
       });

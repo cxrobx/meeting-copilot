@@ -29,7 +29,8 @@ server/src/
 ├── transcription/     # Transcription providers (whisper/parakeet, deepgram, dedup, stitcher)
 ├── intelligence/      # Eval loop (triage→suggest), agenda, coach, factcheck, prompts
 ├── workers/           # Research, FastResearch, Summary, Analysis, Mockup, CodeGen, Review
-├── present/           # /present dashboard (index.ts template + signals.ts + vault-look.ts)
+├── present/           # /present dashboard (index.ts template + signals.ts + vault-look.ts + view-page.ts: a card as its own page)
+├── publish/           # Publish a card as a public link: polish agent → R2 upload (uploader.ts), jobs + ledger (index.ts)
 ├── session/           # SQLite store, JSONL events, shared transcript, cleanup, reviews
 ├── api/               # Direct-API paths (anthropic, openai) + paid-API killswitch
 └── debug/             # /debug endpoint
@@ -88,6 +89,8 @@ cd server && npm start        # Run compiled dist/index.js
 | `COPILOT_MAX_LLM_TOKENS_PER_MINUTE` | No | 2000000 | Runaway-loop pause (one-minute window), never a lockout |
 | `COPILOT_ENABLE_HTTP_TRANSCRIBE` | No | - | `1` re-enables the legacy POST /transcribe path |
 | `CXMAIL_DB_PATH` | No | `~/Library/Application Support/com.cxmail.app/cxmail.db` | cxmail DB for start-form meeting auto-fill (read-only) |
+| `COPILOT_SHARE_BUCKET` | No | `mc-share` | R2 bucket published cards go to (`publish/uploader.ts`) |
+| `COPILOT_SHARE_BASE_URL` | No | `https://share.cxventures.io` | Public origin of that bucket; a published link is `<base>/<key>` |
 | `ONYX_URL` | No | `http://127.0.0.1:8899` | Where the dashboard reads the vault palette from (Onyx's `/api/vault-look`) |
 
 > **Settings precedence**: `~/.meeting-copilot/settings.json` (written by the dashboard gear panel via `POST /settings`) **beats env vars**, which beat hardcoded defaults. Env vars remain as back-compat defaults only.

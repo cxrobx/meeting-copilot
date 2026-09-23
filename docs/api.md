@@ -47,6 +47,7 @@
 | `pulse.failed` | A pulse could not be read | `reason`, `mode`, `trigger` |
 | `pulse.closeout` | A timer's close-out (calendar or wrap-up language) found things to settle; the app raises a notification | `body` |
 | `ask.state` | One of the coach's questions was taken (`started`), answered (`done`) or `failed`. The dashboard's buttons show progress from it; the app turns `title`/`body` into a notification when the dashboard is not in front | `kind` (checkin/missed/suggest/wrapup), `phase`, `title?`, `body?`, `empty?` |
+| `publish.state` | A card's publish-as-link job moved on: `polishing` → `uploading` → `done` (with `url`) or `failed` (with `error`); `revoked` after Unpublish. Replay pages, which have no WebSocket, poll `GET /present/published` instead | `actionId, phase, url?, error?` |
 | `metrics` | Debug metrics snapshot | `data` |
 
 ## REST Endpoints
@@ -73,6 +74,10 @@
 | GET | `/present/actions` / `/present/transcript` / `/present/sessions` | Dashboard data (live or `?session=<id>` replay) |
 | GET | `/present/coach?session=<uuid>` | Coach cards a stored session showed (from `coach_suggestion`; older sessions fall back to the event log's headlines) |
 | GET | `/present/pulse?session=<uuid>` | Meeting pulses a stored session produced, oldest first (`[]` before 2026-09-22) |
+| GET | `/present/action/:id/view[?session=<uuid>]` | One card as its own page (the ↗ button). A mockup/`html` artifact is sent as-is under `CSP: sandbox allow-scripts`; anything else becomes a reader page in the HTML Artifact Kit look, server-rendered, reloading every 5 s while a deep follow-up is pending |
+| GET | `/present/published[?session=<uuid>]` | The session's live links `{ records: {actionId: {url, key, via, at}}, busy, jobs }`; `jobs` = each card's latest `publish.state` since the server started |
+| POST | `/present/action/:id/publish[?session=<uuid>]` | Publish a card at `https://share.cxventures.io/<key>`: 202 and progress over `publish.state`, 200 `{record}` if already live, 409 while another job runs or deep research is pending. The dashboard's second click is the approval |
+| DELETE | `/present/action/:id/publish[?session=<uuid>]` | Take the page down (R2 delete) and mark the record revoked |
 | GET | `/present/events` | SSE fallback (replay only; suggested/running/completed) |
 | POST | `/present/ask` | Highlight-to-ask (SSE token stream) |
 | POST | `/present/review` | On-demand Opus self-review for a session |
@@ -88,6 +93,7 @@ Each session stores data at `~/.meeting-copilot/sessions/<uuid>/`:
 | `session.db` | SQLite — session, transcript, action, context_summary tables |
 | `events.jsonl` | Append-only event log |
 | `manifest.json` | Metadata snapshot for external tools (refreshed on late results) |
+| `published.json` | Links published from this session's cards, by action id (`revokedAt` once taken down). Every publish and revoke is also appended to the global `~/.meeting-copilot/published.jsonl` ledger |
 | `prep.json` | The prep the session started from: a staged prep (moved here from `~/.meeting-copilot/staged/`) or the Prep button's brief (`origin: "form"`) |
 
 Server settings persist at `~/.meeting-copilot/settings.json` (file > env > defaults).

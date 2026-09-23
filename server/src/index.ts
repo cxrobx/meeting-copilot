@@ -41,7 +41,10 @@ import { EventLogger } from './session/events.js';
 import { DebugHandler } from './debug/index.js';
 import { cleanupOldSessions, cleanStalePresence } from './session/cleanup.js';
 import { writePresence, removePresence, appendTranscript, setSharingEnabled } from './session/shared.js';
-import { createPresentRouter } from './present/index.js';
+import { createPresentRouter, findAction } from './present/index.js';
+import { PublishJobs, type PublishStateMessage } from './publish/index.js';
+import { polishToPage } from './publish/polish.js';
+import { wranglerUploader } from './publish/uploader.js';
 import { END_OF_MEETING_SUMMARY_DESCRIPTION } from './present/replay-actions.js';
 import { createRoutes } from './routes.js';
 import { scanProjects, loadProjectContext, formatProjectBrief } from './project/index.js';
@@ -188,6 +191,7 @@ type OutboundMessage =
       actionId: string;
       delta: string;
     }
+  | PublishStateMessage
   | {
       type: 'session.state';
       state: 'idle' | 'priming' | 'live' | 'degraded' | 'ending' | 'error' | 'archived';
@@ -586,7 +590,21 @@ const VENDOR_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'vendor')
 app.use('/vendor', express.static(VENDOR_DIR, { maxAge: '7d' }));
 
 // Share/Present mode
-app.use(createPresentRouter(registry, { getSessionId: () => sessionStore?.id ?? lastSessionId ?? undefined }));
+// Publish-as-link (publish/): the agent polishes on the subscription CLI,
+// the server uploads; the agent never holds the Cloudflare key.
+const liveSessionId = () => sessionStore?.id ?? lastSessionId ?? undefined;
+const publishJobs = new PublishJobs({
+  find: (actionId, sessionId) => findAction(registry, actionId, sessionId ?? liveSessionId()),
+  polish: (action, signal) => polishToPage(
+    action,
+    (prompt, system, sig) => claudeSuggest(prompt, system, sig, undefined, { model: MODEL_CONFIG.worker, cold: true }),
+    signal,
+  ),
+  uploader: wranglerUploader,
+  broadcast: (message) => broadcast(message),
+  log: (message) => log('publish', message),
+});
+app.use(createPresentRouter(registry, { getSessionId: liveSessionId, publish: publishJobs }));
 
 // Routes (health, preflight, settings, transcribe, projects, debug)
 app.use(createRoutes({
