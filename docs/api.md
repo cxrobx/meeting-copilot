@@ -9,6 +9,7 @@
 | Type | Purpose | Key fields |
 |------|---------|------------|
 | `audio_chunk` | Stream one audio chunk (base64 WAV, 16kHz mono) | `data, source: 'mic'\|'meeting', audioDurationSec?, sequence?, isContinuation?` |
+| *(binary frame)* | Live audio for streaming transcription: one binary message per 100 ms, not JSON | byte 0 = `0x01` mic / `0x02` meeting, then 3,200 bytes PCM16 LE 16 kHz mono. JSON messages start with `{`, which is how the server tells them apart |
 | `audio.flush` | Flush VAD-buffered trailing audio at stop | — |
 | `session.start` | Begin a meeting session | `title?, agenda?, attendees?, projectNames?, contextPaths?` |
 | `session.stop` | End the session (idempotent) | — |

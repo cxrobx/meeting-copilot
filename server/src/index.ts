@@ -14,7 +14,7 @@ import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import dotenv from 'dotenv';
 
-import { TranscriptionService } from './transcription/index.js';
+import { TranscriptionService, resolveTranscription, type StreamChunk, type TranscribeChunkMeta } from './transcription/index.js';
 import type { TranscriptSegment } from './transcription/types.js';
 import { TranscriptDedup } from './transcription/dedup.js';
 import { TranscriptStitcher } from './transcription/stitch.js';
@@ -83,6 +83,10 @@ if (process.env.SHARE_TRANSCRIPT === 'false') {
 // ─── Socket Path ───────────────────────────────────────────────────────────
 const COPILOT_DIR = join(homedir(), '.meeting-copilot');
 const SOCKET_PATH = join(COPILOT_DIR, 'copilot.sock');
+
+// First byte of a binary audio frame from the app (see ws.on('message')).
+const AUDIO_FRAME_MIC = 0x01;
+const AUDIO_FRAME_MEETING = 0x02;
 
 // ─── WebSocket Message Types ───────────────────────────────────────────────
 
@@ -285,7 +289,12 @@ let whisperAvailable: boolean | null = null;
 
 // ─── Initialize Core Services ──────────────────────────────────────────────
 
-const transcription = new TranscriptionService();
+const transcriptionPlan = resolveTranscription();
+const transcription = new TranscriptionService(transcriptionPlan.provider);
+// Live Grok stream (null when streaming is off or not allowed). When set, the
+// VAD chunks the app also sends only reach `transcription` during an outage.
+const streaming = transcriptionPlan.streaming;
+if (streaming) transcription.streamingInfo = streaming.info;
 const transcriptDedup = new TranscriptDedup();
 const transcriptStitcher = new TranscriptStitcher();
 const intelligence = new IntelligenceEngine();
@@ -660,6 +669,12 @@ function handleWsConnection(ws: WebSocket, label: string): void {
   }
 
   ws.on('message', async (raw) => {
+    // Binary audio frame: [0x01 mic | 0x02 meeting] + 100 ms of 16 kHz PCM16.
+    // JSON messages always start with '{', so the first byte tells them apart.
+    if (Buffer.isBuffer(raw) && (raw[0] === AUDIO_FRAME_MIC || raw[0] === AUDIO_FRAME_MEETING)) {
+      if (sessionActive) streaming?.pushFrame(raw[0] === AUDIO_FRAME_MIC ? 'mic' : 'meeting', raw.subarray(1));
+      return;
+    }
     try {
       const message = JSON.parse(raw.toString()) as InboundMessage;
       await handleInboundMessage(message);
@@ -683,6 +698,70 @@ function handleWsConnection(ws: WebSocket, label: string): void {
 
 wss.on('connection', (ws) => handleWsConnection(ws, 'WS'));
 
+// ─── Chunk transcription (local path, or everything when not streaming) ──────
+
+async function transcribeChunk(
+  wavBuffer: Buffer,
+  source: 'mic' | 'meeting',
+  meta: TranscribeChunkMeta,
+  isContinuation: boolean,
+): Promise<void> {
+  if (!sessionActive || !sessionStore) return;
+  // Snapshot the session id BEFORE the await. Short chunks mean more
+  // in-flight work; a session.stop during transcription must not cause
+  // us to persist or broadcast a stale segment into a new session.
+  const chunkSessionId = sessionStore.id;
+
+  try {
+    const segment = await transcription.transcribeChunk(wavBuffer, source, meta);
+
+    if (!sessionActive || sessionStore?.id !== chunkSessionId) {
+      debugLog('[Audio] Dropping in-flight chunk — session changed during transcription');
+      return;
+    }
+
+    if (segment.text) {
+      // Phase 4: strip chunk-boundary overlap before persistence. Since
+      // Swift emits 4s chunks every 3s, each chunk's first ~1s is the
+      // previous chunk's last ~1s. Dedup in-place on `segment.text` so
+      // SQLite / broadcast / shared JSONL are all clean (summaries and
+      // exports read from SQLite).
+      // Dedup only when the emitter flagged this chunk as carrying
+      // audio from the previous one. VAD pause-triggered chunks are
+      // standalone utterances — repeated words across them are NOT
+      // duplicates. Default to `true` for older Swift clients that
+      // don't send the flag yet (fixed-timer path always overlapped).
+      const dedupedText = transcriptDedup.dedup(
+        segment.source,
+        segment.text,
+        segment.timestamp,
+        isContinuation,
+      );
+      if (!dedupedText) {
+        debugLog(`[Dedup] Dropped duplicate segment from ${segment.source}`);
+        return;
+      }
+      if (dedupedText !== segment.text) {
+        debugLog(`[Dedup] Trimmed overlap from ${segment.source}`);
+        segment.text = dedupedText;
+        segment.wordCount = dedupedText.split(/\s+/).filter(Boolean).length;
+      }
+
+      // Phase: sentence-stitching. Feed the deduped fragment to the
+      // stitcher, which grows a per-source open segment and emits live
+      // updates (broadcast only) until the sentence closes — at which
+      // point the cohesive segment is persisted, fed to intelligence, and
+      // appended to the shared JSONL. See transcriptStitcher.on('segment').
+      transcriptStitcher.push(segment);
+    }
+  } catch (error) {
+    console.error(
+      '[Transcription] Error:',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
 // ─── Inbound Message Handler ───────────────────────────────────────────────
 
 async function handleInboundMessage(message: InboundMessage): Promise<void> {
@@ -700,70 +779,20 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       debugLog(`[Audio] Chunk received: ${wavBuffer.length} bytes, source: ${message.source}`);
       debug.recordAudioChunk(wavBuffer.length);
 
-      // Snapshot the session id BEFORE the await. Short chunks mean more
-      // in-flight work; a session.stop during transcription must not cause
-      // us to persist or broadcast a stale segment into a new session.
-      const chunkSessionId = sessionStore.id;
-
-      try {
-        const segment = await transcription.transcribeChunk(
-          wavBuffer,
-          message.source,
-          {
-            chunkId: message.chunkId,
-            audioDurationSec: message.audioDurationSec,
-            captureStartedAt: message.captureStartedAt,
-            captureEndedAt: message.captureEndedAt,
-            sequence: message.sequence,
-          },
-        );
-
-        if (!sessionActive || sessionStore?.id !== chunkSessionId) {
-          debugLog('[Audio] Dropping in-flight chunk — session changed during transcription');
-          break;
-        }
-
-        if (segment.text) {
-          // Phase 4: strip chunk-boundary overlap before persistence. Since
-          // Swift emits 4s chunks every 3s, each chunk's first ~1s is the
-          // previous chunk's last ~1s. Dedup in-place on `segment.text` so
-          // SQLite / broadcast / shared JSONL are all clean (summaries and
-          // exports read from SQLite).
-          // Dedup only when the emitter flagged this chunk as carrying
-          // audio from the previous one. VAD pause-triggered chunks are
-          // standalone utterances — repeated words across them are NOT
-          // duplicates. Default to `true` for older Swift clients that
-          // don't send the flag yet (fixed-timer path always overlapped).
-          const isContinuation = message.isContinuation ?? true;
-          const dedupedText = transcriptDedup.dedup(
-            segment.source,
-            segment.text,
-            segment.timestamp,
-            isContinuation,
-          );
-          if (!dedupedText) {
-            debugLog(`[Dedup] Dropped duplicate segment from ${segment.source}`);
-            break;
-          }
-          if (dedupedText !== segment.text) {
-            debugLog(`[Dedup] Trimmed overlap from ${segment.source}`);
-            segment.text = dedupedText;
-            segment.wordCount = dedupedText.split(/\s+/).filter(Boolean).length;
-          }
-
-          // Phase: sentence-stitching. Feed the deduped fragment to the
-          // stitcher, which grows a per-source open segment and emits live
-          // updates (broadcast only) until the sentence closes — at which
-          // point the cohesive segment is persisted, fed to intelligence, and
-          // appended to the shared JSONL. See transcriptStitcher.on('segment').
-          transcriptStitcher.push(segment);
-        }
-      } catch (error) {
-        console.error(
-          '[Transcription] Error:',
-          error instanceof Error ? error.message : String(error),
-        );
+      const meta: TranscribeChunkMeta = {
+        chunkId: message.chunkId,
+        audioDurationSec: message.audioDurationSec,
+        captureStartedAt: message.captureStartedAt,
+        captureEndedAt: message.captureEndedAt,
+        sequence: message.sequence,
+      };
+      // While the live stream covers this source, hold the chunk (replayed
+      // locally only if the stream fails) instead of transcribing it twice.
+      const endMs = (message.captureEndedAt && Date.parse(message.captureEndedAt)) || Date.now();
+      if (streaming?.claimChunk(message.source, endMs, { wavBuffer, source: message.source, meta })) {
+        break;
       }
+      await transcribeChunk(wavBuffer, message.source, meta, message.isContinuation ?? true);
       break;
     }
 
@@ -814,6 +843,8 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         promptParts.push(`Topics: ${message.agenda.trim().slice(0, 800)}.`);
       }
       transcription.setSessionPrompt(promptParts.join(' '));
+      // Agenda + attendees become the stream's key terms, so open it after.
+      streaming?.start(transcription.sessionPromptText);
 
       // Set meeting context on intelligence engine
       if (message.agenda || message.attendees) {
@@ -1064,8 +1095,14 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         } catch {
           /* non-critical */
         }
-        // Close any open stitched sentences so the final transcript (read below
-        // for the summary + review) holds complete, cohesive segments.
+        // Drain the live streams (their last words land here), then close any
+        // open stitched sentences so the final transcript (read below for the
+        // summary + review) holds complete, cohesive segments.
+        try {
+          await streaming?.stop();
+        } catch (err) {
+          console.warn('[Streaming] stop failed:', err);
+        }
         transcriptStitcher.flushAll();
         transcription.clearSessionPrompt();
 
@@ -1788,68 +1825,75 @@ registry.on('action.completed', (action: ActionLifecycle) => {
 // Every emit broadcasts a transcript.update with replace:true (so the UI
 // replaces the open line in place); only CLOSED (cohesive) segments are
 // persisted to SQLite, fed to intelligence, and appended to the shared JSONL.
-transcriptStitcher.on(
-  'segment',
-  ({ segment, final }: { segment: TranscriptSegment; final: boolean }) => {
-    if (!sessionActive || !sessionStore) return;
+function handleTranscriptSegment({ segment, final }: { segment: TranscriptSegment; final: boolean }): void {
+  if (!sessionActive || !sessionStore) return;
 
-    // Coach sees stable open-segment updates as well as the final cohesive
-    // turn. This lets meeting-side pressure/questions start inference before
-    // the stitcher's silence timeout, while mic answer review waits for final.
-    // Wrap-up language ("before we go", "one last thing") starts a close-out
-    // pulse. Final turns only: an open line is still being transcribed.
-    if (final && pulse.isRunning()) pulse.noteSegment(segment.text);
+  // Coach sees stable open-segment updates as well as the final cohesive
+  // turn. This lets meeting-side pressure/questions start inference before
+  // the stitcher's silence timeout, while mic answer review waits for final.
+  // Wrap-up language ("before we go", "one last thing") starts a close-out
+  // pulse. Final turns only: an open line is still being transcribed.
+  if (final && pulse.isRunning()) pulse.noteSegment(segment.text);
 
-    if (coach.isRunning()) {
-      coach.noteSegment(segment.text, segment.source, {
-        final,
-        segmentId: segment.id,
-        timestamp: segment.timestamp,
-      });
-    }
-
-    if (final) {
-      sessionStore.addTranscript(segment);
-      intelligence.addTranscript(segment);
-      // Event-driven monitor triggers fire on the cleaned, cohesive segment.
-      if (factCheck.isRunning()) factCheck.noteSegment(segment.text);
-      agendaTracker.noteSegment(segment.text, segment.source);
-      debug.recordTranscriptWords(segment.wordCount);
-      debug.recordTranscriptSegment(segment);
-      eventLogger?.log('transcript.segment', {
-        segmentId: segment.id,
-        source: segment.source,
-        wordCount: segment.wordCount,
-        audioDurationSec: segment.audioDurationSec,
-        transcriptionLatencyMs: segment.transcriptionLatencyMs,
-        sequence: segment.sequence,
-      });
-      appendTranscript(segment);
-    }
-
-    // Broadcast to all clients (dates as ISO-8601 for Swift Codable).
-    // `duration` kept during v2 rollout for backward compat; `replace` tells
-    // the dashboard to update the existing line rather than insert a new one.
-    broadcast({
-      type: 'transcript.update',
-      segment: {
-        id: segment.id,
-        text: segment.text,
-        source: segment.source,
-        label: segment.label,
-        timestamp: new Date(segment.timestamp).toISOString(),
-        audioDurationSec: segment.audioDurationSec,
-        transcriptionLatencyMs: segment.transcriptionLatencyMs,
-        captureStartedAt: segment.captureStartedAt,
-        captureEndedAt: segment.captureEndedAt,
-        sequence: segment.sequence,
-        duration: segment.audioDurationSec,
-        wordCount: segment.wordCount,
-        replace: true,
-      },
+  if (coach.isRunning()) {
+    coach.noteSegment(segment.text, segment.source, {
+      final,
+      segmentId: segment.id,
+      timestamp: segment.timestamp,
     });
-  },
-);
+  }
+
+  if (final) {
+    sessionStore.addTranscript(segment);
+    intelligence.addTranscript(segment);
+    // Event-driven monitor triggers fire on the cleaned, cohesive segment.
+    if (factCheck.isRunning()) factCheck.noteSegment(segment.text);
+    agendaTracker.noteSegment(segment.text, segment.source);
+    debug.recordTranscriptWords(segment.wordCount);
+    debug.recordTranscriptSegment(segment);
+    eventLogger?.log('transcript.segment', {
+      segmentId: segment.id,
+      source: segment.source,
+      wordCount: segment.wordCount,
+      audioDurationSec: segment.audioDurationSec,
+      transcriptionLatencyMs: segment.transcriptionLatencyMs,
+      sequence: segment.sequence,
+    });
+    appendTranscript(segment);
+  }
+
+  // Broadcast to all clients (dates as ISO-8601 for Swift Codable).
+  // `duration` kept during v2 rollout for backward compat; `replace` tells
+  // the dashboard to update the existing line rather than insert a new one.
+  broadcast({
+    type: 'transcript.update',
+    segment: {
+      id: segment.id,
+      text: segment.text,
+      source: segment.source,
+      label: segment.label,
+      timestamp: new Date(segment.timestamp).toISOString(),
+      audioDurationSec: segment.audioDurationSec,
+      transcriptionLatencyMs: segment.transcriptionLatencyMs,
+      captureStartedAt: segment.captureStartedAt,
+      captureEndedAt: segment.captureEndedAt,
+      sequence: segment.sequence,
+      duration: segment.audioDurationSec,
+      wordCount: segment.wordCount,
+      replace: true,
+    },
+  });
+}
+
+transcriptStitcher.on('segment', handleTranscriptSegment);
+// The live stream emits the same events, so it shares the broadcast/persist path.
+streaming?.on('segment', handleTranscriptSegment);
+// A failed stream hands back the chunks it was holding; the local backend
+// transcribes whatever reaches past the text Grok already produced.
+streaming?.on('replay', ({ chunks }: { chunks: StreamChunk[] }) => {
+  debugLog(`[Streaming] Replaying ${chunks.length} held chunk(s) on the local backend`);
+  for (const c of chunks) void transcribeChunk(c.wavBuffer, c.source, c.meta, false);
+});
 
 // ─── Intelligence Events ───────────────────────────────────────────────────
 

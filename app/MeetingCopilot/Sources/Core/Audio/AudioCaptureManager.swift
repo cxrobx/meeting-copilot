@@ -109,6 +109,11 @@ final class AudioCaptureManager: NSObject {
     private var meetingEmitter: VADEmitter?
     private var vadActive: Bool = false
 
+    // Live streaming: every source also goes out as 100 ms PCM frames, which
+    // the server streams to Grok. Nil when the caller passes no onFrame or
+    // AppSettings.streamAudioFrames is off; the VAD chunks flow either way.
+    private var frameStreamer: AudioFrameStreamer?
+
     // Input device-change handling. HAL property listener fires on the main
     // queue; AirPods (re)connect typically emits 3-5 events in <100ms, so we
     // debounce so the actual mic restart only runs once per route change.
@@ -191,10 +196,17 @@ final class AudioCaptureManager: NSObject {
 
     func startCapture(
         onChunk: @escaping (Data, TranscriptSegment.AudioSource, AudioChunkMeta) -> Void,
+        onFrame: ((Data) -> Void)? = nil,
         onDeviceError: @escaping () -> Void,
         onCaptureWarning: @escaping (String) -> Void
     ) async throws {
         self.onAudioChunk = onChunk
+        if let onFrame, AppSettings.streamAudioFrames {
+            self.frameStreamer = AudioFrameStreamer(emit: onFrame)
+            appLog("[AudioCapture] streaming 100 ms frames alongside VAD chunks")
+        } else {
+            self.frameStreamer = nil
+        }
         self.onDeviceChangeError = onDeviceError
         self.onCaptureWarning = onCaptureWarning
         self.micSequence = 0
@@ -370,6 +382,8 @@ final class AudioCaptureManager: NSObject {
         clearBuffers()
 
         onAudioChunk = nil
+        frameStreamer?.reset()
+        frameStreamer = nil
         onDeviceChangeError = nil
         onCaptureWarning = nil
     }
@@ -468,6 +482,7 @@ final class AudioCaptureManager: NSObject {
     /// capture thread. `int16` is ScreenCaptureKit's precomputed quantization;
     /// the tap passes nil and it is computed only if the timer path needs it.
     private func ingestMeetingSamples(_ samples: [Float], int16: Data?, peak: Float) {
+        frameStreamer?.append(int16 ?? Self.quantize(samples), source: .meeting)
         if let emitter = meetingEmitter {
             emitter.ingest(samples: samples)
         } else {
@@ -685,6 +700,8 @@ final class AudioCaptureManager: NSObject {
                         localPeak = max(localPeak, abs(clamped))
                         floatSamples.append(clamped)
                     }
+
+                    self.frameStreamer?.append(Self.quantize(floatSamples), source: .mic)
 
                     // VAD path: feed Float32 directly; no Int16 buffer.
                     if let emitter = self.micEmitter {

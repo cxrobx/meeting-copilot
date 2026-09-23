@@ -43,7 +43,7 @@ cd app/MeetingCopilot && swift build
 ## Key Decisions
 
 - **Audio**: Core Audio process tap (meeting — hears phone and FaceTime calls too; ScreenCaptureKit fallback) + AVAudioEngine (mic), 16kHz mono PCM
-- **Transcription**: whisper-server local (default), Deepgram cloud (optional)
+- **Transcription**: live streaming Grok Voice Transcribe 2.0 by default (the app sends 100 ms PCM frames; text trails speech by ~1 s), with the app's VAD chunks going to local Parakeet whenever a stream is down. Needs `COPILOT_ALLOW_CLOUD_AUDIO=true` + `XAI_API_KEY`; otherwise fully local (Parakeet, whisper fallback). `COPILOT_GROK_STREAMING=0` = per-chunk batch Grok; `COPILOT_CLOUD_TRANSCRIPTION=deepgram|off` for the others
 - **Intelligence**: gpt-6-luna triage via the OpenAI API (15s cadence) → Sonnet suggestions on the subscription CLI. Triage falls back to Haiku on the subscription CLI when the API is off (`COPILOT_LIVE_LLM_MODE=cli`) or fails twice. Context compression (the 5-min summaries fed back into triage) runs the same route
 - **Meeting pulse** (`intelligence/pulse.ts`): every 5 min, Opus 5.5 on the subscription CLI reads the whole meeting and updates one card: on track / drifting / stuck, up to 2 things to escalate, and what to settle before the end. A close-out pass runs 5 min before the calendar end (invite-started meetings), on wrap-up language after minute 10, or on the Wrap-up button, and the app raises a notification for it. It shares one CLI lane with the rolling summary (`intelligence/cli-lane.ts`) and always runs cold, since a warm session would carry the previous transcript. Costs no metered spend.
 - **Workers**: Research, Summary, Analysis, Mockup, CodeGen (all implemented)
@@ -54,6 +54,7 @@ cd app/MeetingCopilot && swift build
 ## Environment
 
 - `XAI_API_KEY` — Grok Voice Transcribe 2.0, the default cloud transcription (needs `COPILOT_ALLOW_CLOUD_AUDIO=true`; local Parakeet takes over per chunk on failure)
+- `COPILOT_GROK_STREAMING=0` — per-chunk batch Grok instead of live streaming (app side: `MC_STREAM_FRAMES=0` stops sending frames)
 - `DEEPGRAM_API_KEY` — optional, only with `COPILOT_CLOUD_TRANSCRIPTION=deepgram`
 - `OPENAI_API_KEY` — **metered.** Present in `~/.meeting-copilot/.env`, and the live path prefers it
 - `TYPESAFE_API_KEY` — **metered.** Jev gate in front of the coach's generative call

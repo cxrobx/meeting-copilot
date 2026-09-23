@@ -10,7 +10,7 @@
 | AI Suggest | Claude Sonnet 4.6 (via `claude --print`) |
 | Database | better-sqlite3 per-session SQLite |
 | Audio | Core Audio process tap (meeting, macOS 14.2+; ScreenCaptureKit fallback) + AVAudioEngine (mic) — see gotcha #20 |
-| Transcription | whisper-server local (default), Deepgram cloud (optional) |
+| Transcription | Grok Voice Transcribe 2.0 streamed live (default, consent-gated) over 100 ms frames; local Parakeet/whisper on the VAD chunks as its fallback, or alone without consent. `server/src/transcription/streaming.ts` |
 | Dashboard | Web UI at `/present` in WKWebView — CX family tokens (shared with cxmail/cxtasks/cxnotes), dark default + light toggle |
 
 ## Two-Process Architecture

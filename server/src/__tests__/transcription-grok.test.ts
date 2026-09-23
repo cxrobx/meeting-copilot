@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GrokProvider } from '../transcription/grok.js';
 import { FallbackProvider } from '../transcription/fallback.js';
-import { createProvider } from '../transcription/index.js';
+import { createProvider, resolveTranscription } from '../transcription/index.js';
 import type { TranscriptionProvider, TranscriptionProviderInfo } from '../transcription/types.js';
 
 function stub(mode: TranscriptionProviderInfo['mode'], transcribe: TranscriptionProvider['transcribe']): TranscriptionProvider {
@@ -27,6 +27,7 @@ const ENV_KEYS = [
   'COPILOT_DISABLE_PAID_API',
   'XAI_API_KEY',
   'DEEPGRAM_API_KEY',
+  'COPILOT_GROK_STREAMING',
 ];
 const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 
@@ -93,10 +94,24 @@ describe('createProvider gating', () => {
     return createProvider().getInfo();
   }
 
-  it('defaults to Grok in front of Parakeet when consented and keyed', () => {
+  it('defaults to streaming Grok, with Parakeet taking the chunks', () => {
     process.env.TRANSCRIPTION_PROVIDER = 'parakeet';
     process.env.COPILOT_ALLOW_CLOUD_AUDIO = 'true';
     process.env.XAI_API_KEY = 'k';
+    delete process.env.COPILOT_CLOUD_TRANSCRIPTION;
+    delete process.env.COPILOT_DISABLE_PAID_API;
+    delete process.env.COPILOT_GROK_STREAMING;
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const plan = resolveTranscription();
+    expect(plan.streaming?.info).toMatchObject({ mode: 'grok', streaming: true, supportsPartials: true });
+    expect(plan.provider.getInfo().mode).toBe('parakeet');
+  });
+
+  it('COPILOT_GROK_STREAMING=0 goes back to per-chunk Grok in front of Parakeet', () => {
+    process.env.TRANSCRIPTION_PROVIDER = 'parakeet';
+    process.env.COPILOT_ALLOW_CLOUD_AUDIO = 'true';
+    process.env.XAI_API_KEY = 'k';
+    process.env.COPILOT_GROK_STREAMING = '0';
     delete process.env.COPILOT_CLOUD_TRANSCRIPTION;
     delete process.env.COPILOT_DISABLE_PAID_API;
     expect(build()).toMatchObject({ mode: 'grok', fallback: 'parakeet' });
@@ -115,6 +130,7 @@ describe('createProvider gating', () => {
     process.env.XAI_API_KEY = 'k';
     process.env.COPILOT_DISABLE_PAID_API = '1';
     expect(build().mode).toBe('parakeet');
+    expect(resolveTranscription().streaming).toBeNull();
   });
 
   it('stays local without a key, or when cloud is off', () => {

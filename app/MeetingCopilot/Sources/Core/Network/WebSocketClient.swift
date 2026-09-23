@@ -203,6 +203,14 @@ actor WebSocketClient {
         try await task.send(.data(data))
     }
 
+    /// Send a raw binary message (live audio frames — see AudioFrameStreamer).
+    func sendBinary(_ data: Data) async throws {
+        guard let task = webSocketTask, isConnected else {
+            throw WebSocketError.notConnected
+        }
+        try await task.send(.data(data))
+    }
+
     // MARK: - Connection Status
 
     func getIsConnected() -> Bool {

@@ -61,6 +61,16 @@ enum AppSettings {
         return true
     }
 
+    /// Whether capture also sends 100 ms PCM frames for live streaming
+    /// transcription (the server streams them to Grok when it is the cloud
+    /// provider, and ignores them otherwise). `MC_STREAM_FRAMES=0` turns it off.
+    static var streamAudioFrames: Bool {
+        if let env = ProcessInfo.processInfo.environment["MC_STREAM_FRAMES"] {
+            return env == "1" || env.lowercased() == "true"
+        }
+        return true
+    }
+
     /// Silero speech-probability threshold. 0.50 matches whisper-server's
     /// VAD config and VoiceInk's tuned value.
     static var vadThreshold: Float {

@@ -79,6 +79,10 @@ final class SessionManager {
     // MARK: - Private
 
     private var sessionTimerTask: Task<Void, Never>?
+    // Live audio frames: capture threads yield into the stream, one task sends
+    // them in order (a Task per frame could reorder them).
+    private var frameContinuation: AsyncStream<Data>.Continuation?
+    private var frameSendTask: Task<Void, Never>?
     private var graceTimer: Timer?
     private let maxTranscriptSegments = 50
     private let endingGracePeriod: TimeInterval = 60.0
@@ -230,6 +234,7 @@ final class SessionManager {
 
         // Start audio capture
         appLog("[Session] Starting audio capture...")
+        let frameContinuation = startFrameSender()
         do {
             try await audioCaptureManager.startCapture(
                 onChunk: { [weak self] wavData, source, meta in
@@ -264,6 +269,9 @@ final class SessionManager {
                             }
                         }
                     }
+                },
+                onFrame: { frame in
+                    frameContinuation.yield(frame)
                 },
                 onDeviceError: { [weak self] in
                     Task { @MainActor in
@@ -409,7 +417,34 @@ final class SessionManager {
         }
     }
 
+    /// Starts the ordered sender for live audio frames and returns the
+    /// continuation the capture threads yield into. Frames go out only while
+    /// live and connected; dropped ones are covered by the server's fallback.
+    private func startFrameSender() -> AsyncStream<Data>.Continuation {
+        stopFrameSender()
+        var continuation: AsyncStream<Data>.Continuation!
+        let frames = AsyncStream<Data>(bufferingPolicy: .bufferingNewest(50)) { continuation = $0 }
+        frameContinuation = continuation
+        let client = webSocketClient
+        frameSendTask = Task { [weak self] in
+            for await frame in frames {
+                guard let self else { return }
+                guard self.state == .live else { continue }
+                try? await client.sendBinary(frame)
+            }
+        }
+        return continuation
+    }
+
+    private func stopFrameSender() {
+        frameContinuation?.finish()
+        frameContinuation = nil
+        frameSendTask?.cancel()
+        frameSendTask = nil
+    }
+
     private func finalizeSession() {
+        stopFrameSender()
         Task {
             await audioCaptureManager.stopCapture()
             await webSocketClient.disconnect()

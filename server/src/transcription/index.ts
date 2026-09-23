@@ -1,10 +1,11 @@
 import { EventEmitter } from 'node:events';
 import { v4 as uuidv4 } from 'uuid';
-import type { TranscriptSegment, TranscriptionProvider } from './types.js';
+import type { TranscriptSegment, TranscriptionProvider, TranscriptionProviderInfo } from './types.js';
 import { WhisperProvider } from './whisper.js';
 import { DeepgramProvider } from './deepgram.js';
 import { GrokProvider } from './grok.js';
 import { FallbackProvider } from './fallback.js';
+import { StreamingTranscriber } from './streaming.js';
 import { CHUNK_DURATION_SECONDS } from '../audio/chunkConfig.js';
 import { paidApiDisabled } from '../api/killswitch.js';
 
@@ -124,29 +125,59 @@ function cloudChoice(selection: string): CloudChoice | null {
  *   - XAI_API_KEY is set (DEEPGRAM_API_KEY for deepgram)
  * Pick the cloud with COPILOT_CLOUD_TRANSCRIPTION=grok|deepgram|off.
  */
-export function createProvider(): TranscriptionProvider {
+export interface TranscriptionPlan {
+  /** Transcribes the app's VAD chunks (the whole transcript when not streaming). */
+  provider: TranscriptionProvider;
+  /** Live Grok streaming; when set, `provider` is only its local fallback. */
+  streaming: StreamingTranscriber<StreamChunk> | null;
+}
+
+/** A VAD chunk held by the streamer, replayed locally if its stream fails. */
+export interface StreamChunk {
+  wavBuffer: Buffer;
+  source: 'mic' | 'meeting';
+  meta: TranscribeChunkMeta;
+}
+
+export function resolveTranscription(): TranscriptionPlan {
   const selection = (process.env.TRANSCRIPTION_PROVIDER ?? 'parakeet').toLowerCase();
   const local = createLocalProvider(selection);
   const cloud = cloudChoice(selection);
-  if (!cloud) return local;
+  if (!cloud) return { provider: local, streaming: null };
 
   const localMode = local.getInfo().mode;
   if (paidApiDisabled()) {
     console.warn(`[Transcription] COPILOT_DISABLE_PAID_API set — skipping ${cloud}, using ${localMode} (no metered STT billing).`);
-    return local;
+    return { provider: local, streaming: null };
   }
   if (process.env.COPILOT_ALLOW_CLOUD_AUDIO !== 'true') {
     console.warn(`[Transcription] Cloud audio is not consented; using ${localMode}. Set COPILOT_ALLOW_CLOUD_AUDIO=true explicitly to enable ${cloud}.`);
-    return local;
+    return { provider: local, streaming: null };
   }
   const keyVar = cloud === 'grok' ? 'XAI_API_KEY' : 'DEEPGRAM_API_KEY';
-  if (!process.env[keyVar]) {
+  const apiKey = process.env[keyVar];
+  if (!apiKey) {
     console.warn(`[Transcription] ${keyVar} is not set; using ${localMode}.`);
-    return local;
+    return { provider: local, streaming: null };
+  }
+  // Grok streams by default: text trails speech by ~1 s instead of a whole
+  // VAD utterance (up to 6 s) plus a batch round trip. COPILOT_GROK_STREAMING=0
+  // goes back to per-chunk batch Grok.
+  if (cloud === 'grok' && process.env.COPILOT_GROK_STREAMING !== '0') {
+    console.log(`[Transcription] Streaming grok live, with ${localMode} covering any outage.`);
+    return {
+      provider: local,
+      streaming: new StreamingTranscriber<StreamChunk>({ apiKey, model: process.env.GROK_STT_MODEL }),
+    };
   }
   const primary = cloud === 'grok' ? new GrokProvider() : new DeepgramProvider();
   console.log(`[Transcription] Using ${cloud} with ${localMode} as per-chunk fallback.`);
-  return new FallbackProvider(primary, local);
+  return { provider: new FallbackProvider(primary, local), streaming: null };
+}
+
+/** The chunk provider alone (kept for callers that never stream). */
+export function createProvider(): TranscriptionProvider {
+  return resolveTranscription().provider;
 }
 
 export interface TranscribeChunkMeta {
@@ -183,7 +214,13 @@ export class TranscriptionService extends EventEmitter {
     return this.provider.isAvailable();
   }
 
-  get providerInfo() {
+  /** Set when a live stream is the primary transcriber (chunks are its fallback). */
+  streamingInfo: TranscriptionProviderInfo | null = null;
+
+  get providerInfo(): TranscriptionProviderInfo {
+    if (this.streamingInfo) {
+      return { ...this.streamingInfo, fallback: this.provider.getInfo().mode };
+    }
     return this.provider.getInfo();
   }
 
@@ -448,5 +485,6 @@ function wrapPcmAsWav(pcm: Buffer): Buffer {
 export { DeepgramProvider } from './deepgram.js';
 export { GrokProvider } from './grok.js';
 export { FallbackProvider } from './fallback.js';
+export { StreamingTranscriber } from './streaming.js';
 export { WhisperProvider } from './whisper.js';
 export type { TranscriptSegment, TranscriptionProvider };
