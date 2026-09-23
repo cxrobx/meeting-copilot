@@ -586,7 +586,7 @@ const VENDOR_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'vendor')
 app.use('/vendor', express.static(VENDOR_DIR, { maxAge: '7d' }));
 
 // Share/Present mode
-app.use(createPresentRouter(registry));
+app.use(createPresentRouter(registry, { getSessionId: () => sessionStore?.id ?? lastSessionId ?? undefined }));
 
 // Routes (health, preflight, settings, transcribe, projects, debug)
 app.use(createRoutes({

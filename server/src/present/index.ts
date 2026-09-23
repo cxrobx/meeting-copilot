@@ -16,6 +16,7 @@ import { readStoredCoach } from './replay-coach.js';
 import { readStoredPulses } from './replay-pulse.js';
 import { isSessionId } from '../session/ids.js';
 import { applyVaultLook, getVaultLook } from './vault-look.js';
+import { buildReaderPage, viewContent, type ViewableAction } from './view-page.js';
 
 // ─── Highlight-to-ask prompts ───────────────────────────────────────────────
 const ASK_SYSTEM: Record<string, string> = {
@@ -77,8 +78,45 @@ function persistReview(dbPath: string, sessionId: string, title: string, result:
   }
 }
 
-export function createPresentRouter(registry: WorkerRegistry): Router {
+/**
+ * One action by id: the live registry first, then a session's own store (the
+ * same two sources GET /present/actions reads). `sessionId` is the caller's
+ * `?session=`, else the live or last session. Returns the session it came from
+ * so a caller can file things next to it.
+ */
+export function findAction(
+  registry: Pick<WorkerRegistry, 'getAction'>,
+  actionId: string,
+  sessionId: string | undefined,
+): { action: ViewableAction; sessionId?: string } | null {
+  const live = registry.getAction(actionId);
+  if (live) return { action: live, sessionId };
+  if (!isSessionId(sessionId)) return null;
+  const dbPath = join(homedir(), '.meeting-copilot', 'sessions', sessionId, 'session.db');
+  if (!existsSync(dbPath)) return null;
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const row = db.prepare('SELECT id, type, title, result, completedAt FROM action WHERE id = ?').get(actionId) as
+      { id: string; type: string; title: string; result: string | null; completedAt: number | null } | undefined;
+    if (!row) return null;
+    return {
+      action: { id: row.id, type: row.type, title: row.title, completedAt: row.completedAt, result: row.result ? JSON.parse(row.result) : null },
+      sessionId,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+export interface PresentRouterOptions {
+  /** The live session, or the last one once it has ended. */
+  getSessionId?: () => string | undefined;
+}
+
+export function createPresentRouter(registry: WorkerRegistry, options: PresentRouterOptions = {}): Router {
   const router = Router();
+  const sessionFor = (req: { query: Record<string, unknown> }): string | undefined =>
+    typeof req.query.session === 'string' ? req.query.session : options.getSessionId?.();
   const sseClients = new Set<Response>();
 
   // ─── SSE Bridge: registry events → browser ────────────────────────────
@@ -203,6 +241,46 @@ export function createPresentRouter(registry: WorkerRegistry): Router {
     }));
 
     res.json({ actions });
+  });
+
+  // ─── GET /present/action/:id/view — one card as its own page ─────────
+  // The ↗ button opens this in a browser tab (inside the app, a same-server
+  // path outside /present goes to the default browser), which is what goes on
+  // a screen share. A mockup is sent as-is under a sandbox CSP: an opaque
+  // origin, so its scripts can't call this server. Anything else goes into a
+  // reader page, which reloads itself while deep research is still coming.
+  router.get('/present/action/:id/view', (req, res) => {
+    const sessionId = req.query.session as string | undefined;
+    if (sessionId !== undefined && !isSessionId(sessionId)) {
+      res.status(400).type('text').send('session must be a session id');
+      return;
+    }
+    let found: ReturnType<typeof findAction>;
+    try {
+      found = findAction(registry, req.params.id, sessionFor(req));
+    } catch (err) {
+      res.status(500).type('text').send(`Could not read the session: ${String(err)}`);
+      return;
+    }
+    const content = found && viewContent(found.action);
+    if (!found || !content) {
+      res.status(404).type('text').send('That card is not here any more (or has nothing to show yet).');
+      return;
+    }
+    res.set('Cache-Control', 'no-store');
+    if (content.kind === 'html') {
+      res.set('Content-Security-Policy', 'sandbox allow-scripts');
+      res.type('html').send(content.html);
+      return;
+    }
+    res.type('html').send(buildReaderPage({
+      title: found.action.title,
+      type: found.action.type,
+      completedAt: found.action.completedAt,
+      markdown: content.markdown,
+      scripts: 'link',
+      refresh: content.pending,
+    }));
   });
 
   // ─── GET /present/transcript — transcript segments for stored session ─
@@ -2026,6 +2104,18 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     color: var(--gb-overlay2);
     flex-shrink: 0;
   }
+  .card-expand {
+    flex-shrink: 0;
+    border: 1px solid transparent;
+    background: none;
+    color: var(--gb-overlay2);
+    font-size: 13px;
+    line-height: 1;
+    padding: 3px 5px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .card-expand:hover { color: rgb(var(--accent)); border-color: rgb(var(--accent) / 0.35); }
 
   .card-body {
     font-size: 13px;
@@ -5654,13 +5744,25 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     btn.classList.add('active');
   };
 
-  window.openMockupHtml = function(id) {
-    var html = mockupHtml.get(id);
-    if (!html) return;
-    var url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
-    window.open(url, '_blank');
-    setTimeout(function() { URL.revokeObjectURL(url); }, 60000);
-  };
+  // A card as its own page (GET /present/action/:id/view). Inside the app the
+  // navigation policy hands a same-server path outside /present to the default
+  // browser, so this opens a real tab that can go on a screen share. It
+  // replaced a blob: URL, which the app's policy blocks.
+  function mcExpandUrl(id) {
+    return '/present/action/' + encodeURIComponent(id) + '/view' +
+      (replaySessionId ? '?session=' + encodeURIComponent(replaySessionId) : '');
+  }
+  function mcExpandOpen(id) { window.open(mcExpandUrl(id), '_blank'); }
+
+  window.openMockupHtml = function(id) { mcExpandOpen(id); };
+
+  document.addEventListener('click', function(e) {
+    var btn = e.target && e.target.closest ? e.target.closest('[data-mc-expand]') : null;
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    mcExpandOpen(btn.getAttribute('data-mc-expand'));
+  });
 
   window.downloadMockupHtml = function(id) {
     var html = mockupHtml.get(id);
@@ -6583,6 +6685,10 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     }
   }
 
+  function mcCanExpand(action) {
+    return action.state === 'completed' && !!action.result && !!action.result.artifacts && action.result.artifacts.length > 0;
+  }
+
   function renderAction(action) {
     var existing = actionCards.get(action.id);
 
@@ -6596,6 +6702,9 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       '<span class="card-type ' + typeClass + '">' + escapeHtml(action.type) + '</span>' +
       '<span class="card-title">' + escapeHtml(action.title) + '</span>' +
       '<span class="card-time">' + formatTime(action.completedAt) + '</span>' +
+      (mcCanExpand(action)
+        ? '<button class="card-expand" data-mc-expand="' + escapeHtml(action.id) + '" title="Open in a browser tab" aria-label="Open in a browser tab">\u2197</button>'
+        : '') +
     '</div>';
 
     var body = '';
