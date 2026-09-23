@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 24 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 25 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -30,6 +30,7 @@ Organized by category. 24 items + recovery playbook, condensed format. Original 
 | 22 | Dashboard JS lives in a TS template literal — escapes decode twice | Frontend |
 | 23 | Swift's `.iso8601` rejects the server's milliseconds — messages silently dropped | Frontend |
 | 24 | Dashboard JS is one scope — a second `var` silently replaces the first | Frontend |
+| 25 | The title bar doesn't drag the panel — the page does (`data-drag-region`) | Frontend |
 | — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
@@ -219,6 +220,13 @@ this default.
 **Solution**: Prefix a new feature's names (`COACH_ASK_LABELS`). Wire clicks through `data-*` attributes and one delegated listener rather than `onclick="fn(\\'x\\')"`, which also sidesteps #22's escaping.
 **Check**: `__tests__/present-script.test.ts` fails when a two-space-indented `var`/`let`/`const`/`function` name repeats in an inline script (verified by reintroducing the bug).
 **Pattern**: `server/src/present/index.ts`.
+
+### 25. The Title Bar Doesn't Drag the Panel — the Page Does
+**Symptom**: The panel can only be moved by its one-point border; pressing the top of the window does nothing.
+**Cause**: The panel is `.fullSizeContentView` with a transparent titlebar, and the WKWebView fills all of it. AppKit only drags from a titlebar press when the view under it says `mouseDownCanMoveWindow`, and WKWebView never does, so it takes every click, the 19pt strip included. `isMovableByWindowBackground` doesn't help for the same reason. The page's comments said until 2026-09-22 that the strip "still hit-tests to the window". It never did.
+**Solution** (applied 2026-09-22): the page marks its title bars with `data-drag-region` (`.header`, `.stage-top`). A capture-phase `mousedown` on empty space there calls `preventDefault()` and posts `startWindowDrag`. The app records every left mouse-down in a local monitor and hands that event to `performDrag(with:)` if the button is still down and the press is under 1 s old. A second click (`clickCount == 2`) zooms or minimizes per `AppleActionOnDoubleClick`. Controls are exempt (`DRAG_EXEMPT`: buttons, inputs, links, `[onclick]`, `[data-no-drag]`), and anything layered over the header (the Settings modal) blocks the drag, because the check is the element actually pressed. A new bar the window should drag by gets `data-drag-region`. A non-control element inside one that must stay clickable gets `data-no-drag`.
+**Check**: `__tests__/window-drag.test.ts` pins the regions and the exemptions; `Tests/WindowDragTests.swift` pins the press rules, the double-click setting, and that this utility panel really zooms (it has no zoom button). The drag itself needs a real pointer: verified 2026-09-22 on the installed build with synthetic HID presses (moved exactly with the pointer; double-click zoomed, a second restored).
+**Pattern**: `server/src/present/index.ts` ("Window drag"), `app/MeetingCopilot/Sources/Features/WebPanel/WindowDrag.swift`, `WebDashboardView.swift` (`mouseDownMonitor`, `startWindowDrag`).
 
 ---
 
