@@ -638,8 +638,8 @@ private struct AskSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             SectionHeader(title: "Ask") {
-                Chip(text: "⚡ fast", kind: .plain)
-                    .help("Quick answer with web search — the dashboard's ⚡ Fast action")
+                Chip(text: "fast + deep", kind: .plain)
+                    .help("Answers in seconds with web search, then Deep research adds what it finds about a minute later — the dashboard's Research action")
             }
             HStack(spacing: 6) {
                 TextField("Ask the copilot…", text: $question)

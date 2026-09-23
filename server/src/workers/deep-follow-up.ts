@@ -3,7 +3,8 @@ import type { ActionLifecycle, WorkerResult } from './types.js';
 import { checkAttributions, type ResearchSource } from './citations.js';
 
 /**
- * Deep follow-up for suggested research cards: the fast answer streams first,
+ * Deep follow-up for every fast-research card (suggested cards, the dashboard's
+ * Research button, the menu bar's Ask): the fast answer streams first,
  * deep research runs alongside it, and what deep adds is appended to the
  * finished card when it lands.
  *
@@ -43,9 +44,8 @@ interface Run {
   fast?: WorkerResult;
 }
 
-/** True for a suggested (not manually triggered) fast-research card. */
 export function wantsDeepFollowUp(action: ActionLifecycle): boolean {
-  return action.type === 'fast-research' && !action.params?._manual && typeof action.params?.query === 'string';
+  return action.type === 'fast-research' && typeof action.params?.query === 'string';
 }
 
 export const COMPARE_SYSTEM = `You compare two research answers to the same question, asked during a live meeting. The user has already read ANSWER A. ANSWER B is a slower, deeper answer.

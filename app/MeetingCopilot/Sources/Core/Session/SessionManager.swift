@@ -475,7 +475,7 @@ final class SessionManager {
         runDashboardJS?(js)
     }
 
-    /// The menu bar's Ask box: the same ⚡ Fast path as the dashboard's Quick
+    /// The menu bar's Ask box: the same Research path (fast, then deep) as the dashboard's Quick
     /// Actions (a manual trigger runs without an approval step — the typed
     /// question is the approval). Returns false when the socket is down.
     func askCopilot(_ question: String) async -> Bool {

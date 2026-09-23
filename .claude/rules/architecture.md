@@ -87,8 +87,8 @@ Audio → Transcription → Buffer (15s cadence)
 
 | Worker | Status | Purpose |
 |--------|--------|---------|
-| Research (Deep) | Implemented | Opus 5.5 agent loop with WebSearch/WebFetch on the subscription CLI, ~30-65 s. The dashboard's Deep button, and the follow-up on suggested research cards |
-| Fast Research | Implemented | Streaming quick research (OpenAI-preferred, Haiku CLI fallback). Suggested cards also get a deep follow-up: `workers/deep-follow-up.ts` runs Deep alongside, then appends "Deep research adds" to the finished card (outside the worker slots, max 2 at once) |
+| Research (Deep) | Implemented | Opus 5.5 agent loop with WebSearch/WebFetch on the subscription CLI, ~30-65 s. Runs as the follow-up on every Research request; alone only with `COPILOT_SUGGESTED_RESEARCH=deep` |
+| Fast Research | Implemented | Streaming quick research (OpenAI-preferred, Haiku CLI fallback). Every request (suggested card, Research button, menu bar Ask) also gets a deep follow-up: `workers/deep-follow-up.ts` runs Deep alongside, then appends "Deep research adds" to the finished card (outside the worker slots, max 2 at once) |
 | Summary | Implemented | Running meeting summary |
 | Analysis | Implemented | Data/argument analysis |
 | Mockup | Implemented | ASCII wireframe + HTML mockup (two-phase, early ASCII emit) |

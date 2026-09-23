@@ -100,10 +100,8 @@ describe('DeepFollowUp', () => {
     expect(signal?.aborted).toBe(true);
   });
 
-  it('skips the ⚡ Fast button, other worker types, and turned-off mode', () => {
+  it('skips other worker types, and turned-off mode', () => {
     const { registry, deps } = setup();
-    registry.actions.set('m', baseAction('m', { query: 'q', _manual: true }));
-    registry.set('m', { state: 'running' });
     registry.actions.set('r', { ...baseAction('r'), type: 'research' });
     registry.set('r', { state: 'running' });
     expect(deps.runDeep).not.toHaveBeenCalled();

@@ -6,8 +6,8 @@
  * equal accuracy (19/19 each) at a 3.9s median vs 8.3s, worst case 8s vs 38s,
  * for ~1-2 cents a searched answer. A card that lands after the topic has
  * moved on is worth nothing, so speed wins here. Deep research (Opus 5.5)
- * still runs alongside and appends what it adds (workers/deep-follow-up.ts).
- * The manual Deep button is not routed through this.
+ * still runs alongside and appends what it adds (workers/deep-follow-up.ts),
+ * as it does for the dashboard's Research button and the menu bar's Ask.
  *
  * `COPILOT_SUGGESTED_RESEARCH=deep` puts suggested cards on Deep alone.
  */

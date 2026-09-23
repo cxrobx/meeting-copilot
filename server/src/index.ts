@@ -536,8 +536,9 @@ registry.register(new CodeGenWorker());
 registry.register(new AnalysisWorker());
 registry.register(new ReviewWorker());
 
-// Suggested research cards answer Fast, and Deep research runs alongside and
-// appends what it adds (workers/deep-follow-up.ts). Both deep calls run on the
+// Every research request (suggested card, Research button, menu bar Ask)
+// answers Fast, and Deep research runs alongside and appends what it adds
+// (workers/deep-follow-up.ts). Both deep calls run on the
 // subscription CLI. COPILOT_RESEARCH_DEEP_FOLLOWUP=0 turns it off.
 const deepResearchWorker = new ResearchWorker();
 new DeepFollowUp(registry, {
@@ -1474,9 +1475,6 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
           }
         })(),
       };
-
-      // A button press, not a suggestion: ⚡ Fast stays fast (no deep follow-up).
-      suggestion.params._manual = true;
 
       // Inject project context into worker params
       const projectContext = intelligence.getProjectContext();
