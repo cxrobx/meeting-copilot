@@ -4829,8 +4829,8 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       '<div class="quick-actions-title">Quick Actions</div>' +
       '<input class="quick-actions-input" id="quickPrompt" placeholder="Topic or prompt (optional)...">' +
       '<div class="quick-actions-row">' +
-        '<button class="btn btn-ghost" onclick="triggerAction(\\'fast-research\\')" title="Quick answer with web search, in seconds (GPT-5.6 Luna, a cent or two)">\u26A1 Fast</button>' +
-        '<button class="btn btn-ghost" onclick="triggerAction(\\'research\\')">Research</button>' +
+        '<button class="btn btn-ghost" onclick="triggerAction(\\'fast-research\\')" title="Quick answer with web search, in seconds (gpt-6-luna, a cent or two)">\u26A1 Fast</button>' +
+        '<button class="btn btn-ghost" onclick="triggerAction(\\'research\\')" title="Reads whole pages and compares options. About a minute (Opus 5.5, subscription)">Deep (~1 min)</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'summary\\')">Summary</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'analysis\\')">Analysis</button>' +
         '<button class="btn btn-ghost" onclick="triggerAction(\\'mockup\\')" title="UI wireframe from the discussion (type a screen in the box first)">Mockup</button>' +

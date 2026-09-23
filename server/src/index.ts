@@ -28,6 +28,8 @@ import { inCliLane } from './intelligence/cli-lane.js';
 import { WorkerRegistry } from './workers/registry.js';
 import { ResearchWorker } from './workers/research.js';
 import { FastResearchWorker } from './workers/fast-research.js';
+import { COMPARE_SYSTEM, DeepFollowUp } from './workers/deep-follow-up.js';
+import { claudeSuggest } from './claude-cli.js';
 import { routeSuggestedType } from './intelligence/suggested-type.js';
 import { SummaryWorker } from './workers/summary.js';
 import { MockupWorker } from './workers/mockup.js';
@@ -533,6 +535,23 @@ registry.register(new MockupWorker());
 registry.register(new CodeGenWorker());
 registry.register(new AnalysisWorker());
 registry.register(new ReviewWorker());
+
+// Suggested research cards answer Fast, and Deep research runs alongside and
+// appends what it adds (workers/deep-follow-up.ts). Both deep calls run on the
+// subscription CLI. COPILOT_RESEARCH_DEEP_FOLLOWUP=0 turns it off.
+const deepResearchWorker = new ResearchWorker();
+new DeepFollowUp(registry, {
+  enabled: () => process.env.COPILOT_RESEARCH_DEEP_FOLLOWUP !== '0',
+  runDeep: (params, signal) => deepResearchWorker.execute(params, signal),
+  compare: ({ query, fast, deep }, signal) => claudeSuggest(
+    `Question: ${query}\n\nANSWER A (already shown):\n${fast}\n\nANSWER B (deeper):\n${deep}`,
+    COMPARE_SYSTEM,
+    signal,
+    undefined,
+    { model: MODEL_CONFIG.worker, cold: true },
+  ),
+  log: (message) => log('deep-follow-up', message),
+});
 
 // ─── Express App ───────────────────────────────────────────────────────────
 
@@ -1455,6 +1474,9 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
           }
         })(),
       };
+
+      // A button press, not a suggestion: ⚡ Fast stays fast (no deep follow-up).
+      suggestion.params._manual = true;
 
       // Inject project context into worker params
       const projectContext = intelligence.getProjectContext();

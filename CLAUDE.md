@@ -59,6 +59,7 @@ cd app/MeetingCopilot && swift build
 - `COPILOT_PORT` — TCP port (default: 17890; honored by BOTH server and app via `ServerConfig`)
 - `COPILOT_LIVE_LLM_MODE=cli` — force the live path onto the subscription CLIs
 - `COPILOT_DISABLE_PAID_API=1` — hard zero-API-spend mode (CLIs/subscription only); also disables Jev
+- `COPILOT_RESEARCH_DEEP_FOLLOWUP=0` — turn off the Opus deep follow-up on suggested research cards (on by default, subscription CLI)
 - User-tunable settings live in `~/.meeting-copilot/settings.json` (dashboard gear panel → `POST /settings`; beats env vars)
 
 > **The live path is METERED, not subscription.** This said "no API keys required — all

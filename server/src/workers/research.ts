@@ -1,7 +1,7 @@
 import { claudeSuggest } from '../claude-cli.js';
 import { MODEL_CONFIG } from '../model-config.js';
 import type { Worker, WorkerCapabilities, WorkerResult } from './types.js';
-import { checkAttributions, citationFooter, extractUrlSources } from './citations.js';
+import { checkAttributions, citationFooter, extractUrlSources, stripSourceList } from './citations.js';
 
 export class ResearchWorker implements Worker {
   public readonly name = 'research';
@@ -49,14 +49,15 @@ If context from the meeting is provided, use it to tailor your research to what 
         : `Research query: ${query}`;
 
       const onDelta = params._onDelta as ((text: string) => void) | undefined;
-      const answer = await claudeSuggest(userContent, systemPrompt, signal, ['WebSearch', 'WebFetch'], {
+      const raw = await claudeSuggest(userContent, systemPrompt, signal, ['WebSearch', 'WebFetch'], {
         onDelta,
         model: MODEL_CONFIG.deepResearch,
       });
       // Same output shape and attribution check as Fast research (see
       // citations.ts). The prompt is deliberately untouched: there is no eval
       // for this worker, so a prompt change here could not be measured.
-      const sources = extractUrlSources(answer);
+      const sources = extractUrlSources(raw);
+      const answer = stripSourceList(raw);
       const unverifiedAttributions = checkAttributions(answer, sources);
       const text = `${answer}${citationFooter(sources, unverifiedAttributions)}`;
 

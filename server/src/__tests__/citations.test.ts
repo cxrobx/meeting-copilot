@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { checkAttributions, citationFooter, extractUrlSources } from '../workers/citations.js';
+import { checkAttributions, citationFooter, extractUrlSources, stripSourceList } from '../workers/citations.js';
 
 const src = (url: string) => ({ url, title: '' });
 
@@ -103,5 +103,32 @@ describe('citationFooter', () => {
 
   it('says so plainly when nothing was cited', () => {
     expect(citationFooter([], [])).toContain('No sources cited');
+  });
+});
+
+describe('stripSourceList', () => {
+  // The two endings deep research wrote on the 2026-09-22 real-question run.
+  it('drops a bold "Sources:" list the model wrote at the end', () => {
+    const answer = 'Kling is strongest ([fal](https://fal.ai)).\n\n**Sources:**\n- [BuildMVPFast](https://a.example)\n- [Apiframe](https://b.example)\n';
+    expect(stripSourceList(answer)).toBe('Kling is strongest ([fal](https://fal.ai)).');
+  });
+
+  it('drops a plain "Sources:" list', () => {
+    const answer = 'Answer body.\n\nSources:\n- [Kapwing](https://k.example)\n- [Wikipedia](https://w.example)';
+    expect(stripSourceList(answer)).toBe('Answer body.');
+  });
+
+  it('drops a heading "## Sources" with numbered entries', () => {
+    const answer = 'Body.\n\n## Sources\n1. [One](https://1.example)\n2. [Two](https://2.example)\n';
+    expect(stripSourceList(answer)).toBe('Body.');
+  });
+
+  it('keeps an answer whose sources section is not at the end', () => {
+    const answer = 'Intro.\n\n**Sources:**\n- [One](https://1.example)\n\nMore analysis after the list.';
+    expect(stripSourceList(answer)).toBe(answer);
+  });
+
+  it('keeps an answer with no sources list', () => {
+    expect(stripSourceList('Just an answer ([x](https://x.example)).')).toBe('Just an answer ([x](https://x.example)).');
   });
 });

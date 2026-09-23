@@ -87,8 +87,8 @@ Audio → Transcription → Buffer (15s cadence)
 
 | Worker | Status | Purpose |
 |--------|--------|---------|
-| Research | Implemented | Web research on discussed topics |
-| Fast Research | Implemented | Streaming quick research (OpenAI-preferred, Haiku CLI fallback) |
+| Research (Deep) | Implemented | Opus 5.5 agent loop with WebSearch/WebFetch on the subscription CLI, ~30-65 s. The dashboard's Deep button, and the follow-up on suggested research cards |
+| Fast Research | Implemented | Streaming quick research (OpenAI-preferred, Haiku CLI fallback). Suggested cards also get a deep follow-up: `workers/deep-follow-up.ts` runs Deep alongside, then appends "Deep research adds" to the finished card (outside the worker slots, max 2 at once) |
 | Summary | Implemented | Running meeting summary |
 | Analysis | Implemented | Data/argument analysis |
 | Mockup | Implemented | ASCII wireframe + HTML mockup (two-phase, early ASCII emit) |

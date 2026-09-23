@@ -133,6 +133,17 @@ export function extractUrlSources(text: string, limit = 8): ResearchSource[] {
   return out;
 }
 
+/**
+ * The answer without a sources list the model wrote at its end. Deep research
+ * (the `claude` CLI) usually ends with its own "Sources:" list, and the
+ * card's footer then printed every source twice. The links survive: sources
+ * are extracted before this runs, and the footer lists them.
+ */
+export function stripSourceList(answer: string): string {
+  const m = /\n(?:[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?Sources?:?(?:\*\*)?:?[ \t]*\n)(?:[ \t]*(?:[-*]|\d+[.)]|\[\d+\])[ \t]+.*(?:\n|$)|[ \t]*\n)+\s*$/i.exec(answer);
+  return m ? answer.slice(0, m.index).trimEnd() : answer;
+}
+
 /** Markdown appended to a research card: the warning (if any), then sources. */
 export function citationFooter(sources: ResearchSource[], unverified: UnverifiedAttribution[]): string {
   const parts: string[] = [];
