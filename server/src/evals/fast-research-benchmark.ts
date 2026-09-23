@@ -5,12 +5,13 @@ import { performance } from 'node:perf_hooks';
 
 import dotenv from 'dotenv';
 
-import { isOpenAiApiAvailable } from '../api/openai.js';
+import { fastResearchEffort, isOpenAiApiAvailable } from '../api/openai.js';
 import { resetLlmBudget } from '../api/budget.js';
 import { LLM_CONFIG, MODEL_CONFIG } from '../model-config.js';
 // The real worker, not a copy of its prompt: this scores what the ⚡ Fast
 // button ships, including the Claude fallback when the OpenAI call fails.
 import { FastResearchWorker, FAST_RESEARCH_SYSTEM } from '../workers/fast-research.js';
+import { ResearchWorker } from '../workers/research.js';
 import { claudeSuggest } from '../claude-cli.js';
 import { checkAttributions, extractUrlSources } from '../workers/citations.js';
 import { CASES, gradeAnswer, type Grade, type ResearchCase } from './fast-research-cases.js';
@@ -24,6 +25,8 @@ else dotenv.config();
 // marks slow answers in the table; it never changes a grade.
 const SLOW_MS = 10_000;
 const CASE_TIMEOUT_MS = 60_000;
+// Deep research is an 8-turn agent loop; 60 s would score its slow answers as wrong.
+const DEEP_CASE_TIMEOUT_MS = 300_000;
 const FALLBACK_MARKER = '_(OpenAI unavailable';
 
 interface RunResult {
@@ -46,7 +49,9 @@ interface RunResult {
 // child env has ANTHROPIC_API_KEY stripped), which is the only way a Claude
 // model can run this path here. It is a cold spawn per call because tool use
 // bypasses the warm session, so its latency is what production would get.
-type ProviderName = 'luna' | 'claude';
+// `deep` = the shipping deep-research worker (its own prompt and model,
+// MODEL_CONFIG.deepResearch), which is what COPILOT_SUGGESTED_RESEARCH=deep runs.
+type ProviderName = 'luna' | 'claude' | 'deep';
 
 interface Args {
   runs: number;
@@ -61,7 +66,10 @@ function parseArgs(): Args {
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--runs') parsed.runs = Math.max(1, Number(args[++i]) || 1);
     else if (args[i] === '--case') parsed.only.push(args[++i] ?? '');
-    else if (args[i] === '--provider') parsed.provider = args[++i] === 'claude' ? 'claude' : 'luna';
+    else if (args[i] === '--provider') {
+      const value = args[++i];
+      parsed.provider = value === 'claude' || value === 'deep' ? value : 'luna';
+    }
     else if (args[i] === '--model') parsed.claudeModel = args[++i] ?? parsed.claudeModel;
   }
   return parsed;
@@ -88,6 +96,22 @@ function lunaAnswerer(): Answerer {
       // `answer` is the text before the footer: a footer source title could
       // otherwise contain the very words a key looks for.
       findings: result.success ? String(result.data?.answer ?? result.data?.findings ?? '') : '',
+      sources: Array.isArray(result.data?.sources) ? result.data.sources.length : 0,
+      flagged: Array.isArray(result.data?.unverifiedAttributions)
+        ? result.data.unverifiedAttributions.map((u: { source: string }) => u.source)
+        : [],
+      error: result.success ? undefined : (result.error ?? result.summary),
+    };
+  };
+}
+
+function deepAnswerer(): Answerer {
+  const worker = new ResearchWorker();
+  return async (query, onDelta, signal) => {
+    const result = await worker.execute({ query, _onDelta: onDelta }, signal);
+    return {
+      success: result.success,
+      findings: result.success ? String(result.data?.answer ?? '') : '',
       sources: Array.isArray(result.data?.sources) ? result.data.sources.length : 0,
       flagged: Array.isArray(result.data?.unverifiedAttributions)
         ? result.data.unverifiedAttributions.map((u: { source: string }) => u.source)
@@ -129,9 +153,9 @@ function percent(count: number, total: number): string {
   return total === 0 ? '—' : `${Math.round((count / total) * 100)}%`;
 }
 
-async function runCase(answerer: Answerer, testCase: ResearchCase): Promise<RunResult> {
+async function runCase(answerer: Answerer, testCase: ResearchCase, timeoutMs: number): Promise<RunResult> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), CASE_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const started = performance.now();
   let ttftMs: number | null = null;
   try {
@@ -229,19 +253,24 @@ async function main(): Promise<void> {
   const workerOnCli = provider === 'luna' && LLM_CONFIG.liveTransport === 'cli';
   const label = provider === 'claude'
     ? `${claudeModel} (claude CLI)`
-    : workerOnCli ? `${MODEL_CONFIG.haiku} (claude CLI, COPILOT_LIVE_LLM_MODE=cli)` : MODEL_CONFIG.fastResearch;
+    : provider === 'deep'
+      ? `${MODEL_CONFIG.deepResearch} (deep research worker, claude CLI)`
+      : workerOnCli
+        ? `${MODEL_CONFIG.haiku} (claude CLI, COPILOT_LIVE_LLM_MODE=cli)`
+        : `${MODEL_CONFIG.fastResearch} effort=${fastResearchEffort()}`;
   console.log(`Fast-research accuracy eval · ${label} + web search · ${cases.length} cases × ${runs} run(s)`);
   console.log(provider === 'luna' && !workerOnCli
     ? 'METERED: every case is a live OpenAI call with web search. Questions are synthetic; no meeting content is sent.'
     : 'Subscription: every case is a cold `claude` CLI spawn with WebSearch/WebFetch. Questions are synthetic.');
 
-  const answerer = provider === 'luna' ? lunaAnswerer() : claudeAnswerer(claudeModel);
+  const answerer = provider === 'luna' ? lunaAnswerer() : provider === 'deep' ? deepAnswerer() : claudeAnswerer(claudeModel);
+  const timeoutMs = provider === 'deep' ? DEEP_CASE_TIMEOUT_MS : CASE_TIMEOUT_MS;
   const results: RunResult[] = [];
   for (let run = 1; run <= runs; run++) {
     if (runs > 1) console.log(`\nRun ${run}/${runs}`);
     for (const testCase of cases) {
       resetLlmBudget();
-      const r = await runCase(answerer, testCase);
+      const r = await runCase(answerer, testCase, timeoutMs);
       results.push(r);
       printResult(r);
     }

@@ -111,7 +111,7 @@ export const CASES: ResearchCase[] = [
     kind: 'fact',
     query: "What's the difference between a SOC 2 Type I and a Type II report?",
     mustInclude: [
-      /point in time|specific (?:date|point)|single (?:date|point)|as of a/i,
+      /point in time|(?:specific|single|one) (?:date|point)|as of a/i,
       /period|over time|months/i,
     ],
     note: 'Type I: design of controls at a point in time. Type II: operating effectiveness over a period (typically 3-12 months).',

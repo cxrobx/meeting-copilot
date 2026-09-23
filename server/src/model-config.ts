@@ -20,6 +20,11 @@ export const MODEL_CONFIG = {
   haiku: process.env.COPILOT_HAIKU_MODEL || 'claude-haiku-4-5-20251001',
   suggestion: process.env.COPILOT_SUGGEST_MODEL || process.env.COPILOT_SUGGESTION_MODEL || 'claude-sonnet-5',
   worker: process.env.COPILOT_WORKER_MODEL || 'claude-sonnet-5',
+  // Deep research (workers/research.ts): an agent loop with WebSearch/WebFetch
+  // on the subscription CLI, so depth matters more than latency or cost.
+  // Chris's call 2026-09-22: Opus 5.5, not Sonnet. `npm run eval:research --
+  // --provider deep` scores it.
+  deepResearch: process.env.COPILOT_DEEP_RESEARCH_MODEL || 'claude-opus-5-5',
   // Pre-meeting prep agent (prep/agent.ts) — web research on the subscription CLI.
   prep: process.env.COPILOT_PREP_MODEL || 'claude-sonnet-5',
   review: process.env.COPILOT_REVIEW_MODEL || 'claude-opus-5',

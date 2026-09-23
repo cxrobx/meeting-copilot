@@ -6,6 +6,13 @@ import { beginLlmRequest, recordLlmUsage } from './budget.js';
 
 const TRIAGE_MODEL = MODEL_CONFIG.triage;
 const FAST_RESEARCH_MODEL = MODEL_CONFIG.fastResearch;
+// `low` ships. Set higher to trade first-token latency for more searches per
+// answer; `npm run eval:research` measures both sides of that trade.
+const FAST_RESEARCH_EFFORTS: ReasoningEffort[] = ['none', 'low', 'medium', 'high', 'xhigh'];
+export function fastResearchEffort(): ReasoningEffort {
+  const value = process.env.COPILOT_RESEARCH_EFFORT as ReasoningEffort | undefined;
+  return value && FAST_RESEARCH_EFFORTS.includes(value) ? value : 'low';
+}
 
 let cachedClient: OpenAI | null = null;
 
@@ -199,7 +206,7 @@ export async function openaiFastResearchStream(params: {
         { role: 'user', content: params.userContent },
       ],
       stream: true,
-      reasoning: { effort: 'low' },
+      reasoning: { effort: fastResearchEffort() },
       ...(serviceTier() ? { service_tier: serviceTier() as any } : {}),
     },
     { signal: params.signal, maxRetries: 0 },
