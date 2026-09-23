@@ -5,6 +5,7 @@ import {
   contrast,
   parseOnyxPalette,
   vaultLookCss,
+  vaultLookTokens,
   type VaultLook,
 } from '../present/vault-look.js';
 
@@ -157,6 +158,26 @@ describe('vaultLookCss', () => {
   });
 });
 
+describe('vaultLookTokens', () => {
+  const palette = parseOnyxPalette(SOLARIZED)!;
+  const tokens = vaultLookTokens(palette);
+
+  it('is exactly what the CSS declares, so the menu bar and the page cannot drift', () => {
+    const declared = vaultLookCss(palette)
+      .slice(':root.vault-look{'.length, -1)
+      .split(';')
+      .filter((d) => d.startsWith('--'));
+    expect(declared).toEqual(Object.entries(tokens).map(([name, value]) => `--${name}:${value}`));
+  });
+
+  it('carries every colour as a plain triplet the app reads without parsing CSS', () => {
+    for (const [name, value] of Object.entries(tokens)) {
+      if (name === 'font-sans') continue;
+      expect(value, name).toMatch(/^\d{1,3} \d{1,3} \d{1,3}$/);
+    }
+  });
+});
+
 describe('accentInk', () => {
   const cream: [number, number, number] = [253, 246, 227];
   const ink: [number, number, number] = [0, 43, 54];
@@ -199,6 +220,7 @@ describe('applyVaultLook', () => {
     mode: 'light',
     revision: 'abc-1',
     css: ':root.vault-look{--bg-primary:253 246 227}',
+    tokens: { 'bg-primary': '253 246 227' },
     source: 'onyx',
   };
 

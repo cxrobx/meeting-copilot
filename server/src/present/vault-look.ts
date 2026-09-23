@@ -54,6 +54,12 @@ export interface VaultLook {
   revision: string;
   /** `:root.vault-look{…}`, or '' when the dashboard wears its own palette. */
   css: string;
+  /**
+   * The same palette as `css`, as data: dashboard token name (without `--`) →
+   * value, `{}` when the dashboard wears its own palette. For the native menu
+   * bar popover, which wears the vault too and must never parse CSS.
+   */
+  tokens: Record<string, string>;
   source: 'onyx' | 'cache' | 'none';
 }
 
@@ -206,6 +212,16 @@ export function parseOnyxPalette(payload: unknown): VaultPalette | null {
  * block that the vault's mode selects.
  */
 export function vaultLookCss(palette: VaultPalette): string {
+  const declarations = [`color-scheme:${palette.mode}`];
+  for (const [name, value] of Object.entries(vaultLookTokens(palette))) declarations.push(`--${name}:${value}`);
+  return `:root.vault-look{${declarations.join(';')}}`;
+}
+
+/**
+ * The mapping behind `vaultLookCss`, as data (token name without `--` → value).
+ * One mapping for both consumers, so the page and the menu bar cannot drift.
+ */
+export function vaultLookTokens(palette: VaultPalette): Record<string, string> {
   const t = palette.tokens;
   const ground = triplet(t['bg-primary'])!;
   const ink = triplet(t['ink'])!;
@@ -214,29 +230,27 @@ export function vaultLookCss(palette: VaultPalette): string {
   const line = (name: string, ratio: number): string =>
     render((t[name] ? composite(t[name], ground) : null) ?? mix(ground, ink, ratio));
 
-  const declarations: string[] = [
-    `color-scheme:${palette.mode}`,
-    `--bg-primary:${t['bg-primary']}`,
-    `--bg-sidebar:${t['bg-sidebar']}`,
-    `--bg-surface:${t['bg-surface']}`,
-    `--bg-elevated:${t['bg-elevated']}`,
-    `--bg-input:${t['bg-input']}`,
-    `--border-default:${line('line', 0.14)}`,
-    `--border-subtle:${line('line-soft', 0.07)}`,
-    `--text-primary:${t['ink']}`,
-    `--text-secondary:${t['secondary']}`,
-    `--text-muted:${t['muted']}`,
-    `--text-faint:${t['faint']}`,
-    `--accent:${t['accent']}`,
-    `--accent-hover:${t['accent-hover']}`,
-    `--accent-ink:${render(accentInk(accent, ground, ink))}`,
-  ];
+  const tokens: Record<string, string> = {
+    'bg-primary': t['bg-primary'],
+    'bg-sidebar': t['bg-sidebar'],
+    'bg-surface': t['bg-surface'],
+    'bg-elevated': t['bg-elevated'],
+    'bg-input': t['bg-input'],
+    'border-default': line('line', 0.14),
+    'border-subtle': line('line-soft', 0.07),
+    'text-primary': t['ink'],
+    'text-secondary': t['secondary'],
+    'text-muted': t['muted'],
+    'text-faint': t['faint'],
+    accent: t['accent'],
+    'accent-hover': t['accent-hover'],
+    'accent-ink': render(accentInk(accent, ground, ink)),
+  };
   // The vault's INTERFACE font (the explorer's), never its reading font: chrome
   // set in the reading face would read as part of a note. Mono is left alone —
   // it marks the places where character alignment carries meaning.
-  if (t['ui-font']) declarations.push(`--font-sans:${t['ui-font']}`);
-
-  return `:root.vault-look{${declarations.join(';')}}`;
+  if (t['ui-font']) tokens['font-sans'] = t['ui-font'];
+  return tokens;
 }
 
 /**
@@ -367,7 +381,7 @@ function remember(
 function dress(palette: VaultPalette | null, enabled: boolean, source: VaultLook['source']): VaultLook {
   note(source);
   if (!palette || !enabled) {
-    return { enabled, available: palette !== null, mode: null, revision: '', css: '', source };
+    return { enabled, available: palette !== null, mode: null, revision: '', css: '', tokens: {}, source };
   }
   return {
     enabled,
@@ -375,6 +389,7 @@ function dress(palette: VaultPalette | null, enabled: boolean, source: VaultLook
     mode: palette.mode,
     revision: palette.revision,
     css: vaultLookCss(palette),
+    tokens: vaultLookTokens(palette),
     source,
   };
 }

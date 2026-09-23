@@ -37,6 +37,13 @@ struct UpcomingMeeting: Decodable, Equatable {
 private struct SessionsEnvelope: Decodable { let sessions: [RecentSession] }
 private struct UpcomingEnvelope: Decodable { let meetings: [UpcomingMeeting] }
 
+/// `GET /present/vault-look` — the dashboard's look, as data (`tokens`).
+private struct VaultLookEnvelope: Codable {
+    let enabled: Bool
+    let mode: String?
+    let tokens: [String: String]?
+}
+
 // MARK: - Menu Bar Feed
 
 /// What the menu bar popover shows beyond SessionManager's own state: the
@@ -58,6 +65,11 @@ final class MenuBarFeed {
     /// Normalised 0…1 (−60 dBFS…0), oldest first.
     private(set) var meetingLevels = [Float](repeating: 0, count: historyBars)
     private(set) var micLevels = [Float](repeating: 0, count: historyBars)
+    /// The popover's palette: the vault's while "Match vault appearance" is
+    /// on (the same switch as the dashboard), else CXNotes'.
+    private(set) var theme: MenuBarTheme = MenuBarFeed.lastTheme()
+
+    private static let lookDefaultsKey = "menuBarVaultLook"
 
     private var isVisible = false
     private var levelTimer: Timer?
@@ -88,6 +100,11 @@ final class MenuBarFeed {
     func refresh(liveTitle: String?) async {
         async let sessions = Self.fetch("/present/sessions", as: SessionsEnvelope.self)
         async let upcoming = Self.fetch("/calendar/upcoming", as: UpcomingEnvelope.self)
+        async let look = Self.fetch("/present/vault-look", as: VaultLookEnvelope.self)
+
+        // No answer keeps the current look: the server restarting must not
+        // repaint the popover, the same rule the dashboard follows.
+        if let look = await look { wear(look) }
 
         if let sessions = await sessions {
             recentSessions = Array(sessions.sessions.filter { $0.empty != true }.prefix(4))
@@ -109,6 +126,31 @@ final class MenuBarFeed {
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return try? JSONDecoder.copilotDecoder.decode(T.self, from: data)
+    }
+
+    // MARK: Look
+
+    private func wear(_ look: VaultLookEnvelope) {
+        if look.enabled, let mode = look.mode, let tokens = look.tokens,
+           let vault = MenuBarTheme.vault(tokens: tokens, mode: mode) {
+            theme = vault
+            if let data = try? JSONEncoder().encode(look) {
+                UserDefaults.standard.set(data, forKey: Self.lookDefaultsKey)
+            }
+        } else {
+            theme = .cx
+            UserDefaults.standard.removeObject(forKey: Self.lookDefaultsKey)
+        }
+    }
+
+    /// The look the popover last wore, so the first open after a launch
+    /// doesn't flash CXNotes' colours before the fetch lands.
+    private static func lastTheme() -> MenuBarTheme {
+        guard let data = UserDefaults.standard.data(forKey: lookDefaultsKey),
+              let look = try? JSONDecoder().decode(VaultLookEnvelope.self, from: data),
+              let mode = look.mode, let tokens = look.tokens,
+              let vault = MenuBarTheme.vault(tokens: tokens, mode: mode) else { return .cx }
+        return vault
     }
 
     // MARK: Levels
@@ -158,7 +200,8 @@ final class MenuBarFeed {
     #if DEBUG
     /// Fixture seam for MenuBarRenderTests — never compiled into a release.
     func loadPreview(sessions: [RecentSession], next: UpcomingMeeting?, inviteEndsAt: Date? = nil,
-                     meetingLevels: [Float], micLevels: [Float]) {
+                     meetingLevels: [Float], micLevels: [Float], theme: MenuBarTheme = .cx) {
+        self.theme = theme
         recentSessions = sessions
         nextMeeting = next
         liveInviteEndsAt = inviteEndsAt

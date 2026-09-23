@@ -118,6 +118,11 @@ Four things are deliberate:
 3:1 against its ground, which is enough to read as text but not to carry text, so
 the ink on an accent FILL (primary button, LIVE pill) is chosen by contrast.
 
+The same palette reaches the native menu bar popover as data: `/present/vault-look`
+also returns `tokens` (dashboard token name → plain triplet), built by
+`vaultLookTokens`, the one mapping `vaultLookCss` is rendered from, so the two
+cannot drift (`vault-look.test.ts` pins it). The app never parses CSS.
+
 Switch: `matchVaultAppearance` in settings.json (default on), gear panel →
 Appearance. While it is on, the header light/dark button reads "Vault" and is
 disabled — the vault drives the mode, exactly as in Onyx.

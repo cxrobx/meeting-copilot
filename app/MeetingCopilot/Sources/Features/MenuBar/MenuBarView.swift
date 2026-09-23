@@ -12,24 +12,26 @@ struct MenuBarActions {
     var openHistory: () -> Void
     var togglePanel: () -> Void
     var openSettings: () -> Void
-    var openSessionsFolder: () -> Void
     var openNotesFolder: () -> Void
     var quit: () -> Void
 }
 
 // MARK: - Menu Bar View
 
-/// The menu bar popover, in the same shape as CXNotes' panel: a chrome
-/// header, a glass body and an icon footer. Idle shows the record button,
-/// the next invite and recent sessions; a live meeting shows the recording
-/// card (timer, track levels, stop), the pulse, pending suggestions and an
-/// Ask box. Everything shown is real app or server state.
+/// The menu bar popover, in the shape of CXNotes' panel: a chrome header, a
+/// body and a labelled footer. Idle shows the record button, the next invite
+/// and recent sessions; a live meeting shows the recording card (timer, track
+/// levels, stop), the pulse, pending suggestions and an Ask box. It wears the
+/// dashboard's look — the Obsidian vault's palette while "Match vault
+/// appearance" is on (`MenuBarTheme`). Everything shown is real state.
 struct MenuBarView: View {
     let sessionManager: SessionManager
     let feed: MenuBarFeed
     let actions: MenuBarActions
 
     @Environment(\.dismiss) private var dismiss
+
+    private var theme: MenuBarTheme { feed.theme }
 
     private var inMeeting: Bool {
         switch sessionManager.state {
@@ -51,15 +53,17 @@ struct MenuBarView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(MB.pane.opacity(0.8))
+            .background(theme.groundFill)
             footer
         }
         .frame(width: 360)
-        .foregroundStyle(MB.textPrimary)
-        .environment(\.colorScheme, .dark)
+        .foregroundStyle(theme.textPrimary)
+        .tint(theme.accent)
+        .environment(\.menuBarTheme, theme)
+        .environment(\.colorScheme, theme.isDark ? .dark : .light)
         .background {
             // Zero-sized: it only needs a window to listen to, not a frame.
-            PopoverWindowObserver { visible in
+            PopoverWindowObserver(dark: theme.isDark) { visible in
                 feed.setVisible(visible, session: sessionManager)
             }
             .frame(width: 0, height: 0)
@@ -78,19 +82,19 @@ struct MenuBarView: View {
                 .interpolation(.high)
                 .frame(width: 24, height: 24)
             Text("Meeting Copilot")
-                .font(.system(size: 12.5, weight: .semibold))
+                .font(theme.font(12.5, .semibold))
             Spacer()
             HStack(spacing: 5) {
                 StatusDot(kind: headerStatus.kind)
                 Text(headerStatus.label)
-                    .font(.system(size: 11))
-                    .foregroundStyle(MB.textMuted)
+                    .font(theme.font(11))
+                    .foregroundStyle(theme.textMuted)
             }
         }
         .padding(.horizontal, 14)
         .padding(.top, 11)
         .padding(.bottom, 10)
-        .background(MB.chrome.opacity(0.92))
+        .background(theme.chromeFill)
         .overlay(alignment: .bottom) { Hairline() }
     }
 
@@ -109,29 +113,30 @@ struct MenuBarView: View {
 
     // MARK: Footer
 
+    /// Labelled, not icon-only: four bare glyphs left their jobs to guesswork.
     private var footer: some View {
         HStack(spacing: 2) {
-            Spacer()
-            FooterIcon(systemName: "rectangle.on.rectangle", help: "Toggle panel  ⌘⇧M") {
+            FooterButton(systemName: "rectangle.on.rectangle", label: "Panel", hint: "⌘⇧M",
+                         help: "Show or hide the Copilot window") {
                 dismiss(); actions.togglePanel()
             }
-            FooterIcon(systemName: "folder", help: "Open the sessions folder") {
-                dismiss(); actions.openSessionsFolder()
-            }
-            FooterIcon(systemName: "doc.text", help: "Open meeting notes in the vault") {
+            FooterButton(systemName: "doc.text", label: "Notes",
+                         help: "Open CX/Meetings, where meeting summaries are filed") {
                 dismiss(); actions.openNotesFolder()
             }
-            FooterIcon(systemName: "gearshape", help: "Settings") {
+            FooterButton(systemName: "gearshape", label: "Settings",
+                         help: "Open the dashboard's settings") {
                 dismiss(); actions.openSettings()
             }
-            FooterIcon(systemName: "power", help: "Quit Meeting Copilot") {
+            Spacer(minLength: 4)
+            FooterButton(systemName: "power", label: "Quit", help: "Quit Meeting Copilot") {
                 actions.quit()
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 7)
-        .padding(.bottom, 8)
-        .background(MB.chrome.opacity(0.92))
+        .padding(.horizontal, 8)
+        .padding(.top, 6)
+        .padding(.bottom, 7)
+        .background(theme.chromeFill)
         .overlay(alignment: .top) { Hairline() }
     }
 }
@@ -165,7 +170,7 @@ private struct IdleSection: View {
         VStack(alignment: .leading, spacing: 4) {
             SectionHeader(title: "Recent sessions") {
                 if !feed.recentSessions.isEmpty {
-                    ChipButton(text: "all") { close(); actions.openHistory() }
+                    ChipButton(text: "all", help: "All past sessions") { close(); actions.openHistory() }
                 }
             }
             if feed.recentSessions.isEmpty {
@@ -185,17 +190,18 @@ private struct IdleSection: View {
 
 private struct ServerFailedCard: View {
     let sessionManager: SessionManager
+    @Environment(\.menuBarTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 7) {
                 StatusDot(kind: .bad)
                 Text("Server failed to start")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(theme.font(12, .semibold))
             }
             Text(sessionManager.errorMessage ?? "Check ~/.meeting-copilot/server.log")
-                .font(.system(size: 11))
-                .foregroundStyle(MB.textMuted)
+                .font(theme.font(11))
+                .foregroundStyle(theme.textMuted)
                 .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
             Button("Retry") {
@@ -207,7 +213,7 @@ private struct ServerFailedCard: View {
             }
             .buttonStyle(PillButtonStyle(kind: .normal, small: true))
         }
-        .cardStyle(border: MB.danger.opacity(0.35))
+        .modifier(CardStyle(border: theme.danger.opacity(0.35)))
     }
 }
 
@@ -215,51 +221,48 @@ private struct NextMeetingCard: View {
     let meeting: UpcomingMeeting
     let enabled: Bool
     let setUp: () -> Void
+    @Environment(\.menuBarTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: 7) {
                 Text(MBFormat.meetingTime(meeting.startsAt))
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(theme.font(13, .semibold))
                 Text(MBFormat.relativeStart(meeting.startsAt))
-                    .font(.system(size: 11))
-                    .foregroundStyle(MB.accent)
+                    .font(theme.font(11))
+                    .foregroundStyle(theme.accent)
                 Spacer()
                 SectionEyebrow(text: "Next")
             }
             .padding(.bottom, 3)
             Text(meeting.title)
-                .font(.system(size: 13, weight: .semibold))
+                .font(theme.font(13, .semibold))
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
             if !meeting.attendees.isEmpty {
                 Text(MBFormat.people(meeting.attendees.map(\.name)))
-                    .font(.system(size: 11))
-                    .foregroundStyle(MB.textMuted)
+                    .font(theme.font(11))
+                    .foregroundStyle(theme.textMuted)
                     .lineLimit(1)
                     .padding(.top, 2)
             }
             if let link = meeting.meetLink {
-                HStack(spacing: 5) {
-                    Chip(text: MBFormat.linkLabel(link), kind: .plain)
-                }
-                .padding(.top, 8)
+                Chip(text: MBFormat.linkLabel(link), kind: .plain)
+                    .padding(.top, 8)
             }
             Button("Set up this meeting", action: setUp)
                 .buttonStyle(PillButtonStyle(kind: .primary, small: true, fullWidth: true))
                 .disabled(!enabled)
                 .padding(.top, 10)
         }
-        .cardStyle(
-            border: MB.accent.opacity(0.24),
-            tint: MB.accent.opacity(0.16)
-        )
+        .modifier(CardStyle(border: theme.accent.opacity(0.3), tint: theme.accent.opacity(0.14)))
     }
 }
 
 private struct SessionRow: View {
     let session: RecentSession
     let open: () -> Void
+    @Environment(\.menuBarTheme) private var theme
     @State private var hover = false
 
     var body: some View {
@@ -268,22 +271,22 @@ private struct SessionRow: View {
                 StatusDot(kind: .ok)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(session.title)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(theme.font(12, .medium))
                         .lineLimit(1)
                     Text(MBFormat.sessionMeta(session))
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(MB.textSubtle)
+                        .font(theme.font(10.5))
+                        .foregroundStyle(theme.textSubtle)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 4)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(MB.textSubtle)
+                    .foregroundStyle(theme.textSubtle)
                     .opacity(hover ? 1 : 0)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(hover ? 0.07 : 0)))
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(hover ? theme.hoverWash : .clear))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -318,6 +321,7 @@ private struct RecordingCard: View {
     let feed: MenuBarFeed
     let actions: MenuBarActions
     let close: () -> Void
+    @Environment(\.menuBarTheme) private var theme
 
     private var state: SessionState { sessionManager.state }
 
@@ -327,20 +331,20 @@ private struct RecordingCard: View {
                 stateLabel
                 Spacer()
                 Text(MBFormat.elapsed(sessionManager.sessionElapsedTime))
-                    .font(.system(size: 22, weight: .semibold, design: .monospaced))
+                    .font(theme.mono(22, .semibold))
                     .monospacedDigit()
-                    .foregroundStyle(state == .ending ? MB.textMuted : MB.textPrimary)
+                    .foregroundStyle(state == .ending ? theme.textMuted : theme.textPrimary)
             }
             .padding(.bottom, 6)
 
             Text(sessionManager.currentSession?.title ?? "Starting…")
-                .font(.system(size: 13, weight: .semibold))
+                .font(theme.font(13, .semibold))
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
             if let who = whoLine {
                 Text(who)
-                    .font(.system(size: 11))
-                    .foregroundStyle(MB.textMuted)
+                    .font(theme.font(11))
+                    .foregroundStyle(theme.textMuted)
                     .lineLimit(1)
                     .padding(.top, 2)
             }
@@ -349,14 +353,14 @@ private struct RecordingCard: View {
                 HStack(spacing: 7) {
                     ProgressView().controlSize(.small)
                     Text("Acquiring audio…")
-                        .font(.system(size: 11))
-                        .foregroundStyle(MB.textMuted)
+                        .font(theme.font(11))
+                        .foregroundStyle(theme.textMuted)
                 }
                 .padding(.top, 10)
             } else {
                 VStack(spacing: 7) {
-                    TrackRow(name: "Meeting", levels: feed.meetingLevels, color: MB.accent)
-                    TrackRow(name: "You", levels: feed.micLevels, color: MB.success)
+                    TrackRow(name: "Meeting", levels: feed.meetingLevels, color: theme.accent)
+                    TrackRow(name: "You", levels: feed.micLevels, color: theme.success)
                 }
                 .padding(.vertical, 10)
 
@@ -368,12 +372,11 @@ private struct RecordingCard: View {
                     HStack(alignment: .top, spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 10))
-                            .foregroundStyle(MB.warning)
                         Text(sessionManager.degradedReasons.joined(separator: " · ") + " — audio is buffered locally")
-                            .font(.system(size: 11))
-                            .foregroundStyle(MB.warning)
+                            .font(theme.font(11))
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    .foregroundStyle(theme.warning)
                     .padding(.bottom, 10)
                 }
 
@@ -381,8 +384,8 @@ private struct RecordingCard: View {
                     HStack(spacing: 7) {
                         ProgressView().controlSize(.small)
                         Text(endingText)
-                            .font(.system(size: 11))
-                            .foregroundStyle(MB.textMuted)
+                            .font(theme.font(11))
+                            .foregroundStyle(theme.textMuted)
                     }
                 } else {
                     HStack(spacing: 6) {
@@ -390,25 +393,25 @@ private struct RecordingCard: View {
                             .buttonStyle(PillButtonStyle(kind: .danger, fullWidth: true))
                         Button("Panel") { close(); actions.togglePanel() }
                             .buttonStyle(PillButtonStyle(kind: .normal))
-                            .help("Toggle panel  ⌘⇧M")
+                            .help("Show or hide the Copilot window  ⌘⇧M")
                     }
                 }
             }
         }
-        .cardStyle(border: MB.danger.opacity(0.4), tint: MB.danger.opacity(0.17))
+        .modifier(CardStyle(border: theme.danger.opacity(0.4), tint: theme.danger.opacity(0.15)))
     }
 
     @ViewBuilder
     private var stateLabel: some View {
         switch state {
         case .live:
-            RecLabel(text: "REC", color: MB.danger, pulsing: true)
+            RecLabel(text: "REC", color: theme.danger, pulsing: true)
         case .degraded:
-            RecLabel(text: "REC · DEGRADED", color: MB.warning, pulsing: true)
+            RecLabel(text: "REC · DEGRADED", color: theme.warning, pulsing: true)
         case .priming:
-            RecLabel(text: "STARTING", color: MB.textMuted, pulsing: false)
+            RecLabel(text: "STARTING", color: theme.textMuted, pulsing: false)
         default:
-            RecLabel(text: "WRAPPING UP", color: MB.textMuted, pulsing: false)
+            RecLabel(text: "WRAPPING UP", color: theme.textMuted, pulsing: false)
         }
     }
 
@@ -446,17 +449,18 @@ private struct TrackRow: View {
     let name: String
     let levels: [Float]
     let color: Color
+    @Environment(\.menuBarTheme) private var theme
 
     var body: some View {
         let live = MenuBarFeed.isLive(levels)
         HStack(spacing: 9) {
             Text(name)
-                .font(.system(size: 10.5))
-                .foregroundStyle(MB.textMuted)
-                .frame(width: 50, alignment: .leading)
+                .font(theme.font(10.5))
+                .foregroundStyle(theme.textMuted)
+                .frame(width: 52, alignment: .leading)
             LevelBars(levels: levels, color: color)
             Chip(text: live ? "live" : "quiet", kind: live ? .ok : .plain)
-                .frame(width: 44, alignment: .trailing)
+                .frame(width: 46, alignment: .trailing)
         }
     }
 }
@@ -483,6 +487,7 @@ private struct LevelBars: View {
 
 private struct PulseSection: View {
     let sessionManager: SessionManager
+    @Environment(\.menuBarTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -493,17 +498,17 @@ private struct PulseSection: View {
             }
             if let pulse = sessionManager.latestPulse {
                 Text(pulse.read)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(MB.textSecondary)
+                    .font(theme.font(11.5))
+                    .foregroundStyle(theme.textSecondary)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
                 if let escalation = pulse.escalations.first {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Image(systemName: "exclamationmark.circle.fill")
                             .font(.system(size: 10))
-                            .foregroundStyle(MB.warning)
+                            .foregroundStyle(theme.warning)
                         Text(escalation.text)
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(theme.font(11.5, .medium))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -536,6 +541,7 @@ private struct CopilotSection: View {
     let sessionManager: SessionManager
     let actions: MenuBarActions
     let close: () -> Void
+    @Environment(\.menuBarTheme) private var theme
 
     private static let shown = 2
 
@@ -563,21 +569,21 @@ private struct CopilotSection: View {
                     close(); actions.togglePanel()
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(MB.accent)
+                .font(theme.font(11, .medium))
+                .foregroundStyle(theme.accent)
             }
             ForEach(running.prefix(Self.shown)) { action in
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.mini)
                         .frame(width: 14)
                     Text(action.title)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(MB.textSecondary)
+                        .font(theme.font(11.5))
+                        .foregroundStyle(theme.textSecondary)
                         .lineLimit(1)
                     Spacer(minLength: 4)
                     Text(action.state == .running ? "running" : "queued")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(MB.textSubtle)
+                        .font(theme.font(10.5))
+                        .foregroundStyle(theme.textSubtle)
                 }
             }
         }
@@ -588,22 +594,23 @@ private struct SuggestionRow: View {
     let action: ActionSuggestion
     let approve: () -> Void
     let dismiss: () -> Void
+    @Environment(\.menuBarTheme) private var theme
 
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: action.type.icon)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(MB.accent)
+                .foregroundStyle(theme.accent)
                 .frame(width: 16, height: 16)
             VStack(alignment: .leading, spacing: 6) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(action.title)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(theme.font(12, .medium))
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(action.type.displayName)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(MB.textSubtle)
+                        .font(theme.font(10.5))
+                        .foregroundStyle(theme.textSubtle)
                 }
                 HStack(spacing: 6) {
                     Button("Approve", action: approve)
@@ -614,12 +621,13 @@ private struct SuggestionRow: View {
             }
             Spacer(minLength: 0)
         }
-        .cardStyle(border: MB.borderSubtle, padding: 10)
+        .modifier(CardStyle(border: theme.borderSubtle, padding: 10))
     }
 }
 
 private struct AskSection: View {
     let sessionManager: SessionManager
+    @Environment(\.menuBarTheme) private var theme
 
     private enum Status: Equatable { case idle, sending, sent, failed }
 
@@ -636,18 +644,15 @@ private struct AskSection: View {
             HStack(spacing: 6) {
                 TextField("Ask the copilot…", text: $question)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .font(theme.font(12))
                     .focused($focused)
                     .onSubmit(send)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(MB.card.opacity(focused ? 0.96 : 0.88))
-                    )
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(theme.input))
                     .overlay(
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(focused ? MB.accent.opacity(0.24) : MB.border)
+                            .strokeBorder(focused ? theme.accent.opacity(0.5) : theme.border)
                     )
                 Button("Go", action: send)
                     .buttonStyle(PillButtonStyle(kind: .normal, small: true))
@@ -656,12 +661,12 @@ private struct AskSection: View {
             switch status {
             case .sent:
                 Text("Asked — the answer lands in the panel")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(MB.textSubtle)
+                    .font(theme.font(10.5))
+                    .foregroundStyle(theme.textSubtle)
             case .failed:
                 Text("Not connected — couldn't ask. Try again in a moment.")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(MB.danger)
+                    .font(theme.font(10.5))
+                    .foregroundStyle(theme.danger)
             case .idle, .sending:
                 EmptyView()
             }
@@ -686,12 +691,13 @@ private struct AskSection: View {
 // MARK: - Record Button
 
 /// CXNotes' viewfinder record button: four corner brackets, a red disc and
-/// the REC wordmark — nearly all glass, so it reads as an instrument aimed at
-/// the meeting rather than another filled button.
+/// the REC wordmark — an instrument aimed at the meeting rather than another
+/// filled button.
 private struct RecButton: View {
     let caption: String
     let enabled: Bool
     let action: () -> Void
+    @Environment(\.menuBarTheme) private var theme
     @State private var hover = false
 
     var body: some View {
@@ -700,28 +706,29 @@ private struct RecButton: View {
             VStack(spacing: 2) {
                 HStack(spacing: 9) {
                     Circle()
-                        .fill(MB.record)
+                        .fill(theme.record)
                         .frame(width: 12, height: 12)
                         .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
-                        .shadow(color: MB.record.opacity(lit ? 0.9 : 0.55), radius: lit ? 9 : 6)
+                        .shadow(color: theme.record.opacity(lit ? 0.9 : 0.55), radius: lit ? 9 : 6)
                     Text("REC")
-                        .font(.system(size: 16, weight: .heavy))
+                        .font(theme.font(16, .heavy))
                         .tracking(0.96)
                 }
                 Text(caption.uppercased())
-                    .font(.system(size: 9.5, weight: .semibold))
+                    .font(theme.font(9.5, .semibold))
                     .tracking(0.76)
-                    .foregroundStyle(lit ? MB.textSecondary : MB.textMuted)
+                    .foregroundStyle(lit ? theme.textSecondary : theme.textMuted)
             }
             .frame(maxWidth: .infinity, minHeight: 46)
             .padding(.top, 8)
             .padding(.bottom, 9)
             .background {
                 ZStack {
-                    MB.card.opacity(lit ? 0.34 : 0.2)
+                    // Glass under CX; a flat well under the vault.
+                    theme.card.opacity(theme.translucent ? (lit ? 0.34 : 0.2) : 1)
                     if lit {
                         RadialGradient(
-                            colors: [MB.record.opacity(0.22), .clear],
+                            colors: [theme.record.opacity(0.22), .clear],
                             center: .top, startRadius: 0, endRadius: 190
                         )
                     }
@@ -729,7 +736,7 @@ private struct RecButton: View {
             }
             .overlay {
                 ViewfinderBrackets(inset: lit ? 4 : 5, arm: 13)
-                    .stroke(lit ? MB.record : Color.white.opacity(0.4),
+                    .stroke(lit ? theme.record : theme.textPrimary.opacity(0.4),
                             style: StrokeStyle(lineWidth: 2, lineCap: .butt))
             }
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -774,47 +781,25 @@ private struct ViewfinderBrackets: Shape {
 
 // MARK: - Atoms
 
-/// CXNotes' panel palette (renderer/menubar-panel.html), shared by the CX
-/// family: warm charcoal surfaces, Apple-blue accent, muted status hues.
-private enum MB {
-    static let pane = Color(red: 30 / 255, green: 28 / 255, blue: 25 / 255)
-    static let chrome = Color(red: 46 / 255, green: 43 / 255, blue: 38 / 255)
-    static let card = Color(red: 26 / 255, green: 24 / 255, blue: 21 / 255)
-
-    static let accent = Color(red: 10 / 255, green: 132 / 255, blue: 255 / 255)
-
-    static let textPrimary = Color.white
-    static let textSecondary = Color(red: 222 / 255, green: 220 / 255, blue: 217 / 255)
-    static let textMuted = Color(red: 182 / 255, green: 179 / 255, blue: 175 / 255)
-    static let textSubtle = Color(red: 150 / 255, green: 147 / 255, blue: 143 / 255)
-
-    static let border = Color.white.opacity(0.12)
-    static let borderSubtle = Color.white.opacity(0.08)
-
-    static let success = Color(red: 143 / 255, green: 179 / 255, blue: 136 / 255)
-    static let warning = Color(red: 212 / 255, green: 168 / 255, blue: 90 / 255)
-    static let danger = Color(red: 212 / 255, green: 118 / 255, blue: 106 / 255)
-    /// The record disc — deliberately not `danger`, so start and stop never
-    /// read as the same control.
-    static let record = Color(red: 229 / 255, green: 72 / 255, blue: 77 / 255)
-}
-
 private struct Hairline: View {
+    @Environment(\.menuBarTheme) private var theme
+
     var body: some View {
-        Rectangle().fill(MB.borderSubtle).frame(height: 1)
+        Rectangle().fill(theme.borderSubtle).frame(height: 1)
     }
 }
 
 private struct StatusDot: View {
     enum Kind { case ok, warn, bad, recording }
     let kind: Kind
+    @Environment(\.menuBarTheme) private var theme
 
     var body: some View {
         switch kind {
         case .recording:
             Image(systemName: "circle.fill")
                 .font(.system(size: 7))
-                .foregroundStyle(MB.danger)
+                .foregroundStyle(theme.danger)
                 .symbolEffect(.pulse, options: .repeating)
         default:
             Circle()
@@ -825,9 +810,9 @@ private struct StatusDot: View {
 
     private var color: Color {
         switch kind {
-        case .ok: return MB.success
-        case .warn: return MB.warning
-        case .bad, .recording: return MB.danger
+        case .ok: return theme.success
+        case .warn: return theme.warning
+        case .bad, .recording: return theme.danger
         }
     }
 }
@@ -836,6 +821,7 @@ private struct RecLabel: View {
     let text: String
     let color: Color
     let pulsing: Bool
+    @Environment(\.menuBarTheme) private var theme
 
     var body: some View {
         HStack(spacing: 6) {
@@ -845,7 +831,7 @@ private struct RecLabel: View {
                     .symbolEffect(.pulse, options: .repeating)
             }
             Text(text)
-                .font(.system(size: 11, weight: .semibold))
+                .font(theme.font(11, .semibold))
                 .tracking(0.66)
         }
         .foregroundStyle(color)
@@ -854,12 +840,13 @@ private struct RecLabel: View {
 
 private struct SectionEyebrow: View {
     let text: String
+    @Environment(\.menuBarTheme) private var theme
 
     var body: some View {
         Text(text.uppercased())
-            .font(.system(size: 10, weight: .semibold))
+            .font(theme.font(10, .semibold))
             .tracking(1.0)
-            .foregroundStyle(MB.textSubtle)
+            .foregroundStyle(theme.textSubtle)
     }
 }
 
@@ -878,11 +865,12 @@ private struct SectionHeader<Trailing: View>: View {
 
 private struct EmptyLine: View {
     let text: String
+    @Environment(\.menuBarTheme) private var theme
 
     var body: some View {
         Text(text)
-            .font(.system(size: 11.5))
-            .foregroundStyle(MB.textSubtle)
+            .font(theme.font(11.5))
+            .foregroundStyle(theme.textSubtle)
             .padding(.top, 2)
     }
 }
@@ -891,36 +879,34 @@ private struct Chip: View {
     enum Kind { case plain, accent, ok, warn, bad }
     let text: String
     let kind: Kind
+    @Environment(\.menuBarTheme) private var theme
 
     var body: some View {
         Text(text)
-            .font(.system(size: 10, design: .monospaced))
+            .font(theme.mono(10))
             .lineLimit(1)
             .fixedSize()
             .padding(.horizontal, 6)
             .padding(.vertical, 1)
-            .foregroundStyle(foreground)
-            .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(fill))
-            .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).strokeBorder(stroke))
+            .foregroundStyle(hue ?? theme.textMuted)
+            .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(hue?.opacity(0.12) ?? theme.input))
+            .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).strokeBorder(hue?.opacity(0.32) ?? theme.border))
     }
 
     private var hue: Color? {
         switch kind {
         case .plain: return nil
-        case .accent: return MB.accent
-        case .ok: return MB.success
-        case .warn: return MB.warning
-        case .bad: return MB.danger
+        case .accent: return theme.accent
+        case .ok: return theme.success
+        case .warn: return theme.warning
+        case .bad: return theme.danger
         }
     }
-
-    private var foreground: Color { hue ?? MB.textMuted }
-    private var fill: Color { hue?.opacity(0.12) ?? MB.card.opacity(0.55) }
-    private var stroke: Color { hue?.opacity(0.32) ?? MB.border }
 }
 
 private struct ChipButton: View {
     let text: String
+    let help: String
     let action: () -> Void
     @State private var hover = false
 
@@ -930,48 +916,62 @@ private struct ChipButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
-        .help("All past sessions")
+        .help(help)
     }
 }
 
 private struct WarningBox: View {
     let title: String
     let detail: String
+    @Environment(\.menuBarTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text("⚠️ \(title)")
-                .font(.system(size: 11, weight: .semibold))
+                .font(theme.font(11, .semibold))
+                .foregroundStyle(theme.warningBoxTitle)
             Text(detail)
-                .font(.system(size: 10.5))
-                .foregroundStyle(Color(red: 240 / 255, green: 198 / 255, blue: 190 / 255))
+                .font(theme.font(10.5))
+                .foregroundStyle(theme.warningBoxText)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .foregroundStyle(Color(red: 1, green: 226 / 255, blue: 220 / 255))
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // Opaque on purpose: a warning that dissolves into the wallpaper
-        // defeats itself.
-        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color(red: 74 / 255, green: 32 / 255, blue: 28 / 255)))
-        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Color(red: 150 / 255, green: 68 / 255, blue: 58 / 255)))
+        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(theme.warningBoxFill))
+        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(theme.warningBoxStroke))
     }
 }
 
-private struct FooterIcon: View {
+private struct FooterButton: View {
     let systemName: String
+    let label: String
+    var hint: String? = nil
     let help: String
     let action: () -> Void
+    @Environment(\.menuBarTheme) private var theme
     @State private var hover = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 12.5))
-                .frame(width: 26, height: 24)
-                .foregroundStyle(hover ? MB.textPrimary : MB.textMuted)
-                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.white.opacity(hover ? 0.1 : 0)))
-                .contentShape(Rectangle())
+            HStack(spacing: 5) {
+                Image(systemName: systemName)
+                    .font(.system(size: 11))
+                Text(label)
+                    .font(theme.font(11, .medium))
+                if let hint {
+                    Text(hint)
+                        .font(theme.mono(9.5))
+                        .foregroundStyle(theme.textSubtle)
+                }
+            }
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 7)
+            .padding(.vertical, 5)
+            .foregroundStyle(hover ? theme.textPrimary : theme.textMuted)
+            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(hover ? theme.hoverWash : .clear))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
@@ -995,11 +995,12 @@ private struct PillButtonStyle: ButtonStyle {
         let small: Bool
         let fullWidth: Bool
         @Environment(\.isEnabled) private var isEnabled
+        @Environment(\.menuBarTheme) private var theme
         @State private var hover = false
 
         var body: some View {
             configuration.label
-                .font(.system(size: small ? 11 : 12, weight: kind == .normal ? .medium : .semibold))
+                .font(theme.font(small ? 11 : 12, kind == .normal ? .medium : .semibold))
                 .lineLimit(1)
                 .padding(.horizontal, small ? 10 : 14)
                 .padding(.vertical, small ? 4 : 6)
@@ -1014,40 +1015,45 @@ private struct PillButtonStyle: ButtonStyle {
 
         private var foreground: Color {
             switch kind {
-            case .normal: return MB.textPrimary
-            case .primary: return .white
-            case .danger: return Color(red: 38 / 255, green: 18 / 255, blue: 15 / 255)
+            case .normal: return theme.textPrimary
+            case .primary: return theme.accentInk
+            case .danger: return theme.dangerInk
             }
         }
 
         private var fill: Color {
             switch kind {
-            case .normal: return Color.white.opacity(hover ? 0.13 : 0.07)
-            case .primary: return hover ? Color(red: 8 / 255, green: 106 / 255, blue: 204 / 255) : MB.accent
-            case .danger: return hover ? Color(red: 198 / 255, green: 104 / 255, blue: 92 / 255) : MB.danger
+            case .normal: return hover ? theme.buttonFillHover : theme.buttonFill
+            case .primary: return hover ? theme.accentHover : theme.accent
+            case .danger: return theme.danger.opacity(hover ? 0.88 : 1)
             }
         }
 
         private var stroke: Color {
             switch kind {
-            case .normal: return MB.border
+            case .normal: return theme.border
             case .primary, .danger: return fill
             }
         }
     }
 }
 
-private extension View {
-    /// A card lies ON the pane, so it runs denser (and darker) than the pane
-    /// beneath it — a well cut into the surface, not a second sheet of glass.
-    func cardStyle(border: Color, tint: Color? = nil, padding: CGFloat = 12) -> some View {
-        self
+/// A card lies ON the ground, so it runs denser (and darker) than the ground
+/// beneath it — a well cut into the surface, not a second sheet.
+private struct CardStyle: ViewModifier {
+    let border: Color
+    var tint: Color? = nil
+    var padding: CGFloat = 12
+    @Environment(\.menuBarTheme) private var theme
+
+    func body(content: Content) -> some View {
+        content
             .padding(.horizontal, padding)
             .padding(.vertical, padding - 1)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(MB.card.opacity(0.9))
+                    .fill(theme.cardFill)
                     .overlay {
                         if let tint {
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -1142,30 +1148,41 @@ enum MBFormat {
 /// Reports when the MenuBarExtra window opens and closes. SwiftUI's
 /// onAppear/onDisappear fire only once for a `.window`-style extra, so the
 /// feed would never refresh; the window's own occlusion and key notifications
-/// are reliable. Also pins the window dark, like CXNotes' panel.
+/// are reliable. Also sets the window's appearance to the theme's mode, so
+/// its material and native controls match.
 private struct PopoverWindowObserver: NSViewRepresentable {
+    let dark: Bool
     let onVisibilityChange: (Bool) -> Void
 
     func makeNSView(context: Context) -> ObserverView {
         let view = ObserverView()
+        view.dark = dark
         view.onVisibilityChange = onVisibilityChange
         return view
     }
 
     func updateNSView(_ nsView: ObserverView, context: Context) {
         nsView.onVisibilityChange = onVisibilityChange
+        nsView.dark = dark
     }
 
     final class ObserverView: NSView {
         var onVisibilityChange: ((Bool) -> Void)?
+        var dark = true {
+            didSet { applyAppearance() }
+        }
         private var tokens: [NSObjectProtocol] = []
+
+        private func applyAppearance() {
+            window?.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             tokens.forEach { NotificationCenter.default.removeObserver($0) }
             tokens = []
             guard let window else { return }
-            window.appearance = NSAppearance(named: .darkAqua)
+            applyAppearance()
 
             let center = NotificationCenter.default
             let report: (Notification) -> Void = { [weak self, weak window] _ in

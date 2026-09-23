@@ -253,9 +253,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             openHistory: { [weak self] in self?.showPanelAndRun("history") },
             togglePanel: { [weak self] in self?.togglePanel() },
             openSettings: { [weak self] in self?.showPanelAndRun("settings") },
-            openSessionsFolder: {
-                Self.openFolder("~/.meeting-copilot/sessions")
-            },
             openNotesFolder: {
                 // Summaries are filed here when auto-save is on (workers/summary.ts).
                 Self.openFolder("~/Documents/CX/Meetings", fallback: "~/Documents/CX")
