@@ -69,6 +69,21 @@ private struct WebViewWrapper: NSViewRepresentable {
                   });
                 }
               };
+              var pendingCopies = {};
+              var copyCounter = 0;
+              window.__copilotNativeBridge.copyImage = function(url) {
+                var id = 'ci_' + (++copyCounter) + '_' + Date.now();
+                return new Promise(function(resolve) {
+                  pendingCopies[id] = resolve;
+                  window.webkit.messageHandlers.\(bridgeMessageName).postMessage({
+                    action: 'copyImage', requestId: id, url: String(url || '')
+                  });
+                });
+              };
+              window.__copilotCopyImageResult = function(id, ok) {
+                var resolver = pendingCopies[id];
+                if (resolver) { delete pendingCopies[id]; resolver(!!ok); }
+              };
               window.__copilotPickPathResult = function(id, path) {
                 var resolver = pendingPicks[id];
                 if (resolver) { delete pendingPicks[id]; resolver(path || null); }
@@ -215,6 +230,15 @@ private struct WebViewWrapper: NSViewRepresentable {
             }
         }
 
+        func deliverCopyResult(requestId: String, ok: Bool) {
+            let data = (try? JSONSerialization.data(withJSONObject: [requestId])) ?? Data()
+            guard let raw = String(data: data, encoding: .utf8) else { return }
+            let js = "window.__copilotCopyImageResult && window.__copilotCopyImageResult(\(raw.dropFirst().dropLast()), \(ok));"
+            DispatchQueue.main.async {
+                self.webView?.evaluateJavaScript(js, completionHandler: nil)
+            }
+        }
+
         func pushError(_ message: String) {
             // JSON-escape by serializing an array, then strip the brackets
             let data = (try? JSONSerialization.data(withJSONObject: [message])) ?? Data()
@@ -274,6 +298,23 @@ private struct WebViewWrapper: NSViewRepresentable {
                     self.presentOpenPanel(kind: kind, title: title) { path in
                         self.deliverPickResult(requestId: requestId, path: path)
                     }
+                case "copyImage":
+                    // Evidence snapshots, for pasting into the call chat (EvidenceClipboard).
+                    let requestId = (body["requestId"] as? String) ?? ""
+                    guard let url = self.navigationPolicy.evidenceImageURL((body["url"] as? String) ?? "") else {
+                        appLog("[Bridge] copyImage refused a URL outside /present/evidence/*/file")
+                        self.deliverCopyResult(requestId: requestId, ok: false)
+                        return
+                    }
+                    URLSession.shared.dataTask(with: url) { data, response, _ in
+                        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                        DispatchQueue.main.async {
+                            var ok = false
+                            if status == 200, let data { ok = EvidenceClipboard.copy(imageData: data) }
+                            if !ok { appLog("[Bridge] copyImage failed (HTTP \(status))") }
+                            self.deliverCopyResult(requestId: requestId, ok: ok)
+                        }
+                    }.resume()
                 default:
                     appLog("[Bridge] Unknown action: \(action)")
                 }

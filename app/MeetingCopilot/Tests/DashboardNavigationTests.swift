@@ -58,4 +58,21 @@ final class DashboardNavigationTests: XCTestCase {
         XCTAssertTrue(DashboardNavigationPolicy.isCancelledNavigation(NSError(domain: "WebKitErrorDomain", code: 102)))
         XCTAssertFalse(DashboardNavigationPolicy.isCancelledNavigation(NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost)))
     }
+    func testCopyImageOnlyFetchesEvidenceSnapshotsFromThisServer() {
+        let ok = policy.evidenceImageURL("/present/evidence/0/file?session=2026-09-25-abc")
+        XCTAssertEqual(ok?.absoluteString, "http://localhost:17890/present/evidence/0/file?session=2026-09-25-abc")
+        XCTAssertNotNil(policy.evidenceImageURL("http://localhost:17890/present/evidence/7/file"))
+        for bad in [
+            "https://evil.example/present/evidence/0/file",
+            "http://localhost:9999/present/evidence/0/file",
+            "/present/evidence/0/view",
+            "/present/evidence/x/file",
+            "/present/evidence/0/file/../../action/1/view",
+            "/present/action/1/view",
+            "file:///etc/passwd",
+            "",
+        ] {
+            XCTAssertNil(policy.evidenceImageURL(bad), bad)
+        }
+    }
 }

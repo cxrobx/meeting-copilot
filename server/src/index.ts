@@ -58,6 +58,7 @@ import { paidApiDisabled } from './api/killswitch.js';
 import { disposeAllWarmSessions } from './persistent-claude.js';
 import { getSettings } from './settings.js';
 import { attachPrepToSession, prepBriefDoc } from './prep/staged.js';
+import { evidenceView, openLiveTabs, type EvidenceTabView } from './present/evidence.js';
 import { LLM_CONFIG, MODEL_CONFIG } from './model-config.js';
 
 // Load environment — prefer ~/.meeting-copilot/.env so a packaged .app
@@ -241,6 +242,8 @@ type OutboundMessage =
   | { type: 'pulse.failed'; reason: string; mode?: string; trigger?: string }
   // A timer's close-out with something to settle — the app raises a notification.
   | { type: 'pulse.closeout'; body: string }
+  // A staged prep's evidence tabs, once it attaches (present/evidence.ts).
+  | { type: 'evidence.tabs'; tabs: EvidenceTabView[] }
   // One of the coach's questions, asked from a button or a hotkey. `started`
   // when the server takes it, then `done` or `failed`. The dashboard drives
   // its busy buttons from this; the app turns title/body into a notification.
@@ -1354,11 +1357,19 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         console.warn(`[Prep] staged prep ${message.prepId} not found — ${attached ? 'using the brief the form sent' : 'no brief for this session'}`);
       }
       if (!attached) break;
-      // First, so the triage manifest lists it before its cap; pinned, so the
-      // suggestion context block always carries it.
-      intelligence.setContextDocs([prepBriefDoc(attached.brief, sessionStore.directory), ...intelligence.getContextDocs()]);
-      eventLogger?.log('meeting.prep', { origin: attached.origin, prepId: attached.prepId, briefChars: attached.brief.length });
-      debugLog(`[Prep] ${attached.origin} brief attached (${attached.brief.length} chars)`);
+      if (attached.brief) {
+        // First, so the triage manifest lists it before its cap; pinned, so the
+        // suggestion context block always carries it.
+        intelligence.setContextDocs([prepBriefDoc(attached.brief, sessionStore.directory), ...intelligence.getContextDocs()]);
+      }
+      eventLogger?.log('meeting.prep', { origin: attached.origin, prepId: attached.prepId, briefChars: attached.brief.length, tabs: attached.tabs.length });
+      debugLog(`[Prep] ${attached.origin} prep attached (brief ${attached.brief.length} chars, ${attached.tabs.length} tab(s))`);
+      if (attached.tabs.length) {
+        broadcast({ type: 'evidence.tabs', tabs: evidenceView(attached.tabs) });
+        // Live pages open in the default browser now, so they are loaded and
+        // logged in by the time the meeting needs them.
+        void openLiveTabs(attached.tabs).then((n) => { if (n) debugLog(`[Evidence] opened ${n} live tab(s) in the browser`); });
+      }
       break;
     }
 

@@ -71,7 +71,10 @@ Write JSON to your scratchpad, not the repo:
   "projects": ["cxventures"],
   "contextPaths": ["~/Projects/cxventures/clients/northwind/STATUS.md"],
   "brief": "### Who they are\n- …",
-  "sources": [{ "title": "Northwind Company", "url": "https://…" }]
+  "sources": [{ "title": "Northwind Company", "url": "https://…" }],
+  "tabs": [
+    { "title": "Looker: 0 key events", "url": "https://lookerstudio.google.com/reporting/…/page/…", "path": "~/Projects/cxventures/clients/northwind/Meetings/evidence/2026-09-25/01-landing-pages.png", "note": "Brightline's own dashboard shows 0 key events" }
+  ]
 }
 ```
 
@@ -86,6 +89,7 @@ Write JSON to your scratchpad, not the repo:
 | `contextPaths` | Absolute or `~/` paths to `.md`/`.txt`/`.json`/`.yaml` files or folders. The copilot reads them during the meeting. Two to four focused files beat a whole repo. |
 | `brief` | Markdown, **≤ 3,000 chars**. It is pinned into every live suggestion's context, so write only what helps mid-meeting: `### Who they are`, `### Their company`, `### How you're connected`, `### Overlap & openings`, and `### Watch-outs` only when something real exists. Bullets, no filler. |
 | `sources` | `{title, url}` for the pages the brief relies on (≤ 10). |
+| `tabs` | Optional **evidence tabs** (≤ 8): what Chris may want to show or paste mid-meeting. Each is `{title, url?, path?, note?}` and needs a `url` (http/https), a `path` (an absolute or `~/` **png/jpg/gif/webp/pdf/html** snapshot that exists), or both. Title ≤ 80 chars, note ≤ 200, one line. They appear in the dashboard's Evidence panel once the session starts, each with Copy link (the url) and Copy image (image snapshots). **Every `url` opens in his default browser on Start**, where his logins are, so only list pages he'd want open. For an authenticated page (Looker Studio, Search Console, HubSpot) pair the url with a cropped screenshot at `path`, since those pages don't load inside the app and a snapshot is what he can paste into the chat. Only add tabs when the meeting has evidence to show; most don't. |
 
 ## 4. Stage it, and read what comes back
 
@@ -97,7 +101,8 @@ $CLI /path/to/prep.json
   item that is too long) and run it again. Don't truncate blindly: tighten the
   words.
 - **`⚠` warnings** name what was dropped (an unknown project, a missing or
-  unreadable context path, an unknown field). Fix any that matter and re-stage.
+  unreadable context path, an unknown field, a tab's missing snapshot).
+  Fix any that matter and re-stage.
   Staging the same invite again replaces its prep, and an open form shows the
   update.
 - **`• notes`** say what was taken from the invite.

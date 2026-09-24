@@ -8,6 +8,7 @@ import {
   listStagedPreps,
   normalizeStagedInput,
   prepBriefDoc,
+  readSessionTabs,
   saveStagedPrep,
   stagedPrepExpiry,
   stagedPrepId,
@@ -100,6 +101,61 @@ describe('normalizeStagedInput', () => {
     expect(warnings.some((w) => w.includes('only reads .md'))).toBe(true);
   });
 
+  describe('evidence tabs', () => {
+    const PNG = '/Users/test/evidence/zero-key-events.png';
+    const tabOpts = { ...opts, pathExists: (p: string) => p === PNG || opts.pathExists(p) };
+    const withTabs = (tabs: unknown) => normalizeStagedInput({ ...INPUT, tabs }, tabOpts);
+
+    it('keeps a live URL, a snapshot, and a snapshot with its live page', () => {
+      const { prep, warnings } = withTabs([
+        { title: 'Looker: key events', url: 'https://lookerstudio.google.com/reporting/abc/page/p1', note: 'Brightline shows 0 key events' },
+        { title: 'Landing pages', path: '~/evidence/zero-key-events.png' },
+        { url: 'https://lookerstudio.google.com/x', path: PNG },
+      ]);
+      expect(warnings.filter((w) => /tab/i.test(w))).toEqual([]);
+      expect(prep!.tabs).toEqual([
+        { title: 'Looker: key events', url: 'https://lookerstudio.google.com/reporting/abc/page/p1', path: null, note: 'Brightline shows 0 key events' },
+        { title: 'Landing pages', url: null, path: PNG, note: '' }, // ~ expanded
+        { title: 'zero-key-events.png', url: 'https://lookerstudio.google.com/x', path: PNG, note: '' }, // title from the file
+      ]);
+    });
+
+    it('drops what is unusable, and says so', () => {
+      const { prep, warnings } = withTabs([
+        { title: 'No target' },
+        { title: 'Bad scheme', url: 'javascript:alert(1)' },
+        { title: 'Missing file', path: '/Users/test/evidence/gone.png' },
+        { title: 'Relative', path: 'evidence/zero-key-events.png' },
+        { title: 'Wrong kind', path: '/Users/test/clients/northwind/STATUS.md' },
+        { title: 'Bad path, good url', path: '/Users/test/nope.png', url: 'https://example.com', kind: 'live' },
+        'just a string',
+      ]);
+      expect(prep!.tabs).toEqual([{ title: 'Bad path, good url', url: 'https://example.com', path: null, note: '' }]);
+      expect(warnings).toEqual(expect.arrayContaining([
+        'Dropped Tab 1: it needs a url or a snapshot path',
+        'Tab 2: dropped url "javascript:alert(1)": it must start with http:// or https://',
+        'Tab 3: dropped path "/Users/test/evidence/gone.png": it does not exist',
+        'Tab 4: dropped path "evidence/zero-key-events.png": it must be absolute',
+        'Tab 5: dropped path "/Users/test/clients/northwind/STATUS.md": a snapshot must be png, jpg, gif, webp, pdf or html',
+        'Tab 6: ignored unknown field "kind"',
+        'Dropped Tab 7: expected {title, url, path, note}',
+      ]));
+    });
+
+    it('caps the count and the text, and ignores a non-list', () => {
+      const many = Array.from({ length: LIMITS.tabs + 2 }, (_, i) => ({ title: `T${i}`, url: `https://x.y/${i}` }));
+      const capped = withTabs(many);
+      expect(capped.prep!.tabs).toHaveLength(LIMITS.tabs);
+      expect(capped.warnings).toContain(`Kept the first ${LIMITS.tabs} of ${LIMITS.tabs + 2} tabs`);
+      const long = withTabs([{ title: 'x'.repeat(200), note: 'y'.repeat(500), url: 'https://x.y' }]).prep!.tabs[0];
+      expect(long.title).toHaveLength(LIMITS.tabTitleChars);
+      expect(long.note).toHaveLength(LIMITS.tabNoteChars);
+      expect(withTabs({ url: 'https://x.y' }).warnings).toContain('Ignored tabs: expected a list of {title, url, path, note}');
+      expect(stage().prep!.tabs).toEqual([]);
+      expect(stage().warnings.some((w) => w.includes('unknown field "tabs"'))).toBe(false);
+    });
+  });
+
   it('accepts attendees as one string and agenda as lines', () => {
     const { prep } = stage({ attendees: 'Rory, Eli Park; rory', agenda: 'First\nSecond\n' });
     expect(prep!.attendees.map((a) => a.name)).toEqual(['Rory', 'Eli Park']);
@@ -176,11 +232,27 @@ describe('the staged folder', () => {
     expect(skipped.find((s) => s.file === 'aaaaaaaaaaaa.json')!.reason).toMatch(/update Meeting Copilot/);
   });
 
+  it('reads a file staged before tabs existed', () => {
+    const { tabs: _tabs, ...old } = prep({});
+    writeFileSync(join(dir, `${old.id}.json`), JSON.stringify(old));
+    expect(listStagedPreps(dir, NOW).preps[0].tabs).toEqual([]);
+  });
+
+  it('attaches a prep that brings tabs but no brief, and keeps its tabs with the session', () => {
+    const p = { ...prep({ brief: '' }), tabs: [{ title: 'Looker', url: 'https://lookerstudio.google.com/x', path: null, note: '' }] };
+    saveStagedPrep(p, dir);
+    const attached = attachPrepToSession({ prepId: p.id }, sessionDir, dir);
+    expect(attached).toEqual({ brief: '', tabs: p.tabs, origin: 'staged', prepId: p.id });
+    expect(readSessionTabs(sessionDir)).toEqual(p.tabs);
+    // The Prep button's brief has no tabs, and a session without a prep reads none.
+    expect(readSessionTabs(dir)).toEqual([]);
+  });
+
   it('moves a staged prep into the session, exactly once', () => {
     const p = prep({});
     saveStagedPrep(p, dir);
     const attached = attachPrepToSession({ prepId: p.id }, sessionDir, dir);
-    expect(attached).toEqual({ brief: p.brief, origin: 'staged', prepId: p.id });
+    expect(attached).toEqual({ brief: p.brief, tabs: [], origin: 'staged', prepId: p.id });
     expect(JSON.parse(readFileSync(join(sessionDir, 'prep.json'), 'utf8')).id).toBe(p.id);
     expect(listStagedPreps(dir, NOW).preps).toEqual([]);
     expect(attachPrepToSession({ prepId: p.id }, sessionDir, dir)).toBeNull();
@@ -191,17 +263,17 @@ describe('the staged folder', () => {
     saveStagedPrep(p, dir);
     // A re-prep on the prepped form replaced the brief: that one wins.
     expect(attachPrepToSession({ prepId: p.id, brief: '### Newer' }, sessionDir, dir))
-      .toEqual({ brief: '### Newer', origin: 'staged', prepId: p.id });
+      .toEqual({ brief: '### Newer', tabs: [], origin: 'staged', prepId: p.id });
     // The staged file is gone (already moved): the sent brief still lands.
     expect(attachPrepToSession({ prepId: p.id, brief: '### Newer' }, sessionDir, dir))
-      .toEqual({ brief: '### Newer', origin: 'form', prepId: null });
+      .toEqual({ brief: '### Newer', tabs: [], origin: 'form', prepId: null });
   });
 
   it('records the Prep button brief, and ignores junk ids', () => {
     expect(attachPrepToSession({ prepId: '../../etc/passwd' }, sessionDir, dir)).toBeNull();
     expect(attachPrepToSession({}, sessionDir, dir)).toBeNull();
     const attached = attachPrepToSession({ brief: '  ### Who\n- A  ', sources: [{ title: 'x', url: 'https://x.y' }] }, sessionDir, dir);
-    expect(attached).toEqual({ brief: '### Who\n- A', origin: 'form', prepId: null });
+    expect(attached).toEqual({ brief: '### Who\n- A', tabs: [], origin: 'form', prepId: null });
     const saved = JSON.parse(readFileSync(join(sessionDir, 'prep.json'), 'utf8'));
     expect(saved.origin).toBe('form');
     expect(saved.sources).toHaveLength(1);

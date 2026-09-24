@@ -125,6 +125,11 @@ function printPrep(prep: StagedPrep): void {
   line('context', prep.contextPaths.join('\n             ') || '(none)');
   line('brief', prep.brief ? `${prep.brief.length} / ${LIMITS.briefChars} chars` : '(none)');
   line('sources', String(prep.sources.length));
+  line('tabs', prep.tabs.length ? `${prep.tabs.length} (live URLs open in the browser on Start)` : '(none)');
+  prep.tabs.forEach((t, i) => {
+    const what = [t.url ? 'live' : '', t.path ? `snapshot ${t.path}` : ''].filter(Boolean).join(' + ');
+    console.log(`             ${i + 1}. ${t.title} — ${what}`);
+  });
   line('offered', `until ${when(new Date(stagedPrepExpiry(prep)).toISOString())}`);
 }
 

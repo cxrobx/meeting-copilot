@@ -43,6 +43,22 @@ struct DashboardNavigationPolicy {
         }
     }
 
+    /// The one kind of URL the page may ask the app to fetch and copy as an
+    /// image: an evidence snapshot on this same server (present/evidence.ts).
+    /// Anything else, including another host or path, is refused.
+    func evidenceImageURL(_ raw: String) -> URL? {
+        guard let url = URL(string: raw, relativeTo: dashboardURL)?.absoluteURL,
+              url.scheme == dashboardURL.scheme,
+              url.host == dashboardURL.host,
+              url.port == dashboardURL.port,
+              url.user == nil, url.password == nil else { return nil }
+        let parts = url.path.split(separator: "/", omittingEmptySubsequences: false)
+        // "", "present", "evidence", "<index>", "file"
+        guard parts.count == 5, parts[1] == "present", parts[2] == "evidence",
+              Int(parts[3]) != nil, parts[4] == "file" else { return nil }
+        return url
+    }
+
     static func isCancelledNavigation(_ error: Error) -> Bool {
         let error = error as NSError
         // WebKit can report an intentional policy cancellation through either domain.

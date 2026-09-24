@@ -20,7 +20,7 @@
 | `feature.toggle` | Toggle an opt-in monitor | `feature: 'factcheck'\|'coach', enabled` |
 | `meeting.goals` | Private coach-only goals for this meeting | `goals` |
 | `meeting.schedule` | Calendar end of a meeting started from an invite; the pulse runs its close-out 5 min before | `endsAt` (ISO or ms) |
-| `meeting.prep` | The start form's prep brief, sent once live. A staged prep's file moves into the session as `prep.json`; the brief (the one shown, else the file's) becomes a pinned context doc | `prepId?` (staged), `brief?`, `sources?` |
+| `meeting.prep` | The start form's prep brief, sent once live. A staged prep's file moves into the session as `prep.json`; the brief (the one shown, else the file's) becomes a pinned context doc. Its evidence tabs are broadcast as `evidence.tabs` and every live URL opens in the default browser (`COPILOT_OPEN_EVIDENCE=0` stops that) | `prepId?` (staged), `brief?`, `sources?` |
 | `pulse.request` | A pulse read now: `checkin` is "How am I doing?", `missed` is "Missed anything?", `closeout` (or no kind) is the Wrap-up check. Sent by the coach head and by the app's ⌃⌥1/⌃⌥2 hotkeys | `kind?` |
 | `coach.ask` | "Suggest": one coach card now, with the live coach on or off. Sent by the coach head and by ⌃⌥3 | `focus?` (the Quick Actions box) |
 
@@ -47,6 +47,7 @@
 | `pulse.failed` | A pulse could not be read | `reason`, `mode`, `trigger` |
 | `pulse.closeout` | A timer's close-out (calendar or wrap-up language) found things to settle; the app raises a notification | `body` |
 | `ask.state` | One of the coach's questions was taken (`started`), answered (`done`) or `failed`. The dashboard's buttons show progress from it; the app turns `title`/`body` into a notification when the dashboard is not in front | `kind` (checkin/missed/suggest/wrapup), `phase`, `title?`, `body?`, `empty?` |
+| `evidence.tabs` | A staged prep's evidence tabs, once its `meeting.prep` attaches. The dashboard's Evidence panel renders them; a reload fetches `GET /present/evidence` instead | `tabs [{ index, title, url, note, snapshot: {kind: image\|pdf\|html, name} \| null }]` |
 | `publish.state` | A card's publish-as-link job moved on: `polishing` → `uploading` → `done` (with `url`) or `failed` (with `error`); `revoked` after Unpublish. Replay pages, which have no WebSocket, poll `GET /present/published` instead | `actionId, phase, url?, error?` |
 | `metrics` | Debug metrics snapshot | `data` |
 
@@ -74,6 +75,9 @@
 | GET | `/present/actions` / `/present/transcript` / `/present/sessions` | Dashboard data (live or `?session=<id>` replay) |
 | GET | `/present/coach?session=<uuid>` | Coach cards a stored session showed (from `coach_suggestion`; older sessions fall back to the event log's headlines) |
 | GET | `/present/pulse?session=<uuid>` | Meeting pulses a stored session produced, oldest first (`[]` before 2026-09-22) |
+| GET | `/present/evidence[?session=<uuid>]` | The session's evidence tabs, from its `prep.json` (no file paths). `{ tabs: [...] }`, same shape as `evidence.tabs` |
+| GET | `/present/evidence/:i/file[?session=<uuid>]` | Tab `i`'s snapshot file, served by index only (never by a path from the request); 404 when it has none or the file is gone. `html` goes out under `CSP: sandbox allow-scripts` |
+| GET | `/present/evidence/:i/view[?session=<uuid>]` | Tab `i` as its own page, the ↗ Snapshot button: the Artifact Kit page with the note, the image (a PDF embedded) and the live link. An `html` snapshot redirects to `/file` |
 | GET | `/present/action/:id/view[?session=<uuid>]` | One card as its own page (the ↗ button). A mockup/`html` artifact is sent as-is under `CSP: sandbox allow-scripts`; anything else becomes a reader page in the HTML Artifact Kit look, server-rendered, reloading every 5 s while a deep follow-up is pending |
 | GET | `/present/published[?session=<uuid>]` | The session's live links `{ records: {actionId: {url, key, via, at}}, busy, jobs }`; `jobs` = each card's latest `publish.state` since the server started |
 | POST | `/present/action/:id/publish[?session=<uuid>]` | Publish a card at `https://share.cxventures.io/<key>`: 202 and progress over `publish.state`, 200 `{record}` if already live, 409 while another job runs or deep research is pending. The dashboard's second click is the approval |

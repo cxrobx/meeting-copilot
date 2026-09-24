@@ -23,7 +23,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { basename, isAbsolute, join } from 'node:path';
 import { normalizeExtractedItems } from '../intelligence/agenda.js';
 import { isSupportedContextFile, type ContextDoc } from '../context/index.js';
 
@@ -39,7 +39,18 @@ export const LIMITS = {
   briefChars: 3_000,
   sources: 10,
   attendees: 30,
+  /** Evidence tabs: the right rail shows each one, so a handful, not a folder. */
+  tabs: 8,
+  tabTitleChars: 80,
+  tabNoteChars: 200,
 } as const;
+
+/** Snapshot files a tab may point at, by how the dashboard shows them. */
+const SNAPSHOT_KINDS: Record<string, StagedTabSnapshotKind> = {
+  png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', webp: 'image',
+  pdf: 'pdf',
+  html: 'html', htm: 'html',
+};
 
 /** A prep with no end time lives this long past its start. */
 const NO_END_GRACE_MS = 2 * 60 * 60 * 1000;
@@ -50,8 +61,10 @@ const PRUNE_AFTER_MS = 24 * 60 * 60 * 1000;
 
 const KNOWN_FIELDS = new Set([
   'title', 'eventUid', 'startsAt', 'endsAt', 'attendees', 'agenda', 'goals',
-  'projects', 'contextPaths', 'brief', 'sources', 'createdBy',
+  'projects', 'contextPaths', 'brief', 'sources', 'tabs', 'createdBy',
 ]);
+
+const KNOWN_TAB_FIELDS = new Set(['title', 'url', 'path', 'note']);
 
 export interface StagedAttendee {
   name: string;
@@ -61,6 +74,23 @@ export interface StagedAttendee {
 export interface StagedSource {
   title: string;
   url: string;
+}
+
+export type StagedTabSnapshotKind = 'image' | 'pdf' | 'html';
+
+/**
+ * Evidence to switch to mid-meeting: a live page, a local snapshot of it, or
+ * both. Live pages open in the default browser, where the user's logins are
+ * (Looker, Search Console and HubSpot never load inside the app); a snapshot
+ * is served by the copilot and can be copied as an image into the call chat.
+ */
+export interface StagedTab {
+  title: string;
+  /** http(s). Null for a snapshot with nothing live behind it. */
+  url: string | null;
+  /** Absolute path to a png/jpg/gif/webp/pdf/html file. Null for a live-only tab. */
+  path: string | null;
+  note: string;
 }
 
 export interface StagedPrep {
@@ -81,6 +111,8 @@ export interface StagedPrep {
   /** Markdown. */
   brief: string;
   sources: StagedSource[];
+  /** Absent in files staged before 2026-09-24; read as []. */
+  tabs: StagedTab[];
 }
 
 export interface NormalizeOptions {
@@ -213,7 +245,7 @@ export function normalizeStagedInput(input: unknown, opts: NormalizeOptions = {}
 
   const contextPaths: string[] = [];
   for (const raw of stringList(b.contextPaths)) {
-    const path = raw === '~' ? home : raw.startsWith('~/') ? join(home, raw.slice(2)) : raw;
+    const path = expandHome(raw, home);
     if (!isAbsolute(path)) {
       warnings.push(`Dropped context path "${raw}": it must be absolute`);
     } else if (!pathExists(path)) {
@@ -239,6 +271,8 @@ export function normalizeStagedInput(input: unknown, opts: NormalizeOptions = {}
     sources.length = LIMITS.sources;
   }
 
+  const tabs = parseTabs(b.tabs, home, pathExists, warnings);
+
   if (errors.length > 0) return { prep: null, errors, warnings };
 
   const prep: StagedPrep = {
@@ -257,8 +291,78 @@ export function normalizeStagedInput(input: unknown, opts: NormalizeOptions = {}
     contextPaths,
     brief,
     sources,
+    tabs,
   };
   return { prep, errors, warnings };
+}
+
+export function snapshotKind(path: string): StagedTabSnapshotKind | null {
+  const ext = /\.([a-z0-9]+)$/i.exec(path)?.[1]?.toLowerCase();
+  return (ext && SNAPSHOT_KINDS[ext]) || null;
+}
+
+function expandHome(raw: string, home: string): string {
+  return raw === '~' ? home : raw.startsWith('~/') ? join(home, raw.slice(2)) : raw;
+}
+
+/**
+ * Tabs keep what is usable and warn about the rest: a bad path on a tab that
+ * also has a URL costs the snapshot, not the tab.
+ */
+function parseTabs(value: unknown, home: string, pathExists: (p: string) => boolean, warnings: string[]): StagedTab[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    warnings.push('Ignored tabs: expected a list of {title, url, path, note}');
+    return [];
+  }
+  const tabs: StagedTab[] = [];
+  value.forEach((item, i) => {
+    const label = `Tab ${i + 1}`;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      warnings.push(`Dropped ${label}: expected {title, url, path, note}`);
+      return;
+    }
+    const t = item as Record<string, unknown>;
+    for (const key of Object.keys(t)) {
+      if (!KNOWN_TAB_FIELDS.has(key)) warnings.push(`${label}: ignored unknown field "${key}"`);
+    }
+    let url: string | null = null;
+    if (typeof t.url === 'string' && t.url.trim()) {
+      if (/^https?:\/\//i.test(t.url.trim())) url = t.url.trim();
+      else warnings.push(`${label}: dropped url "${t.url}": it must start with http:// or https://`);
+    }
+    let path: string | null = null;
+    if (typeof t.path === 'string' && t.path.trim()) {
+      const raw = t.path.trim();
+      const full = expandHome(raw, home);
+      if (!isAbsolute(full)) warnings.push(`${label}: dropped path "${raw}": it must be absolute`);
+      else if (!pathExists(full)) warnings.push(`${label}: dropped path "${raw}": it does not exist`);
+      else if (isDirectory(full)) warnings.push(`${label}: dropped path "${raw}": it is a folder, not a file`);
+      else if (!snapshotKind(full)) warnings.push(`${label}: dropped path "${raw}": a snapshot must be png, jpg, gif, webp, pdf or html`);
+      else path = full;
+    }
+    if (!url && !path) {
+      warnings.push(`Dropped ${label}: it needs a url or a snapshot path`);
+      return;
+    }
+    let title = typeof t.title === 'string' ? t.title.replace(/\s+/g, ' ').trim() : '';
+    if (!title) title = path ? basename(path) : new URL(url!).hostname;
+    if (title.length > LIMITS.tabTitleChars) {
+      warnings.push(`${label}: title cut to ${LIMITS.tabTitleChars} characters`);
+      title = title.slice(0, LIMITS.tabTitleChars - 1) + '\u2026';
+    }
+    let note = typeof t.note === 'string' ? t.note.replace(/\s+/g, ' ').trim() : '';
+    if (note.length > LIMITS.tabNoteChars) {
+      warnings.push(`${label}: note cut to ${LIMITS.tabNoteChars} characters`);
+      note = note.slice(0, LIMITS.tabNoteChars - 1) + '\u2026';
+    }
+    tabs.push({ title, url, path, note });
+  });
+  if (tabs.length > LIMITS.tabs) {
+    warnings.push(`Kept the first ${LIMITS.tabs} of ${tabs.length} tabs`);
+    tabs.length = LIMITS.tabs;
+  }
+  return tabs;
 }
 
 function isDirectory(path: string): boolean {
@@ -304,7 +408,37 @@ function parseStoredPrep(raw: unknown): { prep: StagedPrep | null; reason?: stri
     && typeof p.goals === 'string'
     && typeof p.brief === 'string';
   if (!ok) return { prep: null, reason: 'missing fields' };
-  return { prep: raw as StagedPrep };
+  return { prep: { ...(raw as StagedPrep), tabs: storedTabs(p.tabs) } };
+}
+
+/** Tabs as stored, re-checked for shape (never for existence: that is at serve time). */
+function storedTabs(value: unknown): StagedTab[] {
+  if (!Array.isArray(value)) return [];
+  const out: StagedTab[] = [];
+  for (const item of value.slice(0, LIMITS.tabs)) {
+    if (!item || typeof item !== 'object') continue;
+    const t = item as Record<string, unknown>;
+    const url = typeof t.url === 'string' && /^https?:\/\//i.test(t.url) ? t.url : null;
+    const path = typeof t.path === 'string' && isAbsolute(t.path) && snapshotKind(t.path) ? t.path : null;
+    if (!url && !path) continue;
+    out.push({
+      title: typeof t.title === 'string' && t.title ? t.title : (url ?? path!),
+      url,
+      path,
+      note: typeof t.note === 'string' ? t.note : '',
+    });
+  }
+  return out;
+}
+
+/** The evidence tabs of a session's prep.json; [] when it has none (or no prep). */
+export function readSessionTabs(sessionDir: string): StagedTab[] {
+  try {
+    const raw = JSON.parse(readFileSync(join(sessionDir, 'prep.json'), 'utf8')) as Record<string, unknown>;
+    return storedTabs(raw?.tabs);
+  } catch {
+    return [];
+  }
 }
 
 export interface ListResult {
@@ -377,7 +511,10 @@ export function removeStagedPrep(id: string, dir: string = stagedDir()): boolean
 }
 
 export interface AttachedPrep {
+  /** '' when the prep brought tabs but no brief. */
   brief: string;
+  /** The staged prep's evidence tabs; [] for the Prep button's brief. */
+  tabs: StagedTab[];
   /** 'staged' = prepared ahead; 'form' = the start form's Prep button. */
   origin: 'staged' | 'form';
   prepId: string | null;
@@ -389,7 +526,8 @@ export interface AttachedPrep {
  * the meeting), or record the Prep button's brief there. The brief handed to
  * the copilot is the one the form showed — `brief` when sent (a re-prep on a
  * prepped form replaces the staged one), else the staged file's. A staged id
- * that is gone (removed, expired) falls back to `brief`. Null = nothing to attach.
+ * that is gone (removed, expired) falls back to `brief`. A staged prep's tabs
+ * come from its file, never the message. Null = nothing to attach.
  */
 export function attachPrepToSession(
   message: { prepId?: unknown; brief?: unknown; sources?: unknown },
@@ -410,13 +548,13 @@ export function attachPrepToSession(
         rmSync(source, { force: true });
       }
       const brief = shown || prep.brief;
-      return brief ? { brief, origin: 'staged', prepId: prep.id } : null;
+      return brief || prep.tabs.length ? { brief, tabs: prep.tabs, origin: 'staged', prepId: prep.id } : null;
     }
   }
   if (!shown) return null;
   const sources = Array.isArray(message.sources) ? message.sources.slice(0, LIMITS.sources) : [];
   writeFileSync(target, JSON.stringify({ origin: 'form', brief: shown, sources }, null, 2) + '\n', { mode: 0o600 });
-  return { brief: shown, origin: 'form', prepId: null };
+  return { brief: shown, tabs: [], origin: 'form', prepId: null };
 }
 
 /** The brief as a context doc, pinned so relevance ranking never drops it. */

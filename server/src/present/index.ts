@@ -18,6 +18,8 @@ import { isSessionId } from '../session/ids.js';
 import { applyVaultLook, getVaultLook } from './vault-look.js';
 import { buildReaderPage, viewContent, type ViewableAction } from './view-page.js';
 import { readPublished, type PublishJobs } from '../publish/index.js';
+import { readSessionTabs } from '../prep/staged.js';
+import { buildEvidencePage, evidenceView, sessionDirFor, snapshotFile } from './evidence.js';
 
 // ─── Highlight-to-ask prompts ───────────────────────────────────────────────
 const ASK_SYSTEM: Record<string, string> = {
@@ -285,11 +287,55 @@ export function createPresentRouter(registry: WorkerRegistry, options: PresentRo
     }));
   });
 
+  const badSession = (req: { query: Record<string, unknown> }) =>
+    req.query.session !== undefined && !isSessionId(req.query.session);
+
+  // ─── Evidence tabs: a staged prep's live pages + snapshots ───────────
+  // Read from the session's own prep.json (prep/staged.ts), so a tab is only
+  // ever served by its index, never by a path the request names. The ↗ on a
+  // snapshot opens /view, the same way a card's ↗ opens its reader page.
+  const sessionTab = (req: { query: Record<string, unknown>; params: Record<string, string> }) => {
+    const sessionId = sessionFor(req);
+    if (!isSessionId(sessionId)) return null;
+    const index = Number(req.params.i);
+    const tabs = readSessionTabs(sessionDirFor(sessionId));
+    return Number.isInteger(index) && index >= 0 && index < tabs.length ? { tab: tabs[index], index, sessionId } : null;
+  };
+
+  router.get('/present/evidence', (req, res) => {
+    if (badSession(req)) { res.status(400).json({ error: 'session must be a session id' }); return; }
+    const sessionId = sessionFor(req);
+    res.set('Cache-Control', 'no-store');
+    res.json({ tabs: isSessionId(sessionId) ? evidenceView(readSessionTabs(sessionDirFor(sessionId))) : [] });
+  });
+
+  router.get('/present/evidence/:i/file', (req, res) => {
+    if (badSession(req)) { res.status(400).type('text').send('session must be a session id'); return; }
+    const found = sessionTab(req);
+    const file = found && snapshotFile(found.tab);
+    if (!file) { res.status(404).type('text').send('That snapshot is not here any more.'); return; }
+    res.set('Cache-Control', 'no-store');
+    // An html snapshot is someone's page: an opaque origin, like a mockup.
+    if (file.kind === 'html') res.set('Content-Security-Policy', 'sandbox allow-scripts');
+    res.sendFile(file.path, (err) => {
+      if (err && !res.headersSent) res.status(404).type('text').send('That snapshot could not be read.');
+    });
+  });
+
+  router.get('/present/evidence/:i/view', (req, res) => {
+    if (badSession(req)) { res.status(400).type('text').send('session must be a session id'); return; }
+    const found = sessionTab(req);
+    if (!found) { res.status(404).type('text').send('That evidence tab is not here any more.'); return; }
+    const file = snapshotFile(found.tab);
+    const query = typeof req.query.session === 'string' ? `?session=${encodeURIComponent(found.sessionId)}` : '';
+    if (file?.kind === 'html') { res.redirect(302, `/present/evidence/${found.index}/file${query}`); return; }
+    res.set('Cache-Control', 'no-store');
+    res.type('html').send(buildEvidencePage(found.tab, file ? `/present/evidence/${found.index}/file${query}` : null, file?.kind ?? null));
+  });
+
   // ─── Publish a card as a public link (publish/index.ts) ──────────────
   // POST starts a job and answers 202; progress arrives as WS publish.state.
   // The dashboard's second click on "Publish link" is the approval.
-  const badSession = (req: { query: Record<string, unknown> }) =>
-    req.query.session !== undefined && !isSessionId(req.query.session);
 
   router.get('/present/published', (req, res) => {
     if (badSession(req)) { res.status(400).json({ error: 'session must be a session id' }); return; }
@@ -2868,6 +2914,74 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   .toc-heading.active { color: var(--gb-text); background: rgb(var(--accent) / 0.1); border-left: 2px solid var(--gb-blue); padding-left: 16px; }
   .toc-heading.active.depth-3 { padding-left: 26px; }
 
+  /* ─── Evidence tabs (a staged prep's live pages + snapshots) ── */
+  .evidence-panel {
+    padding: 8px 4px 12px;
+    border-bottom: 1px solid var(--gb-surface2);
+    margin-bottom: 12px;
+  }
+  .evidence-panel.hidden { display: none; }
+  .evidence-inline { display: none; }
+  /* The right rail hides below 1400px; the same panel then sits atop the
+     main column, so the evidence never disappears with it. */
+  @media (max-width: 1400px) {
+    .layout.three-col .evidence-inline:not(.hidden) { display: block; border: 1px solid var(--gb-surface2); border-radius: 10px; margin: 0 0 12px; padding: 8px 8px 10px; }
+    .layout.three-col .evidence-inline .ev-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+    .layout.three-col .evidence-inline .ev-item + .ev-item { margin-top: 0; }
+  }
+  .ev-item {
+    padding: 6px 4px;
+    border-radius: 6px;
+  }
+  .ev-item + .ev-item { margin-top: 6px; }
+  .ev-thumb {
+    display: block;
+    width: 100%;
+    max-height: 96px;
+    object-fit: cover;
+    object-position: top left;
+    border-radius: 6px;
+    border: 1px solid var(--gb-surface2);
+    cursor: zoom-in;
+    background: var(--gb-surface0);
+    margin-bottom: 6px;
+  }
+  .ev-file {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--gb-subtext0);
+    border: 1px solid var(--gb-surface2);
+    border-radius: 4px;
+    padding: 1px 5px;
+    margin-bottom: 4px;
+  }
+  .ev-title { font-size: 11px; font-weight: 600; color: var(--gb-text); line-height: 1.4; }
+  .ev-note { font-size: 10.5px; color: var(--gb-subtext0); line-height: 1.4; margin-top: 2px; }
+  .ev-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+  .ev-btn {
+    font-family: var(--font-sans);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 5px;
+    border: 1px solid var(--gb-surface2);
+    background: transparent;
+    color: var(--gb-subtext1);
+    cursor: pointer;
+  }
+  .ev-btn:hover { background: var(--gb-surface1); color: var(--gb-text); }
+  .ev-lightbox {
+    position: fixed; inset: 0; z-index: 400;
+    background: rgb(0 0 0 / 0.72);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; padding: 32px;
+  }
+  .ev-lightbox img { max-width: 100%; max-height: calc(100vh - 120px); border-radius: 8px; box-shadow: 0 10px 40px rgb(0 0 0 / 0.5); background: #fff; }
+  .ev-lightbox .ev-lb-bar { display: flex; gap: 8px; align-items: center; color: #eee; font-size: 12px; }
+  .ev-lightbox .ev-btn { color: #eee; border-color: rgb(255 255 255 / 0.3); }
+  .ev-lightbox .ev-btn:hover { background: rgb(255 255 255 / 0.12); color: #fff; }
+
   /* ─── Agenda Tracker Panel ─────────────────────────────────── */
   .agenda-panel {
     padding: 8px 4px 12px;
@@ -3336,6 +3450,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   <!-- Main Column -->
   <div class="main" id="mainCol">
     <div id="idleOverlay"></div>
+    <div class="evidence-panel evidence-inline hidden" id="evidenceInline" aria-label="Evidence"></div>
     <div id="quickActionsSlot"></div>
     <div class="intel-status" id="intelStatus" style="display:none">
       <span class="intel-dot"></span>
@@ -3350,6 +3465,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
 
   <!-- TOC Sidebar -->
   <nav class="toc" id="toc">
+    <div class="evidence-panel hidden" id="evidencePanel" aria-label="Evidence"></div>
     <div class="agenda-panel hidden" id="agendaPanel">
       <div class="agenda-header">
         <span class="agenda-title">Agenda</span>
@@ -5295,6 +5411,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     segCountEl.textContent = '0';
     sessionTimerEl.textContent = '';
     clearAgenda();
+    clearEvidence();
     // A new meeting gets a blank form: drop the old one before updateUI, so
     // showIdleState has nothing to carry over (consent is per session). The
     // agenda draft is JS state that outlived every form until now, so the last
@@ -5825,6 +5942,141 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     e.preventDefault();
     e.stopPropagation();
     mcExpandOpen(btn.getAttribute('data-mc-expand'));
+  });
+
+  // ─── Evidence tabs (a staged prep's live pages + snapshots) ──
+  // present/evidence.ts. A staged prep can carry tabs; when its session starts
+  // the server sends evidence.tabs, opens the live ones in the default
+  // browser, and serves each snapshot by index. They ride the card ↗ path:
+  // a snapshot's "Open" is /present/evidence/:i/view, a same-server page the
+  // app hands to the browser, and a live tab opens its URL, where the logins
+  // are. Copy link / Copy image are for pasting into the call chat.
+  var evTabs = [];
+  var evSessionId = null;
+
+  // The page's escapeHtml leaves quotes alone; attributes need them escaped.
+  function evAttr(v) { return escapeHtml(String(v)).replace(/"/g, '&quot;'); }
+
+  function evUrl(i, what) {
+    return '/present/evidence/' + i + '/' + what + (evSessionId ? '?session=' + encodeURIComponent(evSessionId) : '');
+  }
+
+  function evItemHtml(t) {
+    var h = '<div class="ev-item" data-ev-i="' + t.index + '">';
+    if (t.snapshot && t.snapshot.kind === 'image') {
+      h += '<img class="ev-thumb" data-ev-act="zoom" data-ev-i="' + t.index + '" src="' + evAttr(evUrl(t.index, 'file')) +
+        '" alt="' + evAttr(t.title) + '" loading="lazy">';
+    } else if (t.snapshot) {
+      h += '<span class="ev-file">' + escapeHtml(t.snapshot.kind.toUpperCase() + ' \\u00b7 ' + t.snapshot.name) + '</span>';
+    }
+    h += '<div class="ev-title">' + escapeHtml(t.title) + '</div>';
+    if (t.note) h += '<div class="ev-note">' + escapeHtml(t.note) + '</div>';
+    h += '<div class="ev-actions">';
+    if (t.url) h += '<button class="ev-btn" data-ev-act="live" data-ev-i="' + t.index + '" title="Open the live page in your browser">\\u2197 Live</button>';
+    if (t.snapshot) h += '<button class="ev-btn" data-ev-act="view" data-ev-i="' + t.index + '" title="Open the snapshot in a browser tab">\\u2197 Snapshot</button>';
+    if (t.url) h += '<button class="ev-btn" data-ev-act="link" data-ev-i="' + t.index + '" title="Copy the link for the call chat">Copy link</button>';
+    if (t.snapshot && t.snapshot.kind === 'image') h += '<button class="ev-btn" data-ev-act="image" data-ev-i="' + t.index + '" title="Copy the picture for the call chat">Copy image</button>';
+    h += '</div></div>';
+    return h;
+  }
+
+  function renderEvidence() {
+    var html = evTabs.length
+      ? '<div class="agenda-header"><span class="agenda-title">Evidence</span><span class="agenda-progress">' + evTabs.length + ' tab' + (evTabs.length === 1 ? '' : 's') + '</span></div>' +
+        '<div class="ev-list">' + evTabs.map(evItemHtml).join('') + '</div>'
+      : '';
+    ['evidencePanel', 'evidenceInline'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.innerHTML = html;
+      el.classList.toggle('hidden', !evTabs.length);
+    });
+  }
+
+  function setEvidence(tabs, forSession) {
+    evTabs = Array.isArray(tabs) ? tabs : [];
+    if (forSession) evSessionId = forSession;
+    renderEvidence();
+  }
+
+  function clearEvidence() {
+    evTabs = [];
+    evSessionId = null;
+    evCloseLightbox();
+    renderEvidence();
+  }
+
+  function loadEvidence(forSession) {
+    if (!forSession) return;
+    fetch('/present/evidence?session=' + encodeURIComponent(forSession))
+      .then(function(r) { return r.json(); })
+      // Never let a late, empty answer blank tabs the broadcast already brought.
+      .then(function(data) { if (data && data.tabs && (data.tabs.length || !evTabs.length)) setEvidence(data.tabs, forSession); })
+      .catch(function() { /* the meeting works without it */ });
+  }
+
+  function evCopyImage(i) {
+    var url = evUrl(i, 'file');
+    function ok() { showToast('Image copied \\u2014 paste it into the call chat'); }
+    function fail() { showToast('Could not copy the image \\u2014 open the snapshot and copy it there', { error: true }); }
+    var nb = window.__copilotNativeBridge;
+    // In the app: AppKit puts it on the pasteboard (WKWebView's own clipboard
+    // API needs a gesture it doesn't reliably keep across a fetch).
+    if (nb && nb.copyImage) { nb.copyImage(url).then(function(done) { done ? ok() : fail(); }); return; }
+    if (!navigator.clipboard || !navigator.clipboard.write || typeof ClipboardItem === 'undefined') { fail(); return; }
+    // Clipboards take PNG: anything else is redrawn on a canvas first.
+    var png = fetch(url).then(function(r) { return r.blob(); }).then(function(blob) {
+      if (blob.type === 'image/png') return blob;
+      return createImageBitmap(blob).then(function(bmp) {
+        var c = document.createElement('canvas');
+        c.width = bmp.width; c.height = bmp.height;
+        c.getContext('2d').drawImage(bmp, 0, 0);
+        return new Promise(function(resolve) { c.toBlob(resolve, 'image/png'); });
+      });
+    });
+    navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]).then(ok, fail);
+  }
+
+  var evLightboxEl = null;
+  function evCloseLightbox() {
+    if (evLightboxEl) { evLightboxEl.remove(); evLightboxEl = null; }
+  }
+  function evOpenLightbox(i) {
+    var t = evTabs[i];
+    if (!t || !t.snapshot) return;
+    evCloseLightbox();
+    evLightboxEl = document.createElement('div');
+    evLightboxEl.className = 'ev-lightbox';
+    evLightboxEl.setAttribute('role', 'dialog');
+    evLightboxEl.setAttribute('aria-label', t.title);
+    evLightboxEl.innerHTML = '<img src="' + evAttr(evUrl(i, 'file')) + '" alt="' + evAttr(t.title) + '">' +
+      '<div class="ev-lb-bar"><span>' + escapeHtml(t.title) + '</span>' +
+      '<button class="ev-btn" data-ev-act="image" data-ev-i="' + i + '">Copy image</button>' +
+      (t.url ? '<button class="ev-btn" data-ev-act="link" data-ev-i="' + i + '">Copy link</button>' : '') +
+      '<button class="ev-btn" data-ev-act="view" data-ev-i="' + i + '">\\u2197 Browser tab</button>' +
+      '<button class="ev-btn" data-ev-act="close">Close</button></div>';
+    evLightboxEl.addEventListener('click', function(e) { if (e.target === evLightboxEl) evCloseLightbox(); });
+    document.body.appendChild(evLightboxEl);
+  }
+  document.addEventListener('keydown', function(e) {
+    if (evLightboxEl && e.key === 'Escape') { e.stopPropagation(); evCloseLightbox(); }
+  }, true);
+
+  document.addEventListener('click', function(e) {
+    var btn = e.target && e.target.closest ? e.target.closest('[data-ev-act]') : null;
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var act = btn.getAttribute('data-ev-act');
+    if (act === 'close') { evCloseLightbox(); return; }
+    var i = Number(btn.getAttribute('data-ev-i'));
+    var t = evTabs[i];
+    if (!t) return;
+    if (act === 'live' && t.url) window.open(t.url, '_blank');
+    else if (act === 'view') window.open(evUrl(i, 'view'), '_blank');
+    else if (act === 'link' && t.url) mcPubCopy(t.url);
+    else if (act === 'image') evCopyImage(i);
+    else if (act === 'zoom') evOpenLightbox(i);
   });
 
   window.downloadMockupHtml = function(id) {
@@ -8286,6 +8538,9 @@ export const PRESENT_HTML = `<!DOCTYPE html>
           }
           if (msg.state === 'live') {
             startTimer();
+            // A reload mid-meeting. On Start the prep is still to be sent, and
+            // its evidence.tabs broadcast brings the tabs instead.
+            if (msg.sessionId && msg.sessionId !== evSessionId && !pendingPrep) loadEvidence(msg.sessionId);
             if (pendingGoals) {
               wsSend({ type: 'meeting.goals', goals: pendingGoals });
               pendingGoals = '';
@@ -8309,6 +8564,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
           } else if (msg.state === 'idle') {
             // Hard reset for a new meeting (user clicked "New Meeting").
             stopTimer();
+            clearEvidence();
             sessionStartTime = null;
             totalWords = 0; micWords = 0; meetingWords = 0;
             segments = [];
@@ -8477,6 +8733,10 @@ export const PRESENT_HTML = `<!DOCTYPE html>
           }
           break;
 
+        case 'evidence.tabs':
+          setEvidence(msg.tabs, sessionId);
+          break;
+
         case 'publish.state':
           mcPubOnState(msg);
           break;
@@ -8539,6 +8799,8 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     statePill.className = 'state-pill archived';
     statePill.textContent = 'Replay';
     startStopBtn.style.display = 'none';
+
+    loadEvidence(replaySessionId);
 
     // Load actions
     fetch('/present/actions?session=' + encodeURIComponent(replaySessionId))
