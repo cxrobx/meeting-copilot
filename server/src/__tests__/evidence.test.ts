@@ -31,6 +31,17 @@ describe('openLiveTabs', () => {
     expect(opened).toEqual(['https://b.example']);
   });
 
+  it('opens a URL two snapshots share once', async () => {
+    const opened: string[] = [];
+    const shared: StagedTab[] = [
+      { title: 'Crop', url: 'https://looker.example/p1', path: '/a.png', note: '' },
+      { title: 'Other page', url: 'https://looker.example/p2', path: null, note: '' },
+      { title: 'Full page', url: 'https://looker.example/p1', path: '/b.png', note: '' },
+    ];
+    expect(await openLiveTabs(shared, async (url) => { opened.push(url); })).toBe(2);
+    expect(opened).toEqual(['https://looker.example/p1', 'https://looker.example/p2']);
+  });
+
   it('opens nothing with COPILOT_OPEN_EVIDENCE=0', async () => {
     process.env.COPILOT_OPEN_EVIDENCE = '0';
     try {

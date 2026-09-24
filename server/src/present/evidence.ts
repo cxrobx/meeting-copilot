@@ -66,13 +66,17 @@ export const openInDefaultBrowser: UrlOpener = (url) => new Promise((resolve, re
 
 /**
  * Open every live tab on Start, one after another so the browser keeps their
- * order. COPILOT_OPEN_EVIDENCE=0 turns it off. Returns how many opened.
+ * order, each URL once. COPILOT_OPEN_EVIDENCE=0 turns it off. Returns how
+ * many opened.
  */
 export async function openLiveTabs(tabs: StagedTab[], open: UrlOpener = openInDefaultBrowser): Promise<number> {
   if (process.env.COPILOT_OPEN_EVIDENCE === '0') return 0;
   let opened = 0;
+  const seen = new Set<string>();
   for (const tab of tabs) {
-    if (!tab.url) continue;
+    // Two snapshots of one page share its URL: one browser tab is enough.
+    if (!tab.url || seen.has(tab.url)) continue;
+    seen.add(tab.url);
     try {
       await open(tab.url);
       opened++;
