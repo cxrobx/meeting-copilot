@@ -29,7 +29,7 @@ server/src/
 ├── transcription/     # Transcription providers (whisper/parakeet, deepgram, dedup, stitcher)
 ├── intelligence/      # Eval loop (triage→suggest), agenda, coach, factcheck, prompts
 ├── workers/           # Research, FastResearch, Summary, Analysis, Mockup, CodeGen, Review
-├── present/           # /present dashboard (index.ts template + signals.ts + vault-look.ts + view-page.ts: a card as its own page)
+├── present/           # /present dashboard (index.ts template + signals.ts + vault-look.ts + view-page.ts: a card as its own page + evidence.ts: a staged prep's evidence tabs)
 ├── publish/           # Publish a card as a public link: polish agent → R2 upload (uploader.ts), jobs + ledger (index.ts)
 ├── session/           # SQLite store, JSONL events, shared transcript, cleanup, reviews
 ├── api/               # Direct-API paths (anthropic, openai) + paid-API killswitch
@@ -87,6 +87,7 @@ cd server && npm start        # Run compiled dist/index.js
 | `COPILOT_MAX_LLM_DOLLARS_PER_SESSION` | No | 10 | The only lifetime stop for a session's metered AI |
 | `COPILOT_MAX_LLM_REQUESTS_PER_MINUTE` | No | 240 | Runaway-loop pause (one-minute window), never a lockout |
 | `COPILOT_MAX_LLM_TOKENS_PER_MINUTE` | No | 2000000 | Runaway-loop pause (one-minute window), never a lockout |
+| `COPILOT_OPEN_EVIDENCE` | No | on | `0` = don't open a staged prep's live evidence tabs in the default browser on Start |
 | `COPILOT_ENABLE_HTTP_TRANSCRIBE` | No | - | `1` re-enables the legacy POST /transcribe path |
 | `CXMAIL_DB_PATH` | No | `~/Library/Application Support/com.cxmail.app/cxmail.db` | cxmail DB for start-form meeting auto-fill (read-only) |
 | `COPILOT_SHARE_BUCKET` | No | `mc-share` | R2 bucket published cards go to (`publish/uploader.ts`) |
