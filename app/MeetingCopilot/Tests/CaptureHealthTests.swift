@@ -61,6 +61,35 @@ final class CaptureHealthTests: XCTestCase {
         )
     }
 
+    func testMicThatStopsMidSessionIsCaught() {
+        // 2026-09-25: ~28 s of buffers, then none for the rest of the meeting.
+        // One early buffer used to make the mic healthy for good.
+        XCTAssertEqual(
+            AudioCaptureManager.micVerdict(
+                buffers: 160, elapsed: 400, restartsUsed: 0, sinceLastBuffer: 5.0, stallGrace: 5.0
+            ),
+            .restart
+        )
+    }
+
+    func testMicStillDeliveringIsNotAStall() {
+        XCTAssertEqual(
+            AudioCaptureManager.micVerdict(
+                buffers: 160, elapsed: 400, restartsUsed: 0, sinceLastBuffer: 4.9, stallGrace: 5.0
+            ),
+            .healthy
+        )
+    }
+
+    func testMicStallGivesUpAfterRestartLadderExhausted() {
+        XCTAssertEqual(
+            AudioCaptureManager.micVerdict(
+                buffers: 160, elapsed: 400, restartsUsed: 2, sinceLastBuffer: 30, maxRestarts: 2
+            ),
+            .giveUp
+        )
+    }
+
     // MARK: - Meeting verdict
 
     func testMeetingHealthyWhenAnyRealSignalSeen() {

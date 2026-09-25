@@ -123,6 +123,13 @@ final class AudioCaptureManager: NSObject {
     private static let micRestartMaxRetries: Int = 3
     private static let micRestartInitialBackoffMs: Int = 200
 
+    // AVAudioEngine stops itself when the audio configuration changes under
+    // it (AirPods renegotiating HFP, a sample-rate change) and posts
+    // AVAudioEngineConfigurationChange. Nothing restarts it for us: on
+    // 2026-09-25 the mic went quiet 28 s into a meeting with no device-change
+    // event, and the rest of Chris's side was lost. Registered per engine.
+    private var engineConfigObserver: NSObjectProtocol?
+
     /// Resolve the bundled / user-installed Silero VAD model path. Same
     /// resolution order as `ProcessSupervisor.vadModelPath`: bundle →
     /// user. Returns nil if neither exists or both are too small to be
@@ -166,6 +173,12 @@ final class AudioCaptureManager: NSObject {
     private var healthStartedAt: Date?
     private var micWatchdogArmedAt: Date?
     private var micWatchdogRestarts: Int = 0
+    private var micLastRestartAt: Date?
+    /// Buffer count at the last poll that saw it grow, and when — the stall
+    /// detector's memory. A tap that delivered once and then stopped is as
+    /// dead as one that never started.
+    private var micLastSeenBuffers: Int = 0
+    private var micLastProgressAt: Date?
     private var warnedMicDead = false
     private var warnedMeetingSilent = false
     private var onCaptureWarning: ((String) -> Void)?
@@ -178,6 +191,13 @@ final class AudioCaptureManager: NSObject {
     private static let micFirstBufferGraceSec: TimeInterval = 8.0
     /// Automatic restart attempts before we stop trying and just warn.
     private static let micWatchdogMaxRestarts: Int = 2
+    /// How long a mic that HAS been delivering may go without a buffer before
+    /// it counts as stalled. A 4096-frame tap fires every ~0.1-0.2 s whatever
+    /// the level, so 5 s of nothing is never a quiet room.
+    private static let micStallGraceSec: TimeInterval = 5.0
+    /// Sustained delivery after a restart that earns the restart budget back,
+    /// so a stall late in a long meeting still gets its own restarts.
+    private static let micRestartBudgetResetSec: TimeInterval = 30.0
     /// How long the meeting track may stay digitally silent before warning.
     /// Long enough to survive a genuinely quiet opening, short enough to still
     /// be actionable while the meeting is running.
@@ -364,6 +384,7 @@ final class AudioCaptureManager: NSObject {
         // path below already wraps these; the user-initiated stop path
         // MUST guard them too or it'll abort the process on stop. See
         // gotcha #18 and ObjCExceptionBridge usage elsewhere in this file.
+        removeEngineConfigObserver()
         if let engine = audioEngine {
             try? ObjCExceptionBridge.catching {
                 engine.inputNode.removeTap(onBus: 0)
@@ -754,6 +775,22 @@ final class AudioCaptureManager: NSObject {
 
         self.audioEngine = engine
         self.audioConverter = nil  // Per-format converter now lives in the tap closure.
+        removeEngineConfigObserver()
+        engineConfigObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main
+        ) { [weak self, weak engine] _ in
+            // A running engine rode the change out; restarting it would only
+            // risk a loop (a fresh engine can post this on start). A stopped
+            // one is the silent death. The stall watchdog backs this up.
+            guard let engine, !engine.isRunning else {
+                appLog("[AudioCapture] mic engine configuration changed; engine still running")
+                return
+            }
+            appLog("[AudioCapture] mic engine configuration changed and engine stopped — restarting")
+            self?.scheduleMicRestart()
+        }
         appLog("[AudioCapture] mic started, hardwareFormat=\(hardwareFormat.sampleRate)Hz/\(hardwareFormat.channelCount)ch")
     }
 
@@ -848,6 +885,9 @@ final class AudioCaptureManager: NSObject {
         healthStartedAt = now
         micWatchdogArmedAt = now
         micWatchdogRestarts = 0
+        micLastRestartAt = nil
+        micLastSeenBuffers = 0
+        micLastProgressAt = now
         warnedMicDead = false
         warnedMeetingSilent = false
         captureHealth.resetAll()
@@ -872,22 +912,41 @@ final class AudioCaptureManager: NSObject {
         let stats = captureHealth.snapshot()
         let now = Date()
 
-        // --- Mic: zero buffers at all means the tap never fired. ---
+        // --- Mic: no buffers at all, or buffers that stopped coming. ---
+        if stats.micBuffers != micLastSeenBuffers {
+            micLastSeenBuffers = stats.micBuffers
+            micLastProgressAt = now
+        }
+        let sinceLastBuffer = now.timeIntervalSince(micLastProgressAt ?? now)
         if let armedAt = micWatchdogArmedAt {
             switch Self.micVerdict(
                 buffers: stats.micBuffers,
                 elapsed: now.timeIntervalSince(armedAt),
-                restartsUsed: micWatchdogRestarts
+                restartsUsed: micWatchdogRestarts,
+                sinceLastBuffer: sinceLastBuffer
             ) {
-            case .healthy, .wait:
+            case .healthy:
+                if micWatchdogRestarts > 0, let last = micLastRestartAt,
+                   now.timeIntervalSince(last) >= Self.micRestartBudgetResetSec {
+                    micWatchdogRestarts = 0
+                    micLastRestartAt = nil
+                }
+            case .wait:
                 break
             case .restart:
                 micWatchdogRestarts += 1
-                appLog("[AudioCapture] WATCHDOG mic delivered 0 buffers in \(Int(Self.micFirstBufferGraceSec))s — restarting engine (attempt \(micWatchdogRestarts)/\(Self.micWatchdogMaxRestarts))")
+                micLastRestartAt = now
+                if stats.micBuffers > 0 {
+                    appLog("[AudioCapture] WATCHDOG mic stalled — no buffers for \(Int(sinceLastBuffer))s after \(stats.micBuffers) — restarting engine (attempt \(micWatchdogRestarts)/\(Self.micWatchdogMaxRestarts))")
+                } else {
+                    appLog("[AudioCapture] WATCHDOG mic delivered 0 buffers in \(Int(Self.micFirstBufferGraceSec))s — restarting engine (attempt \(micWatchdogRestarts)/\(Self.micWatchdogMaxRestarts))")
+                }
                 // Re-arm BEFORE restarting so the next grace window is measured
                 // against the new engine rather than against capture start.
                 micWatchdogArmedAt = now
                 captureHealth.resetMic()
+                micLastSeenBuffers = 0
+                micLastProgressAt = now
                 restartMicrophoneCapture(
                     retriesLeft: Self.micRestartMaxRetries,
                     backoffMs: Self.micRestartInitialBackoffMs
@@ -939,16 +998,25 @@ final class AudioCaptureManager: NSObject {
     /// fires the tap and logs `mic peak=0.0000`, and restarting the engine for
     /// that would be wrong. Only a total absence of callbacks means dead.
     ///
+    /// A tap that delivered and then stopped (`sinceLastBuffer` past
+    /// `stallGrace`) is judged like one that never started. Before 2026-09-25
+    /// one buffer made the mic healthy for the rest of the meeting.
+    ///
     /// Pure so it can be tested without timers or a real device.
     static func micVerdict(
         buffers: Int,
         elapsed: TimeInterval,
         restartsUsed: Int,
+        sinceLastBuffer: TimeInterval = 0,
         grace: TimeInterval = micFirstBufferGraceSec,
+        stallGrace: TimeInterval = micStallGraceSec,
         maxRestarts: Int = micWatchdogMaxRestarts
     ) -> MicVerdict {
-        if buffers > 0 { return .healthy }
-        if elapsed < grace { return .wait }
+        if buffers > 0 {
+            if sinceLastBuffer < stallGrace { return .healthy }
+        } else if elapsed < grace {
+            return .wait
+        }
         return restartsUsed < maxRestarts ? .restart : .giveUp
     }
 
@@ -1035,7 +1103,13 @@ final class AudioCaptureManager: NSObject {
         // Skip restart if we're not actively capturing — the next startCapture
         // will pick up the current device on its own.
         guard isCapturing else { return }
+        scheduleMicRestart()
+    }
 
+    /// Debounced mic restart, shared by the default-input listener and the
+    /// engine's configuration-change notification.
+    private func scheduleMicRestart() {
+        guard isCapturing else { return }
         // Coalesce burst events (AirPods reconnect fires 3-5 listener events
         // in <100ms). The work item also gets cancelled by stopCapture() so
         // it can never resurrect the engine after teardown.
@@ -1061,6 +1135,7 @@ final class AudioCaptureManager: NSObject {
     private func restartMicrophoneCapture(retriesLeft: Int, backoffMs: Int) {
         guard isCapturing else { return }
 
+        removeEngineConfigObserver()
         if let engine = audioEngine {
             // removeTap can raise NSException if the engine is in a wedged
             // state — catch defensively so a stale engine doesn't take down
@@ -1085,6 +1160,13 @@ final class AudioCaptureManager: NSObject {
                 appLog("[AudioCapture] mic restart gave up after \(Self.micRestartMaxRetries) retries: \(error.localizedDescription)")
                 onDeviceChangeError?()
             }
+        }
+    }
+
+    private func removeEngineConfigObserver() {
+        if let observer = engineConfigObserver {
+            NotificationCenter.default.removeObserver(observer)
+            engineConfigObserver = nil
         }
     }
 

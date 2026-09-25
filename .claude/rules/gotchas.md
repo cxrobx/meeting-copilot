@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 27 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 28 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -33,6 +33,7 @@ Organized by category. 27 items + recovery playbook, condensed format. Original 
 | 25 | The title bar doesn't drag the panel — the page does (`data-drag-region`) | Frontend |
 | 26 | Grok's stream restates the whole utterance — lines double unless compared by words | External APIs |
 | 27 | A popover inside the sticky evidence tab bar hit-tests but never paints | Frontend |
+| 28 | The mic engine stops mid-meeting on a configuration change, silently | Environment |
 | — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
@@ -184,6 +185,14 @@ this default.
 - On laptop speakers the mic also hears the remote party, so their lines land on both tracks (`dedup.ts` only trims chunk-boundary overlap). Headphones for calls.
 **Rollback**: `defaults write com.christopherrobinson.meeting-copilot meetingAudioSource sck` (next session), or launch with `MC_MEETING_AUDIO=sck`.
 **Pattern**: `app/MeetingCopilot/Sources/Core/Audio/SystemAudioTap.swift`, `AudioCaptureManager.startMeetingAudioCapture()`, `app/MeetingCopilot/Tests/SystemAudioTapTests.swift`.
+
+### 28. The Mic Engine Stops Mid-Meeting on a Configuration Change, Silently
+**Symptom**: Only the other side is transcribed. `mic peak=` lines stop partway through the session with no `Input device changed` line and no warning; the server gets no `source: mic` chunks.
+**Cause**: AVAudioEngine stops itself when the audio configuration changes under it (AirPods renegotiating their call profile, a sample-rate change) and posts `AVAudioEngineConfigurationChange`. Nothing listened for it, and the watchdog only judged the *first* buffer, so one early buffer made the mic healthy for the rest of the meeting. Seen 2026-09-25: AirPods mic at 24 kHz stopped 28 s in, with the process tap starting at the same time.
+**Solution** (applied 2026-09-25): an observer per engine schedules the debounced mic restart when the engine has stopped (a running one is left alone, so a fresh engine's own notification can't loop). The watchdog also treats 5 s without a buffer, after any were delivered, as dead, with the same 2-restart ladder, earned back after 30 s of delivery. Log lines: `mic engine configuration changed`, `WATCHDOG mic stalled`.
+**Check**: `Tests/CaptureHealthTests.swift` (`testMicThatStopsMidSessionIsCaught`; the old verdict returned `.healthy`).
+**Workaround on an old build**: switch the input device in System Settings → Sound; the device-change listener restarts the mic.
+**Pattern**: `app/MeetingCopilot/Sources/Core/Audio/AudioCaptureManager.swift` (`micVerdict`, `checkCaptureHealth`, `engineConfigObserver`).
 
 ### 11. WKWebView Needs Health Polling Before Loading Localhost
 **Symptom**: Blank white panel on app launch
