@@ -2630,19 +2630,26 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     border-radius: 8px;
     margin-bottom: 16px;
   }
+  /* The toggle is the whole row, and big enough to find at a glance
+     (2026-09-25: the 10px label and 11px arrow were hard to spot). */
   .coach-history > summary {
     cursor: pointer;
     list-style: none;
-    padding: 8px 12px;
-    font-size: 10px;
+    display: flex;
+    align-items: center;
+    padding: 10px 14px;
+    font-size: 12px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--gb-subtext0);
   }
+  .coach-history > summary:hover { color: var(--gb-text); }
   .coach-history > summary::-webkit-details-marker { display: none; }
-  .coach-history > summary::before { content: '\\25B8'; display: inline-block; margin-right: 6px; font-size: 11px; transition: transform 0.15s; }
+  .coach-history > summary::before { content: '\\25B8'; display: inline-block; width: 16px; margin-right: 8px; font-size: 16px; line-height: 1; text-align: center; transition: transform 0.15s; }
   .coach-history[open] > summary::before { transform: rotate(90deg); }
+  /* The list is resizable from the grip under it; the height the user
+     drags to is kept across re-renders and sessions (coachHistoryHeight). */
   .coach-history-list {
     list-style: none;
     margin: 0;
@@ -2650,7 +2657,20 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     display: flex;
     flex-direction: column;
     gap: 10px;
+    box-sizing: border-box;
+    overflow-y: auto;
   }
+  .coach-history-grip {
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: ns-resize;
+    touch-action: none;
+    border-top: 1px solid var(--gb-surface2);
+  }
+  .coach-history-grip::before { content: ''; width: 40px; height: 4px; border-radius: 2px; background: var(--gb-surface2); }
+  .coach-history-grip:hover::before, .coach-history-grip.dragging::before { background: var(--gb-overlay2); }
   .coach-history-item { display: flex; align-items: flex-start; gap: 10px; }
   .coach-history-item .coach-phrasing { font-weight: 500; }
   .coach-history-time {
@@ -3594,6 +3614,8 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   var coachHistoryEl = document.getElementById('coachHistory');
   var coachHistory = [];          // every card this session, oldest first
   var coachHistoryOpen = false;   // the user's toggle survives re-renders
+  var coachHistoryHeight = 0;     // px the user dragged the list to; 0 = its natural height
+  try { coachHistoryHeight = parseInt(localStorage.getItem('mc-coach-history-h'), 10) || 0; } catch (e) { /* non-fatal */ }
 
   // Opt-in monitor state — authoritative copy lives on the server and is
   // synced via feature.state broadcasts.
@@ -7813,10 +7835,52 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     var items = entries.map(function(e) { return e.coach ? coachHistoryItem(e.coach) : pulseHistoryItem(e.pulse); }).join('');
     coachHistoryEl.innerHTML = '<details class="coach-history"' + (coachHistoryOpen ? ' open' : '') + '>' +
       '<summary>' + (live ? 'Earlier' : 'Coach') + ' \\u00b7 ' + entries.length + '</summary>' +
-      '<ol class="coach-history-list">' + items + '</ol>' +
+      '<ol class="coach-history-list"' + (coachHistoryHeight ? ' style="height:' + coachHistoryHeight + 'px"' : '') + '>' + items + '</ol>' +
+      '<div class="coach-history-grip" role="separator" aria-orientation="horizontal" aria-label="Resize coach history" title="Drag to resize \\u00b7 double-click to fit"></div>' +
     '</details>';
     var details = coachHistoryEl.querySelector('details');
     if (details) details.addEventListener('toggle', function() { coachHistoryOpen = details.open; });
+    var grip = coachHistoryEl.querySelector('.coach-history-grip');
+    var list = coachHistoryEl.querySelector('.coach-history-list');
+    if (grip && list) coachHistoryWireGrip(grip, list);
+  }
+
+  function coachHistorySaveHeight() {
+    try {
+      if (coachHistoryHeight) localStorage.setItem('mc-coach-history-h', String(coachHistoryHeight));
+      else localStorage.removeItem('mc-coach-history-h');
+    } catch (e) { /* non-fatal */ }
+  }
+
+  // Drag the grip to set the list's height; double-click returns it to fit.
+  function coachHistoryWireGrip(grip, list) {
+    grip.addEventListener('pointerdown', function(e) {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      var startY = e.clientY;
+      var startH = list.getBoundingClientRect().height;
+      try { grip.setPointerCapture(e.pointerId); } catch (err) { /* non-fatal */ }
+      grip.classList.add('dragging');
+      function move(ev) {
+        coachHistoryHeight = Math.max(80, Math.round(startH + ev.clientY - startY));
+        list.style.height = coachHistoryHeight + 'px';
+      }
+      function up() {
+        grip.classList.remove('dragging');
+        grip.removeEventListener('pointermove', move);
+        grip.removeEventListener('pointerup', up);
+        grip.removeEventListener('pointercancel', up);
+        coachHistorySaveHeight();
+      }
+      grip.addEventListener('pointermove', move);
+      grip.addEventListener('pointerup', up);
+      grip.addEventListener('pointercancel', up);
+    });
+    grip.addEventListener('dblclick', function() {
+      coachHistoryHeight = 0;
+      list.style.height = '';
+      coachHistorySaveHeight();
+    });
   }
 
   window.clearCoachHistory = function() { setCoachHistory([], false); };
