@@ -150,7 +150,7 @@ echo ""
 
 ensure_no_active_meeting
 
-echo "[1/4] Running release tests..."
+echo "[1/5] Running release tests..."
 # Pin Node the same way build-app.sh does. The server's better-sqlite3 is
 # compiled against the RUNTIME Node (/usr/local/bin, ABI 115); an nvm shell
 # (Node 24, ABI 137) loads the wrong ABI and every SessionStore/calendar test
@@ -162,9 +162,22 @@ echo "[1/4] Running release tests..."
 (cd "$PROJECT_DIR/app/MeetingCopilot" && swift test)
 
 echo ""
-echo "[2/4] Packaging app..."
+echo "[2/5] Packaging app..."
 "$SCRIPT_DIR/build-app.sh"
 "$SCRIPT_DIR/verify-app.sh" --require-developer-id "$PACKAGED_APP"
+
+# The ship gate (docs/quality-plan.md §5): WebKit, the engine the app's
+# WKWebView uses, drives the PACKAGED server's dashboard through six specs
+# under a throwaway HOME with a scripted chat, so it spends nothing and never
+# touches the running app. A failure stops here, before /Applications changes.
+echo ""
+echo "[3/5] Browser smoke test (WebKit) against the packaged server..."
+E2E_OUT="$PROJECT_DIR/dist/e2e"
+# MC_E2E_SERVER is set here, not inherited: the gate tests what ships.
+if ! (cd "$PROJECT_DIR/server" && PATH="$(dirname "$RUNTIME_NODE"):$PATH" \
+      MC_E2E_SERVER="$PACKAGED_APP/Contents/Resources/server" MC_E2E_OUT="$E2E_OUT" npm run --silent e2e); then
+  fail "The browser smoke test failed, so the installed app was not touched. Screenshots, traces and the test server's log are in $E2E_OUT (open a trace: cd server && npx playwright show-trace <its trace.zip>)."
+fi
 
 # Re-check after the build: packaging can take long enough for a meeting to
 # have started after the initial guard.
@@ -192,7 +205,7 @@ else
 fi
 
 echo ""
-echo "[3/4] Replacing installed app..."
+echo "[4/5] Replacing installed app..."
 if app_is_running; then
   was_running=true
   osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
@@ -224,7 +237,7 @@ if ! "$SCRIPT_DIR/verify-app.sh" --require-developer-id "$INSTALLED_APP"; then
 fi
 
 echo ""
-echo "[4/4] Launching and checking health..."
+echo "[5/5] Launching and checking health..."
 if ! open "$INSTALLED_APP"; then
   restore_needed=false
   rollback_install "$backup_app" "$was_running"

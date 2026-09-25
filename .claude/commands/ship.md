@@ -23,9 +23,13 @@ What `ship.sh` does, in order:
    then runs `verify-app.sh --require-developer-id`. That checks the bundle
    contents, the version, the Info.plist usage descriptions, the libwhisper
    linkage, the model sizes and the Developer ID signature.
-4. Quits the running app, stages a copy in `/Applications`, verifies the copy,
+4. Runs the browser smoke test (`cd server && npm run e2e`): six WebKit specs
+   against the **packaged** server under a throwaway HOME, with a scripted chat,
+   so it spends nothing and never touches the running app (`server/e2e/`,
+   quality plan §5). It takes about 15 s.
+5. Quits the running app, stages a copy in `/Applications`, verifies the copy,
    swaps it in, and keeps the old app as a backup.
-5. Launches the new app and waits up to 45 s for `/health`. If the launch or
+6. Launches the new app and waits up to 45 s for `/health`. If the launch or
    health check fails, or the script is interrupted, it **restores the previous
    app automatically**.
 
@@ -52,6 +56,9 @@ What `ship.sh` does, in order:
      down, so the script cannot prove no meeting is live. Ask Chris before
      quitting it (Recovery Playbook A in `.claude/rules/gotchas.md`).
    - Test or `verify-app.sh` failures: report the output. Nothing was installed.
+   - `browser smoke test failed`: report which spec and its error. Nothing was
+     installed. Screenshots, traces and the test server's log are in
+     `dist/e2e/`; read the screenshot before guessing.
    - `previous installation was restored`: the new build failed to launch or to
      become healthy. Read `~/.meeting-copilot/app.log` and `server.log`.
 

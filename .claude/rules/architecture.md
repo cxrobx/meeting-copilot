@@ -116,6 +116,6 @@ Toggle: `SHARE_TRANSCRIPT=false` env var disables sharing.
 - Builds Swift binary (`swift build -c release`)
 - Assembles `.app` bundle with `Info.plist` (`LSUIElement=true`, privacy descriptions)
 - Signs with the first "Developer ID Application" identity in the keychain (or `CODESIGN_IDENTITY`), falling back to ad-hoc, which re-prompts for every permission on each rebuild; `verify-app.sh` checks the result
-- Writes `dist/Meeting Copilot.app` and does **not** install. `scripts/ship.sh` installs: it refuses during a live meeting, runs both test suites, verifies the Developer ID signature, replaces `/Applications/Meeting Copilot.app`, relaunches, and checks `/health`
+- Writes `dist/Meeting Copilot.app` and does **not** install. `scripts/ship.sh` installs: it refuses during a live meeting, runs both test suites, verifies the Developer ID signature, runs the WebKit smoke test against the packaged server (`server/e2e/`), replaces `/Applications/Meeting Copilot.app`, relaunches, and checks `/health`
 
 `ProcessSupervisor` uses `isPackaged` (checks `Bundle.main.bundlePath.hasSuffix(".app")`) to prefer bundle resources over dev paths. Injects `/opt/homebrew/bin` into PATH via `processEnvironment()`.

@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 29 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 30 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -35,6 +35,7 @@ Organized by category. 29 items + recovery playbook, condensed format. Original 
 | 27 | A popover inside the sticky evidence tab bar hit-tests but never paints | Frontend |
 | 28 | The mic engine stops mid-meeting on a configuration change, silently | Environment |
 | 29 | An aborted OpenAI stream ends quietly: it looks finished and reports no usage | External APIs |
+| 30 | Playwright newer than 1.61 cannot drive WebKit on macOS 14 — the ship gate breaks | Environment |
 | — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
@@ -200,6 +201,13 @@ this default.
 **Workaround on an old build**: switch the input device in System Settings → Sound; the device-change listener restarts the mic.
 **Pattern**: `app/MeetingCopilot/Sources/Core/Audio/AudioCaptureManager.swift` (`micVerdict`, `checkCaptureHealth`, `engineConfigObserver`, `pinMicrophone`), `Audio/MicDevicePicker.swift`, `server/src/capture/track-watch.ts`, `server/src/present/index.ts` (`capShowHealth`).
 
+### 30. Playwright Newer Than 1.61 Cannot Drive WebKit on macOS 14 — the Ship Gate Breaks
+**Symptom**: `npm run e2e` (so `ship.sh` step 3) fails every spec with `browserContext.newPage: Protocol error (Page.overrideSetting): Unknown setting: PushAPIEnabled` (1.63), or hangs at `newPage` until the test timeout (1.62). The server and seed are fine.
+**Cause**: Playwright no longer builds WebKit for macOS 14. On mac14 every version from 1.59 on uses a frozen build (revision 2251, `webkit_mac14_arm64_special-2251` in `~/Library/Caches/ms-playwright`), and from 1.62 the driver expects settings that build does not have. Measured 2026-09-25: 1.59.1 and 1.61.1 work; 1.62.1 and 1.63.0 do not.
+**Solution**: `@playwright/test` is pinned exact to **1.61.1** in `server/package.json`. Do not bump it (`npm update`, `npm audit fix --force`) while this Mac is on macOS 14. After macOS 15+, move to the latest and confirm with `npm run e2e`.
+**Check**: the gate itself. A broken driver fails all six specs, so it can never pass silently.
+**Pattern**: `server/package.json`, `server/e2e/playwright.config.ts`.
+
 ### 11. WKWebView Needs Health Polling Before Loading Localhost
 **Symptom**: Blank white panel on app launch
 **Cause**: WKWebView loads `/present` before the Node server finishes starting. Failed navigation shows blank page, `reload()` does nothing after failed provisional navigation.
@@ -265,7 +273,8 @@ this default.
 **Symptom**: The evidence tabs' ⌄ All tabs button seems dead: nothing appears. Yet `aria-expanded` flips to true, `document.elementFromPoint` over the menu returns the menu, and a Playwright click on a menu row works, so a test that only asserts "open and clickable" passes.
 **Cause**: The menu was `position: absolute` inside `#evTabBar`, which is `position: sticky` inside `.main`, the column's `overflow-y: auto` scroller. Chromium (2026-09-24) laid it out and hit-tested it, but painted nothing of it outside the 40 px bar.
 **Solution** (applied 2026-09-24): the menu goes on `<body>`, `position: fixed`, placed from the button's `getBoundingClientRect()` (as Onyx's `OnyxMenu` does), and closes on the column's scroll and on resize, since it no longer moves with the button.
-**Check**: `__tests__/present-script.test.ts` asserts `.ev-menu` is fixed and `evOpenMenu` appends to `document.body`. For any new popover, verify with a **screenshot**, never only by clicking it.
+**Only Chromium** (checked 2026-09-25): WebKit, both Playwright's build and the app's own WKWebView, paints the old layout, so this never reached the app. The fix stays: it is the layout any engine draws.
+**Check**: `__tests__/present-script.test.ts` asserts `.ev-menu` is fixed and `evOpenMenu` appends to `document.body`. The ship gate's `e2e/06-popovers.spec.ts` guards the class in WebKit: it compares each popover's box shown vs hidden, pixel by pixel, and every row must paint (a menu clipped to its bar paints 42% of its box but 0% of its last row, and fails). For any new popover, verify with a **screenshot**, never only by clicking it, and add it to that spec.
 **Pattern**: `server/src/present/index.ts` (`evOpenMenu`, `.ev-menu`).
 
 ---

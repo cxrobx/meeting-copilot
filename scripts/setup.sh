@@ -43,6 +43,9 @@ echo "[2/4] Installing Node.js server dependencies..."
 cd "$PROJECT_DIR/server"
 npm install --silent
 npm rebuild better-sqlite3
+# The ship gate's browser tests (server/e2e) run on Playwright's WebKit, the
+# engine the app's WKWebView uses; ship.sh refuses to install without it.
+npx playwright install webkit
 echo "  Done."
 
 # Build Node.js server

@@ -43,6 +43,7 @@ import { cleanupOldSessions, cleanStalePresence } from './session/cleanup.js';
 import { writePresence, removePresence, appendTranscript, setSharingEnabled } from './session/shared.js';
 import { createPresentRouter, findAction } from './present/index.js';
 import { ChatService, ChatError, defaultChatAnswerer, type ChatEvent } from './chat/service.js';
+import { e2eFakeChatEnabled, fakeChatAnswerer } from './chat/fake.js';
 import { PublishJobs, type PublishStateMessage } from './publish/index.js';
 import { polishToPage } from './publish/polish.js';
 import { wranglerUploader } from './publish/uploader.js';
@@ -648,6 +649,10 @@ const publishJobs = new PublishJobs({
 });
 // Meeting chat (chat/service.ts): the whole meeting as context, answered on
 // the metered path (gpt-6-luna + web search), the subscription CLI as fallback.
+// The ship gate's browser tests swap in a scripted answerer (chat/fake.ts),
+// only ever under a temporary HOME; /health says so.
+const fakeChat = e2eFakeChatEnabled();
+if (fakeChat) console.warn('[Chat] COPILOT_E2E_FAKE_CHAT: the meeting chat is the scripted e2e answerer');
 const chat = new ChatService({
   sessionDir: (id) => join(COPILOT_DIR, 'sessions', id),
   liveContext: (id) => (sessionStore?.id === id
@@ -663,7 +668,7 @@ const chat = new ChatService({
       }
     : null),
   broadcast: (event) => broadcast(event),
-  answer: defaultChatAnswerer((message) => log('chat', message)),
+  answer: fakeChat ? fakeChatAnswerer() : defaultChatAnswerer((message) => log('chat', message)),
   log: (message) => log('chat', message),
 });
 app.use(createPresentRouter(registry, { getSessionId: liveSessionId, publish: publishJobs, chat }));
@@ -683,6 +688,7 @@ app.use(createRoutes({
   },
   getRetentionDays: () => configuredRetentionDays,
   setRetentionDays: (days) => { configuredRetentionDays = days; },
+  fakeChat,
 }));
 
 // ─── HTTP Server ───────────────────────────────────────────────────────────

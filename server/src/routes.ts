@@ -41,6 +41,8 @@ interface RouteContext {
   probeWhisperAvailable: () => Promise<boolean>;
   getRetentionDays: () => number;
   setRetentionDays: (days: number) => void;
+  /** The e2e chat answerer is on (chat/fake.ts). */
+  fakeChat?: boolean;
 }
 
 // Preflight dependency check
@@ -177,6 +179,8 @@ export function createRoutes(ctx: RouteContext): Router {
       session: active ? store?.id : null,
       transcriptionAvailable,
       transcription: ctx.transcription.providerInfo,
+      // Present only when on, so a test build can never pass for the real one.
+      ...(ctx.fakeChat ? { fakeChat: true } : {}),
     });
   });
 

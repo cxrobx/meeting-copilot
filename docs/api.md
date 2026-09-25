@@ -59,7 +59,7 @@
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/health` | Health check (`{ status, session, whisperAvailable }`) |
+| GET | `/health` | Health check (`{ status, session, transcriptionAvailable, transcription }`, plus `fakeChat: true` only when the e2e chat answerer is on) |
 | GET | `/preflight` | Dependency checks (whisper, claude CLI, model, storage) |
 | GET | `/debug` | Server metrics and diagnostics |
 | GET | `/transcript` | Live session transcript (refresh persistence) |

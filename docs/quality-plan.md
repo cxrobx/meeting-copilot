@@ -1,6 +1,6 @@
 # Meeting Copilot Quality Plan
 
-- **Status:** C1 (the ship gate) is scheduled as **T212**. Everything else waits on a trigger (§0). Nothing is built yet.
+- **Status:** C1 (the ship gate) is **built** (T212, 2026-09-25): `server/e2e/`, run by `ship.sh` step 3 (§5, Result). Everything else waits on a trigger (§0).
 - **Created:** 2026-09-25, from the quality review after the meeting chat shipped (`b42e0b8`). Revised the same day after a second review (§10).
 - **Scope:** the `/present` dashboard's code shape, a ship-gating end-to-end test, and how much the live meeting asks of your attention. Optional: the server's entry point.
 - **Primary outcome:** move the review's weakest scores (architecture 5.5, testing 7) without changing what the app does, then use real usage data to decide what the live dashboard shows.
@@ -11,7 +11,7 @@ The app works, and Meeting Copilot is "my own tools", so maintenance unless some
 
 | Item | Status | Trigger that brings it back | What it buys | Plan |
 |---|---|---|---|---|
-| **C1** WebKit smoke test gating `ship.sh` | **Now: T212** | none | A broken dashboard or chat can't be installed the night before a client call | §5 |
+| **C1** WebKit smoke test gating `ship.sh` | **Done: T212** (2026-09-25) | none | A broken dashboard or chat can't be installed the night before a client call | §5 |
 | **A1** Dashboard out of the TypeScript string, byte-identical | Waiting | A paid engagement needs a substantial dashboard feature, **or** an agent hits gotcha #22 or #24 again | Removes the #22/#24 class; `present/index.ts` from 10,065 to <1,000 lines | §4 |
 | **A2** ESLint for the dashboard; retire the #22/#24 text guards | Waiting | Right after A1 | Real checks instead of text matching | §4 |
 | **A3** Split into TypeScript modules as features are touched | Waiting | After A1, one feature at a time when it is next changed | The compiler catches one feature breaking another | §4 |
@@ -135,6 +135,21 @@ B1 instrument ──> B2 report (use + meeting health) ──> [10 instrumented 
 - Revert the Stop fix: spec 3 fails.
 - Move the All tabs menu back inside the sticky bar: spec 6 fails.
 
+**Result (2026-09-25, T212).** Built as planned. Against the packaged bundle the gate takes about 15 s wall clock, 13 s of it the six specs, well inside the 60 s budget.
+
+| Bug reintroduced | Planned | Seen |
+|---|---|---|
+| #22: `join('\n\n')` in the chat's pulse attach | specs 1–6 fail | **1–6 fail** (the script never runs: no socket, no start form, no replay) |
+| Stop fix removed (`if (signal.aborted) throw` after the answer) | spec 3 fails | **only spec 3 fails**: the stopped answer is saved `done`, not `cancelled` |
+| #27: the exact pre-`51dcea9` menu (absolute, inside `#evTabBar`) | spec 6 fails | **all pass**. WebKit paints that layout (99.9% of the menu's box). A WKWebView snapshot of the same page showed it painted too, so #27 was Chromium-only and never reached the app |
+| #27's class in WebKit: that menu with the bar clipping its overflow | (added) | **only spec 6 fails**: 42% of the box painted, row 3 at 0% |
+
+What differs from the plan:
+- **Spec 6 checks every row, not only the box.** The clipped menu still painted 42% of its box, so a box-only threshold passes it. The card menu's background matches the card under it, so a painted menu can change as little as 14% of its box (its lowest row 6.4%). The floors are 5% of the box and 2% of every row; unpainted is exactly 0, since screenshots are lossless.
+- **Playwright is pinned to 1.61.1.** Newer versions cannot drive the frozen WebKit that Playwright ships for macOS 14 (gotcha #30).
+- **Zero spend by construction, not only by flag.** The test server gets a hand-built environment: no API keys at all, a PATH without `claude` or `wrangler`, transcription and Onyx pointed at a closed port, the coach and vault look off, `COPILOT_DISABLE_PAID_API=1` on top.
+- **A run cut short cannot orphan the server.** The first run hit the global timeout, skipped its teardown and left the test server running; the harness now kills it on the runner's exit as well.
+
 ## 6. Workstream B: How much the live meeting asks of you
 
 This is not about tuning suggestion recall. That rule stands (`recall-over-precision`: a missed card costs the work). The question here is how many *kinds* of surfaces compete for your eyes while you talk, and which you actually use.
@@ -217,7 +232,7 @@ Planned, not opportunistic (revised after the second review). Scattered session 
 
 ## 9. Done means
 
-- [ ] `ship.sh` refuses to install when a C1 spec fails, and each spec was shown to fail on its named bug.
+- [x] `ship.sh` refuses to install when a C1 spec fails, and each spec was shown to fail on its named bug (2026-09-25; #27 does not exist in WebKit, so spec 6 was shown on its WebKit form, §5 Result).
 - [ ] `present/index.ts` is under 1,000 lines; the dashboard is `server/web/*`, byte-identical at the move.
 - [ ] ESLint in `npm test`; gotcha #22's guard retired; #24's replaced by `no-redeclare` (verified).
 - [ ] Split dashboard features are TypeScript modules under `npm run build`.

@@ -9,6 +9,7 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "e2e": "playwright test -c e2e/playwright.config.ts",
     "eval:audio": "tsx src/evals/real-audio-transcription.ts",
     "eval:gate": "tsx src/evals/gate-replay.ts",
     "eval:coach": "tsx src/evals/recovery-coach-benchmark.ts",
@@ -26,6 +27,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
     "@types/better-sqlite3": "^7.6.12",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.0",
