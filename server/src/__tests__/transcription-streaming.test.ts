@@ -20,11 +20,14 @@ class FakeSocket extends EventEmitter {
   }
 }
 
-function setup(now = { t: 1_000_000 }, gate: false | object = false) {
+// holdMs 0 closes a line on speech_final, as before the hold existed; the
+// "line hold" tests below turn it on.
+function setup(now = { t: 1_000_000 }, gate: false | object = false, holdMs = 0) {
   const sockets: FakeSocket[] = [];
   const st = new StreamingTranscriber<string>({
     apiKey: 'k',
     gate: gate as false,
+    holdMs,
     now: () => now.t,
     backoffMs: [10_000],
     socketFactory: (url) => {
@@ -191,5 +194,88 @@ describe('StreamingTranscriber', () => {
     expect(mic.sent).toContain(JSON.stringify({ type: 'audio.done' }));
     expect(events.at(-1)).toMatchObject({ final: true, segment: { text: 'half a sentence' } });
     vi.useRealTimers();
+  });
+});
+
+describe('StreamingTranscriber line hold', () => {
+  // 2026-09-25: Grok's 300 ms speech_final split one speaker's thought into
+  // "Adam. Mining analyzers." / "The biggest one." / ... three seconds apart.
+  function live() {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const t = setup({ t: 1_000_000 }, false, 1_200);
+    t.st.start('');
+    for (const s of t.sockets) s.server({ type: 'transcript.created' });
+    t.st.pushFrame('meeting', Buffer.alloc(3200));
+    t.st.pushFrame('mic', Buffer.alloc(3200));
+    return t;
+  }
+  afterEach(() => vi.useRealTimers());
+
+  it('a pause shorter than the hold grows the same line in place', () => {
+    const { sockets, events } = live();
+    const m = sockets[1]!;
+    m.partial('Adam. Mining analyzers.', { final: true, speech: true, start: 0, duration: 2 });
+    expect(events.filter((e) => e.final)).toHaveLength(0); // held, not closed
+    vi.advanceTimersByTime(800);
+    m.partial('The biggest', { start: 2.6, duration: 0.6 });
+    m.partial('The biggest one.', { final: true, speech: true, start: 2.6, duration: 1 });
+    vi.advanceTimersByTime(1_200);
+    const finals = events.filter((e) => e.final);
+    expect(finals.map((e) => e.segment.text)).toEqual(['Adam. Mining analyzers. The biggest one.']);
+    expect(new Set(events.map((e) => e.segment.id)).size).toBe(1);
+  });
+
+  it('a pause longer than the hold starts a new line', () => {
+    const { sockets, events } = live();
+    const m = sockets[1]!;
+    m.partial('Adam. Mining analyzers.', { final: true, speech: true, start: 0, duration: 2 });
+    vi.advanceTimersByTime(1_200);
+    m.partial('The biggest one.', { final: true, speech: true, start: 5, duration: 1 });
+    vi.advanceTimersByTime(1_200);
+    expect(events.filter((e) => e.final).map((e) => e.segment.text))
+      .toEqual(['Adam. Mining analyzers.', 'The biggest one.']);
+  });
+
+  it('the other side starting to talk closes the held line at once', () => {
+    const { sockets, events } = live();
+    sockets[1]!.partial('Does that work for you?', { final: true, speech: true, start: 0, duration: 2 });
+    sockets[0]!.partial('Yes', { start: 0, duration: 0.4 });
+    expect(events.filter((e) => e.final).map((e) => e.segment.text)).toEqual(['Does that work for you?']);
+    expect(events.at(-1)!.segment).toMatchObject({ source: 'mic', text: 'Yes' });
+  });
+
+  it('a repeat of the held utterance does not double the line', () => {
+    const { sockets, events } = live();
+    const m = sockets[1]!;
+    m.partial('We can sub some of these out.', { final: true, speech: true, start: 0, duration: 2 });
+    m.partial('We can sub some of these out.', { final: true, speech: true, start: 0, duration: 2 });
+    vi.advanceTimersByTime(1_200);
+    expect(events.filter((e) => e.final).map((e) => e.segment.text)).toEqual(['We can sub some of these out.']);
+  });
+
+  it('a joined line still closes at the word cap', () => {
+    const { sockets, events } = live();
+    const m = sockets[1]!;
+    const first = `${'one '.repeat(59)}end.`; // 60 words
+    m.partial(first, { final: true, speech: true, start: 0, duration: 20 });
+    const second = `${'two '.repeat(24)}stop.`; // 25 more: 85, past the cap
+    m.partial(second, { final: true, start: 20.5, duration: 9 });
+    const finals = events.filter((e) => e.final).map((e) => e.segment.text);
+    expect(finals).toEqual([`${first} ${second}`]);
+    // Grok restates its own utterance only; the joined prefix is not stripped from it.
+    m.partial(`${second} And more.`, { final: true, speech: true, start: 20.5, duration: 11 });
+    vi.advanceTimersByTime(1_200);
+    expect(events.filter((e) => e.final).at(-1)!.segment.text).toBe('And more.');
+  });
+
+  it('stop closes a held line', async () => {
+    const { st, sockets, events } = live();
+    sockets[1]!.partial('Last words.', { final: true, speech: true, start: 0, duration: 1 });
+    const stopped = st.stop();
+    for (const s of sockets) s.server({ type: 'transcript.done' });
+    await vi.runAllTimersAsync();
+    await stopped;
+    expect(events.filter((e) => e.final).map((e) => e.segment.text)).toEqual(['Last words.']);
   });
 });

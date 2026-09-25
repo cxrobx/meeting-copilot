@@ -30,6 +30,13 @@ const DEFAULT_REPLAY_WINDOW_MS = 20_000;
 const DEFAULT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 /** Close a long monologue at a locked sentence end, so one line doesn't grow forever. */
 const MAX_OPEN_WORDS = 80;
+/**
+ * How long a line stays open after Grok's speech_final (300 ms of silence).
+ * People breathe mid-thought for 300-700 ms, so closing on speech_final split
+ * one speaker's sentence into three or four lines (2026-09-25). The same
+ * speaker resuming inside this window grows the same line in place.
+ */
+const DEFAULT_HOLD_MS = 1_200;
 /** Frames waiting for a (re)connecting stream: 10 s, oldest dropped past that. */
 const MAX_PENDING_FRAMES = 100;
 const BYTES_PER_SEC = 32_000; // 16 kHz mono PCM16
@@ -43,10 +50,16 @@ export interface StreamingOptions {
   replayWindowMs?: number;
   /** Noise gate settings, or false to send every frame (COPILOT_STT_GATE=0). */
   gate?: GateOptions | false;
+  /** Keep a line open this long after speech_final; 0 closes it at once. */
+  holdMs?: number;
 }
 
 interface Utterance {
   id: string;
+  /** Text of earlier Grok utterances this line already joined (see holdMs). */
+  prefix: string;
+  /** Grok said speech_final; the line waits `holdMs` for the speaker to resume. */
+  held: boolean;
   locked: string;
   current: string;
   /** `current` restates the locked text, so it is the whole line on its own. */
@@ -75,6 +88,8 @@ interface SourceState<T> {
    * from its later events until the utterance really ends (speech_final).
    */
   carried: string;
+  /** Closes a held line when the speaker does not resume. */
+  holdTimer: ReturnType<typeof setTimeout> | null;
   held: HeldChunk<T>[];
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   failures: number;
@@ -130,8 +145,13 @@ export function restatesLocked(locked: string, text: string): boolean {
   return same / l.length >= 0.8;
 }
 
-function lineText(u: { locked: string; current: string; currentIsFull: boolean }): string {
+/** The current Grok utterance's part of the line. */
+function utteranceText(u: { locked: string; current: string; currentIsFull: boolean }): string {
   return u.currentIsFull ? u.current : joinText(u.locked, u.current);
+}
+
+function lineText(u: Utterance): string {
+  return joinText(u.prefix, utteranceText(u));
 }
 
 function wordCount(text: string): number {
@@ -145,12 +165,14 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
   private readonly now: () => number;
   private readonly backoffMs: number[];
   private readonly replayWindowMs: number;
+  private readonly holdMs: number;
 
   constructor(private readonly opts: StreamingOptions) {
     super();
     this.now = opts.now ?? Date.now;
     this.backoffMs = opts.backoffMs ?? DEFAULT_BACKOFF_MS;
     this.replayWindowMs = opts.replayWindowMs ?? DEFAULT_REPLAY_WINDOW_MS;
+    this.holdMs = opts.holdMs ?? DEFAULT_HOLD_MS;
     for (const source of SOURCES) this.states.set(source, this.freshState());
   }
 
@@ -300,7 +322,7 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
   private freshState(): SourceState<TChunk> {
     return {
       stream: null, lastFrameAt: 0, utterance: null, coveredUntil: 0, held: [], reconnectTimer: null,
-      failures: 0, closedThrough: 0, carried: '',
+      failures: 0, closedThrough: 0, carried: '', holdTimer: null,
       gate: this.opts.gate === false ? null : new NoiseGate(this.opts.gate ?? {}),
       pending: [], pendingFinalize: false, timeline: [], sentSec: 0, billedSec: 0, lastSentEnd: null,
     };
@@ -314,6 +336,8 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
     for (const state of this.states.values()) {
       if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
       state.reconnectTimer = null;
+      if (state.holdTimer) clearTimeout(state.holdTimer);
+      state.holdTimer = null;
     }
   }
 
@@ -359,13 +383,33 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
     }
 
     let u = state.utterance;
+    if (u?.held) {
+      // An event that ends where the held line ended only repeats it.
+      if (u.audioEnd !== null && audioEnd <= u.audioEnd + 50) return;
+      // The speaker resumed inside the hold: this new Grok utterance grows the
+      // same line (same id, so the dashboard updates it in place).
+      if (state.holdTimer) clearTimeout(state.holdTimer);
+      state.holdTimer = null;
+      u.held = false;
+      u.prefix = lineText(u);
+      u.locked = '';
+      u.current = '';
+      u.currentIsFull = false;
+    }
     if (!u) {
       eventText = eventText.replace(/^[,.;:!?]+\s*/, ''); // a new line never starts with punctuation
       if (!eventText) return;
       // An event that ends where the last closed line ended only repeats it.
       if (audioEnd <= state.closedThrough + 50) return;
-      u = { id: randomUUID(), locked: '', current: '', currentIsFull: false, firstSeenAt: this.now(), audioStart, audioEnd };
+      u = {
+        id: randomUUID(), prefix: '', held: false, locked: '', current: '', currentIsFull: false,
+        firstSeenAt: this.now(), audioStart, audioEnd,
+      };
       state.utterance = u;
+      // A new line on this track is a change of speaker: the other track's
+      // held line is finished.
+      const other: Source = source === 'mic' ? 'meeting' : 'mic';
+      if (this.state(other).utterance?.held) this.closeUtterance(other);
     }
     u.audioEnd = audioEnd;
 
@@ -384,9 +428,21 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
 
     const full = lineText(u);
     const longAndDone = event.isFinal && wordCount(full) >= MAX_OPEN_WORDS && /[.?!]["')\]]?$/.test(full);
-    if (event.speechFinal || longAndDone) {
-      if (longAndDone && !event.speechFinal) state.carried = joinText(state.carried, full);
+    if (longAndDone && !event.speechFinal) {
+      // Grok restates only its own utterance, never the joined prefix.
+      state.carried = joinText(state.carried, utteranceText(u));
       this.closeUtterance(source);
+    } else if (event.speechFinal && (longAndDone || this.holdMs <= 0 || !this.active)) {
+      this.closeUtterance(source);
+    } else if (event.speechFinal) {
+      u.held = true;
+      if (full) this.emit('segment', { segment: this.toSegment(source, u), final: false });
+      if (state.holdTimer) clearTimeout(state.holdTimer);
+      state.holdTimer = setTimeout(() => {
+        state.holdTimer = null;
+        if (state.utterance === u) this.closeUtterance(source);
+      }, this.holdMs);
+      if (typeof state.holdTimer.unref === 'function') state.holdTimer.unref();
     } else if (full) {
       this.emit('segment', { segment: this.toSegment(source, u), final: false });
     }
@@ -415,6 +471,8 @@ export class StreamingTranscriber<TChunk = unknown> extends EventEmitter {
 
   private closeUtterance(source: Source): void {
     const state = this.state(source);
+    if (state.holdTimer) clearTimeout(state.holdTimer);
+    state.holdTimer = null;
     const u = state.utterance;
     state.utterance = null;
     if (!u) return;
