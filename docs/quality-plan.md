@@ -1,7 +1,7 @@
 # Meeting Copilot Quality Plan
 
 - **Status:** Planned. Nothing below is built yet.
-- **Created:** 2026-09-25, from the quality review after the meeting chat shipped (`b42e0b8`).
+- **Created:** 2026-09-25, from the quality review after the meeting chat shipped (`b42e0b8`). Revised the same day after a second review (§10).
 - **Scope:** the `/present` dashboard's code shape, a ship-gating end-to-end test, and how much the live meeting asks of your attention. Optional: the server's entry point.
 - **Primary outcome:** move the review's weakest scores (architecture 5.5, testing 7) without changing what the app does, then use real usage data to decide what the live dashboard shows.
 
@@ -12,7 +12,8 @@ The review scored the app about 7/10: strong features, reliability work and docs
 | Finding | Evidence |
 |---|---|
 | The dashboard is one TypeScript string | `server/src/present/index.ts` is 10,065 lines. `PRESENT_HTML` holds ~2,880 lines of CSS (805–3687), a 36-line first-paint script (769–804) and ~6,240 lines of JS (3824–10063) in one IIFE |
-| That shape causes bugs | Gotcha #22 (escapes decode twice), #24 (a second `var` silently replaces the first), #27 (a popover that hit-tests but never paints). The current guards are "does it parse" and text-matching tests |
+| That shape causes bugs | Gotcha #22 (escapes decode twice) and #24 (a second `var` silently replaces the first) exist because of it. #27 (a popover that hit-tests but never paints) does not: it is a CSS painting problem any frontend can have, and only a real browser catches it. The dashboard's guards are a parse check, a few behaviour tests, and mostly text matching |
+| Session state is scattered | `server/src/index.ts` (2,247 lines) keeps the live session in module variables (`sessionStore`, `sessionActive`, `meetingGoals`, `lastAgendaStatus`, pulses, coach cards, fact flags, the rolling-summary timer and id), each reset by hand on start and stop. Past bugs of this shape: the dashboard stranded on "Ending…", a rolling summary landing after stop, late worker results after stop, the app showing the previous meeting's pulse |
 | No automated end-to-end check gates a ship | `ship.sh` runs `npm test` + `swift test`, packages, installs. The 2026-09-25 chat test (second server, seeded meeting, Playwright) was done by hand and caught a real bug (Stop marked a half answer done) |
 | The live meeting has many surfaces | Suggestion cards, coach cards, pulse, fact-check flags, agenda, evidence tabs, Quick Actions, highlight-to-ask, the chat, Stage, the menu bar popover. The event log records suggestions shown, approved, dismissed and expired, and coach cards and pulses shown, but none of the dashboard's own interactions |
 
@@ -29,14 +30,15 @@ The review scored the app about 7/10: strong features, reliability work and docs
 ## 3. Order
 
 ```
-C1 smoke gate ─┬─> A1 extract dashboard ──> A2 static checks ──> A3 split as touched (ongoing)
-               │                                                       └─> D server entry (optional)
-B1 instrument ─┴─> B2 report ──> [10 instrumented meetings] ──> B3 decide what the meeting shows
+C1 browser behaviour tests ──> A1 extract dashboard ──> A2 static checks ──> A3 TypeScript modules, as touched (ongoing)
+                           └─> D  one owner for session state
+B1 instrument ──> B2 report (use + meeting health) ──> [10 instrumented meetings] ──> B3 decide what the meeting shows
 ```
 
 - **C1 goes first.** Behavioural validation before a 9,000-line move: the gate that proves the refactor changed nothing has to exist before the refactor.
+- **D follows C1, beside A.** It touches the server, A touches the page, and C1 covers both.
 - **B is independent.** Start instrumenting early, because its decision waits on real meetings, not on code.
-- **Size:** C1, A1 and B1+B2 are about one session each. A2 is half a session. A3 has no end: it happens as features are touched.
+- **Size:** C1, A1, D and B1+B2 are about one session each. A2 is half a session. A3 has no end: it happens as features are touched.
 
 ## 4. Workstream A: Move the dashboard out of the TypeScript string
 
@@ -70,13 +72,15 @@ B1 instrument ─┴─> B2 report ──> [10 instrumented meetings] ──> B3
 
 **Exit gate:** reintroduce #24 (a second top-level `var ASK_LABELS`) and ESLint fails `npm test`. Record that the check was verified to fail, as the gotchas do.
 
-### A3. Split by feature, when touched
+### A3. Split into TypeScript modules, when touched
 
 **Approach**
-- **The rule:** the next change to a feature moves that feature into its own file first, then makes the change. No big-bang split.
+- **The rule:** the next change to a feature moves that feature into its own TypeScript module first, then makes the change. No big-bang split.
   - Candidates, roughly biggest first: start form and prep, transcript and Stage, cards and publish, coach and pulse, evidence tabs, highlight-to-ask and the selection toolbar, the chat, settings and history.
-- **Shared state** (`sessionState`, `sessionId`, `ws`, `replaySessionId`, the helpers `escapeHtml`, `renderMarkdown`, `showToast`) moves to a `core.js` that loads first. Plain classic scripts sharing one namespace object keep this build-free. ES modules are fine too if a split needs imports; WKWebView supports them.
-  - *Could go wrong:* a hidden dependency between features breaks at load time. *Handled by:* `no-undef` from A2 names it, and C1 exercises every feature's first render.
+- **TypeScript, not type-checked JS.** A second `tsconfig.web.json` (`lib: ["dom"]`, ES module output to `dist/web/`) is compiled by the existing `npm run build`. It adds no new toolchain, and the compiler, not a lint rule, catches a change in one feature that breaks another, which is the review's core point. WKWebView loads native ES modules.
+  - *Could go wrong:* the dev loop gets a second watcher, and a stale `dist/web` gets served. *Handled by:* `npm run dev` runs `tsc -p tsconfig.web.json -w` beside `tsx watch`, and the content-hash URLs from A1 make staleness visible.
+- **Shared state** (`sessionState`, `sessionId`, `ws`, `replaySessionId`) and the shared helpers (`escapeHtml`, `renderMarkdown`, `showToast`) become a typed `core.ts` that every module imports. The remaining monolith reads them from one global until it is empty.
+  - *Could go wrong:* a hidden dependency between features breaks at load time. *Handled by:* the compiler for split modules, `no-undef` for the rest, and C1 exercises every feature's first render.
 - **DOM tests** with `happy-dom` (a dev dependency) for the logic worth testing in isolation: the chat reducer, the selection captures, the evidence tab fitting. The pattern already exists: `present-script.test.ts` runs the shipped `chatApplyDelta` itself.
 
 **Exit gate: a ratchet, not a date.** A test records the largest file in `server/web/`, and it may only shrink. It fails if any file grows more than 10% past its best, the same way `context-budget.py` holds CLAUDE.md.
@@ -136,11 +140,21 @@ This is not about tuning suggestion recall. That rule stands (`recall-over-preci
   - Stage toggled;
   - the dashboard visible and focused, as seconds per minute. This is the glance measure: whether you look at the panel at all.
 - **Rely on what is already logged** for suggestion cards (shown, approved, dismissed, expired), coach cards shown and pulses shown.
+- **Log from the app, for meeting health:** mic restarts (by watchdog, device change or the dashboard's button) and server restarts by the supervisor, sent as `app.*` events while a meeting is live.
 
 *Could go wrong:* instrumentation adds noise to a hot path. *Handled by:* events batch client-side and flush every 10 s. Only visibility sampling is periodic.
 
-### B2. Report
+### B2. Report: use, and meeting health
 
+The second review's point stands: watchdogs show the reliability *engineering*, not how often a meeting goes through without you having to step in. The same report measures both.
+
+- **Meeting health**, per meeting of 20 minutes or more. It counts as clean when it has:
+  - no capture incident (`capture.health` not ok, or an app mic restart, which B1 also logs);
+  - no intelligence lane that stopped (`intelligence.error` with `degraded`);
+  - no server restart mid-meeting (the app logs one as `app.server_restart`);
+  - a normal end (`session.stop` present).
+
+  It reports the clean-meeting rate and, for the rest, which incident. It starts at the first instrumented meeting, and it is the number that later says whether the silent-failure class still occurs, rather than inferring that from history.
 - `npm run report:attention [--since <date>] [--min-minutes 20]` reads every session's `events.jsonl` and prints, per surface:
   - shown;
   - acted on (approved, copied, attached, opened);
@@ -165,21 +179,23 @@ This is not about tuning suggestion recall. That rule stands (`recall-over-preci
 
 A likely outcome is a **Focus** layout (transcript, suggestion cards, the coach line and the chat, with everything else one click away) as a preset beside Stage, not a removal. Nothing is removed without your call.
 
-## 7. Workstream D (optional): The server's entry point
+## 7. Workstream D: One owner for session state
 
-`server/src/index.ts` is 2,247 lines with module-level mutable state: `sessionStore`, `sessionActive`, the rolling-summary timers, pulses, flags.
+Planned, not opportunistic (revised after the second review). Scattered session state produced a steady series of lifecycle bugs (§1), and each new feature adds to it: the meeting chat's live context had to reach into five module variables.
 
-**Approach, only when a change next touches session lifecycle:**
-- Extract a `SessionRuntime` class that owns that state and its start and stop.
-- Move each `handleInboundMessage` case into `server/src/ws/`.
+**Approach**
+- **A `SessionRuntime` class** owns everything scoped to one meeting: the store, the event logger, active and post-session state, agenda status, goals, pulses, coach cards, fact flags, and the rolling-summary timer, id and abort. Starting a meeting builds a new one; stopping it disposes it. Nothing is reset by hand.
+  - *Could go wrong:* a late result (a worker finishing after stop) needs the ended session. *Handled by:* the runtime keeps a closed, read-only handle for the post-session window, as `persistActionPostSession` does today, and a test covers it.
+- **Move each `handleInboundMessage` case into `server/src/ws/`,** handed the runtime rather than reading module state.
 
-**Exit gate:** the same ratchet as A3, and C1 green.
-
-Not scheduled on its own. It pays for itself only when lifecycle work is already happening.
+**Exit gate**
+- Invariant 2 checked at runtime by a new test: start meeting A (agenda, goals, a pulse, a coach card, a chat turn, a fact flag), stop it, start meeting B. Nothing from A appears in B's broadcasts, snapshot or chat context.
+- `index.ts` joins the A3 ratchet.
+- C1 is green.
 
 ## 8. Not in this plan
 
-- **Automating the audio path.** Core Audio taps, TCC grants and AirPods renegotiation don't run in CI. The two watchdogs, the fail-loud rules (#28) and the opt-in `RealAudioVADTests` are the right level. Revisit if silent-audio classes keep appearing.
+- **Automating real device capture.** The capture *logic* is already unit tested: about 34 Swift tests cover the mic and meeting health verdicts, sample-rate snapping, frame cutting and device picking, plus the server's transcription and track-watch tests. What doesn't run in CI is a real Core Audio tap, TCC grants and AirPods renegotiation. The watchdogs, the fail-loud rules (#28) and the opt-in `RealAudioVADTests` cover that. B2's meeting-health rate is what says whether it is enough.
 - **A front-end framework or build step.** The build-free dashboard, served locally and working offline, is a feature. A1–A3 get the maintainability without one.
 - **Retuning suggestions.** That is covered by the replay evals and `recall-over-precision`.
 
@@ -188,6 +204,19 @@ Not scheduled on its own. It pays for itself only when lifecycle work is already
 - [ ] `ship.sh` refuses to install when a C1 spec fails, and each spec was shown to fail on its named bug.
 - [ ] `present/index.ts` is under 1,000 lines; the dashboard is `server/web/*`, byte-identical at the move.
 - [ ] ESLint in `npm test`; gotcha #22's guard retired; #24's replaced by `no-redeclare` (verified).
+- [ ] Split dashboard features are TypeScript modules under `npm run build`.
 - [ ] The file-size ratchet is in place, and passing.
-- [ ] `ui.*` events flow; `report:attention` exists with tests.
+- [ ] `SessionRuntime` owns session state, and the A-then-B isolation test passes.
+- [ ] `ui.*` and `app.*` events flow; `report:attention` reports use and the clean-meeting rate, with tests.
 - [ ] After 10 instrumented meetings: the report has been run and you have decided on each surface.
+
+## 10. Second review (2026-09-25)
+
+A second reviewer put the app at 7–7.5/10 and agreed maintainability is the constraint. What changed here as a result:
+
+- **#27 is no longer counted against the string.** It is a painting bug any frontend can have; C1's spec 6 is what catches it.
+- **Session state moved from optional to planned** (§7), with a runtime isolation test as its gate.
+- **Split modules are TypeScript** compiled by the existing `tsc`, so the compiler catches cross-feature breakage (§4, A3). A1 still moves to plain JS first: the move has to be byte-identical to be provable, and converting to TypeScript in the same step would not be.
+- **Reliability is measured, not inferred.** B2 now reports a clean-meeting rate alongside use (§6).
+- **"Audio tested by hand" was wrong** and is corrected in §8. The gap is real devices and permissions, not the capture logic.
+- **Doc drift fixed:** `.claude/rules/architecture.md` said the build ad-hoc signs and installs. It signs with Developer ID and does not install; `ship.sh` does.
