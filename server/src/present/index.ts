@@ -3010,10 +3010,19 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   .ev-menu .ev-menu-mark { width: 12px; flex: none; color: rgb(var(--text-secondary)); }
   .ev-menu .ev-menu-closed { color: rgb(var(--text-faint)); font-size: 10.5px; margin-left: auto; }
 
-  /* An evidence tab takes the column; the meeting stays in the DOM, running. */
+  /* An evidence tab takes the column below Quick Actions and the coach,
+     which stay on screen (2026-09-25: hiding them too made a stray tab
+     click look like the copilot had lost every button mid-meeting). The
+     rest of the meeting stays in the DOM, running. */
   #evView { display: none; }
-  .main.ev-on > :not(#evTabBar):not(#evView) { display: none !important; }
+  .main.ev-on > :not(#evTabBar):not(#evView):not(#quickActionsSlot):not(#coachDock) { display: none !important; }
   .main.ev-on #evView { display: block; }
+  /* With the tab bar up, Quick Actions and the coach stick below it, not
+     over it: at top 0 they slid across the bar on scroll and hid the tabs,
+     the way back to Meeting included. The bar is 40px from the scrollport
+     top, 16px into the content box; it covers the padding band itself. */
+  #evTabBar:not([hidden]) ~ #quickActionsSlot { top: 16px; box-shadow: none; }
+  #evTabBar:not([hidden]) ~ #coachDock { top: calc(var(--qa-height, 0px) + 16px); }
   .ev-view-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 12px; }
   .ev-view-title { font-size: 15px; font-weight: 600; color: var(--gb-text); line-height: 1.35; }
   .ev-view-note { font-size: 12.5px; color: var(--gb-subtext0); line-height: 1.45; margin-top: 3px; }
@@ -3513,7 +3522,6 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       <div id="evTabStrip" role="tablist" aria-label="Meeting and evidence"></div>
       <button id="evTabList" class="ev-tab-btn" type="button" data-ev-act="menu" title="All tabs" aria-label="All tabs" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
     </div>
-    <div id="evView" role="tabpanel"></div>
     <div id="quickActionsSlot"></div>
     <div class="intel-status" id="intelStatus" style="display:none">
       <span class="intel-dot"></span>
@@ -3521,6 +3529,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       <button class="intel-warn" id="intelWarn" style="display:none" aria-label="Recent intelligence errors" title="Recent intelligence errors">&#9888; <span id="intelWarnCount"></span></button>
     </div>
     <div id="coachDock"><div id="coachHead"></div><div id="coachSlot"></div></div>
+    <div id="evView" role="tabpanel"></div>
     <div id="pulseSlot"></div>
     <div id="coachHistory"></div>
     <div id="results"></div>
@@ -6273,13 +6282,14 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       .catch(function() { /* the meeting works without it */ });
   }
 
-  // The Meeting pill gets a dot when the coach, pulse or a card changes while
-  // evidence is showing, so nothing lands unseen behind a tab.
+  // The Meeting pill gets a dot when the pulse or a card changes while
+  // evidence is showing, so nothing lands unseen behind a tab. (The coach
+  // stays on screen over evidence, so it needs no dot.)
   if (typeof MutationObserver !== 'undefined') {
     var evWatch = new MutationObserver(function() {
       if (evActive !== 'meeting' && !evMeetingNew) { evMeetingNew = true; renderEvidence(); }
     });
-    ['results', 'coachSlot', 'pulseSlot'].forEach(function(id) {
+    ['results', 'pulseSlot'].forEach(function(id) {
       var el = document.getElementById(id);
       if (el) evWatch.observe(el, { childList: true, subtree: true });
     });

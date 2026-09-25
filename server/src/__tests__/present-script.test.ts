@@ -39,4 +39,21 @@ describe('/present dashboard script', () => {
     expect(open).toContain('document.body.appendChild(evMenuEl)');
     expect(open).not.toMatch(/getElementById\('evTabBar'\)[\s\S]*appendChild/);
   });
+  // A selected evidence tab hid Quick Actions and the coach with the rest of
+  // the column, so one stray click looked like every button was gone
+  // mid-meeting (2026-09-25). They stay, and the evidence renders below them.
+  it('keeps Quick Actions and the coach on screen over an evidence tab', () => {
+    const hide = /\.main\.ev-on > ([^{]+)\{ display: none !important; \}/.exec(PRESENT_HTML)?.[1] ?? '';
+    expect(hide).toContain(':not(#quickActionsSlot)');
+    expect(hide).toContain(':not(#coachDock)');
+    const qa = PRESENT_HTML.indexOf('<div id="quickActionsSlot">');
+    const coach = PRESENT_HTML.indexOf('<div id="coachDock">');
+    const view = PRESENT_HTML.indexOf('<div id="evView"');
+    expect(qa).toBeGreaterThan(-1);
+    expect(view).toBeGreaterThan(coach);
+    expect(coach).toBeGreaterThan(qa);
+    // Stuck at top 0 they slid over the tab bar on scroll and hid the tabs.
+    expect(PRESENT_HTML).toContain('#evTabBar:not([hidden]) ~ #quickActionsSlot { top: 16px;');
+    expect(PRESENT_HTML).toContain('#evTabBar:not([hidden]) ~ #coachDock { top: calc(var(--qa-height, 0px) + 16px); }');
+  });
 });
