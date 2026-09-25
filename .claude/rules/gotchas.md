@@ -237,6 +237,7 @@ this default.
 **Solution**: Write every escape doubled for the browser (`'\\n'`, `'\\u2014'`, `\\'`), as the rest of the file does. Never a backtick or `${` in the embedded JS.
 **Check**: `__tests__/present-script.test.ts` extracts each inline `<script>` from `PRESENT_HTML` and parses it with `vm.Script`. It fails on exactly this bug (verified by reintroducing it).
 **Pattern**: `server/src/present/index.ts` (`export const PRESENT_HTML`).
+**Structural fix, waiting on a trigger**: moving the dashboard out of the template literal ends this class (`docs/quality-plan.md` §0, A1). Hitting this bug again is one of A1's triggers.
 
 ### 23. Swift's `.iso8601` Rejects the Server's Milliseconds — Messages Silently Dropped
 **Symptom**: The app's word count stays 0, suggestion banners (Approve/Dismiss) never appear, and the menu bar's Copilot list stays empty, while the dashboard shows everything. Nothing in `app.log`.
@@ -251,6 +252,7 @@ this default.
 **Solution**: Prefix a new feature's names (`COACH_ASK_LABELS`). Wire clicks through `data-*` attributes and one delegated listener rather than `onclick="fn(\\'x\\')"`, which also sidesteps #22's escaping.
 **Check**: `__tests__/present-script.test.ts` fails when a two-space-indented `var`/`let`/`const`/`function` name repeats in an inline script (verified by reintroducing the bug).
 **Pattern**: `server/src/present/index.ts`.
+**Structural fix, waiting on a trigger**: A1 then A2 (`no-redeclare`) in `docs/quality-plan.md` §0. Hitting this bug again is one of A1's triggers.
 
 ### 25. The Title Bar Doesn't Drag the Panel — the Page Does
 **Symptom**: The panel can only be moved by its one-point border; pressing the top of the window does nothing.

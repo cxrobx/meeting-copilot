@@ -116,6 +116,7 @@ Full list in `.claude/rules/architecture.md`.
 | `.claude/rules/backend.md` | Node.js server patterns | Path: `server/**` |
 | `docs/README.md` | Documentation index | On demand |
 | `docs/api.md` | WebSocket & REST API reference | On demand |
+| `docs/quality-plan.md` | Quality work from the 2026-09-25 review. §0 is the table: the ship-gate test is scheduled (T212); dashboard extraction, session-state consolidation, attention telemetry and a clean-meeting rate each wait on a named trigger. Check it when you hit gotcha #22/#24, a session-lifecycle bug, or a request to build more dashboard | On demand |
 | `docs/setup.md` | Environment & deployment | On demand |
 | `CHANGELOG.md` | Version history | On demand |
 

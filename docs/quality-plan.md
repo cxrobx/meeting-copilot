@@ -1,9 +1,25 @@
 # Meeting Copilot Quality Plan
 
-- **Status:** Planned. Nothing below is built yet.
+- **Status:** C1 (the ship gate) is scheduled as **T212**. Everything else waits on a trigger (§0). Nothing is built yet.
 - **Created:** 2026-09-25, from the quality review after the meeting chat shipped (`b42e0b8`). Revised the same day after a second review (§10).
 - **Scope:** the `/present` dashboard's code shape, a ship-gating end-to-end test, and how much the live meeting asks of your attention. Optional: the server's entry point.
 - **Primary outcome:** move the review's weakest scores (architecture 5.5, testing 7) without changing what the app does, then use real usage data to decide what the live dashboard shows.
+
+## 0. Decision (2026-09-25): what to do now, and what waits
+
+The app works, and Meeting Copilot is "my own tools", so maintenance unless someone's paying (Current Focus). Most of this plan makes the code cheaper to change, which pays off only if it keeps changing a lot. So only the item that protects client meetings is scheduled. The rest waits here with the condition that brings it back.
+
+| Item | Status | Trigger that brings it back | What it buys | Plan |
+|---|---|---|---|---|
+| **C1** WebKit smoke test gating `ship.sh` | **Now: T212** | none | A broken dashboard or chat can't be installed the night before a client call | §5 |
+| **A1** Dashboard out of the TypeScript string, byte-identical | Waiting | A paid engagement needs a substantial dashboard feature, **or** an agent hits gotcha #22 or #24 again | Removes the #22/#24 class; `present/index.ts` from 10,065 to <1,000 lines | §4 |
+| **A2** ESLint for the dashboard; retire the #22/#24 text guards | Waiting | Right after A1 | Real checks instead of text matching | §4 |
+| **A3** Split into TypeScript modules as features are touched | Waiting | After A1, one feature at a time when it is next changed | The compiler catches one feature breaking another | §4 |
+| **D** One `SessionRuntime` owning session state; A-then-B isolation test | Waiting | The next session-lifecycle bug that reaches a real meeting (a stuck "Ending…", a result landing in the wrong meeting, state carried into the next one) | Ends the lifecycle-bug series; invariant 2 checked at runtime | §7 |
+| **B1–B3** Attention telemetry, report, decide what the meeting shows | Waiting | You find the live dashboard too busy in a real meeting | A Focus layout, from data rather than taste | §6 |
+| **Clean-meeting rate** from the event logs that already exist, with no new instrumentation | Waiting | You doubt the app's reliability in a client call | One number: how often a meeting runs without you stepping in | §6 (B2) |
+
+When a trigger fires, file the item as a CXTasks task pointing at its section, and move its row to "Now".
 
 ## 1. Where this starts
 
