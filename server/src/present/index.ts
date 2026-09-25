@@ -2968,8 +2968,10 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   .ev-tab-btn:hover, .ev-tab-btn[aria-expanded=true] { background: rgb(var(--text-primary) / .08); color: rgb(var(--text-primary)); }
   .ev-tab-btn svg { width: 15px; height: 15px; }
   .ev-tab-btn:focus-visible { outline: 2px solid rgb(var(--accent)); outline-offset: -2px; }
+  /* On <body>, fixed, from the button's rect (as Onyx's OnyxMenu): drawn inside
+     the sticky bar in the scrolling column, it hit-tested but never painted. */
   .ev-menu {
-    position: absolute; z-index: 20; min-width: 220px; max-width: 360px; padding: 4px;
+    position: fixed; z-index: 1000; min-width: 220px; max-width: 360px; padding: 4px;
     border: 1px solid rgb(var(--border-default)); border-radius: 10px;
     background: rgb(var(--bg-sidebar)); box-shadow: 0 18px 50px rgb(0 0 0 / .24), 0 2px 8px rgb(0 0 0 / .08);
   }
@@ -6169,10 +6171,10 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     evMenuEl.setAttribute('role', 'menu');
     evMenuEl.setAttribute('aria-label', 'All tabs');
     evMenuEl.innerHTML = row('meeting', 'Meeting', false) + evTabs.map(function(t) { return row(t.index, t.title, !!evClosed[t.index]); }).join('');
-    var bar = document.getElementById('evTabBar');
-    bar.appendChild(evMenuEl);
-    evMenuEl.style.top = (list.offsetTop + list.offsetHeight + 4) + 'px';
-    evMenuEl.style.left = Math.max(8, list.offsetLeft + list.offsetWidth - evMenuEl.offsetWidth) + 'px';
+    document.body.appendChild(evMenuEl);
+    var r = list.getBoundingClientRect();
+    evMenuEl.style.top = (r.bottom + 4) + 'px';
+    evMenuEl.style.left = Math.max(8, Math.min(r.right - evMenuEl.offsetWidth, window.innerWidth - evMenuEl.offsetWidth - 8)) + 'px';
     list.setAttribute('aria-expanded', 'true');
     var first = evMenuEl.querySelector('button');
     if (first) first.focus();
@@ -6256,7 +6258,12 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     }
   });
 
-  window.addEventListener('resize', function() { if (evTabs.length) evFitTabs(); });
+  window.addEventListener('resize', function() { evCloseMenu(); if (evTabs.length) evFitTabs(); });
+  // Fixed to the viewport, the menu would float free of its button on scroll.
+  (function() {
+    var main = document.getElementById('mainCol');
+    if (main) main.addEventListener('scroll', evCloseMenu, { passive: true });
+  })();
 
   window.downloadMockupHtml = function(id) {
     var html = mockupHtml.get(id);

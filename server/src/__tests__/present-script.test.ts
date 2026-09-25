@@ -29,4 +29,14 @@ describe('/present dashboard script', () => {
     }
     expect([...seen].filter(([, n]) => n > 1).map(([name]) => name)).toEqual([]);
   });
+  // Gotcha #27. The All tabs menu, drawn inside the sticky tab bar in the
+  // scrolling main column, hit-tested as open (clicks reached it) but never
+  // painted, so the button seemed dead (2026-09-24). A popover in that bar
+  // goes on <body>, fixed, placed from its button's rect.
+  it('draws the evidence tabs menu on <body>, fixed, not inside the sticky bar', () => {
+    expect(PRESENT_HTML).toMatch(/\.ev-menu \{[^}]*position: fixed;/);
+    const open = /function evOpenMenu\(\) \{([\s\S]*?)\n  \}\n/.exec(PRESENT_HTML)?.[1] ?? '';
+    expect(open).toContain('document.body.appendChild(evMenuEl)');
+    expect(open).not.toMatch(/getElementById\('evTabBar'\)[\s\S]*appendChild/);
+  });
 });
