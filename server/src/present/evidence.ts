@@ -9,10 +9,12 @@ import { buildKitPage, escapeHtml } from './view-page.js';
  * Evidence tabs: a staged prep's live pages and snapshots, for switching to
  * mid-meeting and pasting into the call chat (prep/staged.ts has the format).
  *
- * They ride the card ↗ path (GET /present/action/:id/view): a tab's ↗ opens
- * GET /present/evidence/:i/view, a same-server page outside /present, which
- * the app's navigation policy hands to the default browser. A live URL goes
- * there directly, since that is where the logins are. The server only ever
+ * The dashboard shows them as tabs atop its main column (Onyx's design), a
+ * snapshot in place from /file. Its ↗ Browser tab rides the card ↗ path
+ * (GET /present/action/:id/view): GET /present/evidence/:i/view is a
+ * same-server page outside /present, which the app's navigation policy hands
+ * to the default browser. A live URL goes there directly, since that is where
+ * the logins are. The server only ever
  * serves a snapshot by its index in the session's own prep.json, never by a
  * path from the request.
  */

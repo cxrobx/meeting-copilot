@@ -2915,72 +2915,103 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   .toc-heading.active.depth-3 { padding-left: 26px; }
 
   /* ─── Evidence tabs (a staged prep's live pages + snapshots) ── */
-  .evidence-panel {
-    padding: 8px 4px 12px;
-    border-bottom: 1px solid var(--gb-surface2);
-    margin-bottom: 12px;
+  /* Onyx's tab bar (ask-widget src/onyx/tabs_ui.py), pinned: a band atop the
+     main column holding a segmented strip, the tab showing raised in ink.
+     Onyx's --ink/--secondary/--faint/--line are our --text-primary/
+     --text-secondary/--text-faint/--border-default. "Meeting" is the column
+     as it always was; each other tab shows one piece of evidence in its place. */
+  #evTabBar {
+    position: sticky; top: -24px; z-index: 6;
+    display: flex; align-items: center; gap: 2px;
+    height: 40px; margin: -24px -32px 16px; padding: 0 32px;
+    background: var(--gb-base);
+    border-bottom: 1px solid rgb(var(--border-subtle));
   }
-  .evidence-panel.hidden { display: none; }
-  .evidence-inline { display: none; }
-  /* The right rail hides below 1400px; the same panel then sits atop the
-     main column, so the evidence never disappears with it. */
-  @media (max-width: 1400px) {
-    .layout.three-col .evidence-inline:not(.hidden) { display: block; border: 1px solid var(--gb-surface2); border-radius: 10px; margin: 0 0 12px; padding: 8px 8px 10px; }
-    .layout.three-col .evidence-inline .ev-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
-    .layout.three-col .evidence-inline .ev-item + .ev-item { margin-top: 0; }
+  #evTabBar[hidden] { display: none; }
+  #evTabStrip {
+    display: flex; align-items: center; gap: 2px; min-width: 0;
+    padding: 2px; overflow: hidden; border-radius: 9px;
+    background: rgb(var(--text-primary) / .055);
   }
-  .ev-item {
-    padding: 6px 4px;
-    border-radius: 6px;
+  .ev-tab[hidden] { display: none; }
+  .ev-tab {
+    display: flex; align-items: center; flex: 0 1 auto; gap: 4px;
+    width: 180px; min-width: 88px; height: 26px; padding: 0 3px 0 10px;
+    border-radius: 7px; color: rgb(var(--text-secondary));
+    font-size: 12px; font-weight: 500; cursor: default;
+    user-select: none; -webkit-user-select: none;
+    transition: background-color .12s, color .12s;
   }
-  .ev-item + .ev-item { margin-top: 6px; }
-  .ev-thumb {
-    display: block;
-    width: 100%;
-    max-height: 96px;
-    object-fit: cover;
-    object-position: top left;
-    border-radius: 6px;
-    border: 1px solid var(--gb-surface2);
-    cursor: zoom-in;
-    background: var(--gb-surface0);
-    margin-bottom: 6px;
+  .ev-tab.ev-tab-meeting { width: auto; min-width: 0; padding-right: 10px; }
+  .ev-tab:hover { background: rgb(var(--text-primary) / .05); color: rgb(var(--text-primary)); }
+  .ev-tab[aria-selected=true] {
+    background: rgb(var(--bg-elevated)); color: rgb(var(--text-primary));
+    font-weight: 600; box-shadow: 0 1px 2px rgb(0 0 0 / .1);
   }
-  .ev-file {
-    display: inline-block;
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--gb-subtext0);
-    border: 1px solid var(--gb-surface2);
-    border-radius: 4px;
-    padding: 1px 5px;
-    margin-bottom: 4px;
+  .ev-tab:focus-visible { outline: 2px solid rgb(var(--accent)); outline-offset: -2px; }
+  .ev-tab-title { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .ev-tab-dot { width: 6px; height: 6px; border-radius: 50%; background: rgb(var(--accent)); flex: none; }
+  .ev-tab-x {
+    display: grid; flex: none; place-items: center; width: 18px; height: 18px;
+    padding: 0; border: 0; border-radius: 5px; background: transparent;
+    color: rgb(var(--text-faint)); opacity: 0; transition: opacity .12s;
   }
-  .ev-title { font-size: 11px; font-weight: 600; color: var(--gb-text); line-height: 1.4; }
-  .ev-note { font-size: 10.5px; color: var(--gb-subtext0); line-height: 1.4; margin-top: 2px; }
-  .ev-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+  .ev-tab:hover .ev-tab-x, .ev-tab[aria-selected=true] .ev-tab-x { opacity: 1; }
+  .ev-tab-x:hover { background: rgb(var(--text-primary) / .1); color: rgb(var(--text-primary)); }
+  .ev-tab-x svg, .ev-tab-btn svg { pointer-events: none; }
+  .ev-tab-x svg { width: 12px; height: 12px; }
+  .ev-tab-btn {
+    display: grid; flex: none; place-items: center; width: 26px; height: 26px;
+    padding: 0; border: 0; border-radius: 7px; background: transparent;
+    color: rgb(var(--text-secondary)); position: relative;
+  }
+  .ev-tab-btn:hover, .ev-tab-btn[aria-expanded=true] { background: rgb(var(--text-primary) / .08); color: rgb(var(--text-primary)); }
+  .ev-tab-btn svg { width: 15px; height: 15px; }
+  .ev-tab-btn:focus-visible { outline: 2px solid rgb(var(--accent)); outline-offset: -2px; }
+  .ev-menu {
+    position: absolute; z-index: 20; min-width: 220px; max-width: 360px; padding: 4px;
+    border: 1px solid rgb(var(--border-default)); border-radius: 10px;
+    background: rgb(var(--bg-sidebar)); box-shadow: 0 18px 50px rgb(0 0 0 / .24), 0 2px 8px rgb(0 0 0 / .08);
+  }
+  .ev-menu button {
+    display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px;
+    border: 0; border-radius: 6px; background: transparent; text-align: left;
+    color: rgb(var(--text-primary)); font: 500 12px var(--font-sans); cursor: default;
+  }
+  .ev-menu button:hover, .ev-menu button:focus-visible { background: rgb(var(--text-primary) / .07); outline: none; }
+  .ev-menu .ev-menu-mark { width: 12px; flex: none; color: rgb(var(--text-secondary)); }
+  .ev-menu .ev-menu-closed { color: rgb(var(--text-faint)); font-size: 10.5px; margin-left: auto; }
+
+  /* An evidence tab takes the column; the meeting stays in the DOM, running. */
+  #evView { display: none; }
+  .main.ev-on > :not(#evTabBar):not(#evView) { display: none !important; }
+  .main.ev-on #evView { display: block; }
+  .ev-view-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 12px; }
+  .ev-view-title { font-size: 15px; font-weight: 600; color: var(--gb-text); line-height: 1.35; }
+  .ev-view-note { font-size: 12.5px; color: var(--gb-subtext0); line-height: 1.45; margin-top: 3px; }
+  .ev-view-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; flex: none; }
   .ev-btn {
-    font-family: var(--font-sans);
-    font-size: 10px;
-    font-weight: 600;
-    padding: 2px 7px;
-    border-radius: 5px;
-    border: 1px solid var(--gb-surface2);
-    background: transparent;
-    color: var(--gb-subtext1);
-    cursor: pointer;
+    font-family: var(--font-sans); font-size: 11px; font-weight: 600;
+    padding: 4px 10px; border-radius: 6px;
+    border: 1px solid var(--gb-surface2); background: transparent;
+    color: var(--gb-subtext0); cursor: pointer; white-space: nowrap;
   }
   .ev-btn:hover { background: var(--gb-surface1); color: var(--gb-text); }
-  .ev-lightbox {
-    position: fixed; inset: 0; z-index: 400;
-    background: rgb(0 0 0 / 0.72);
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 10px; padding: 32px;
+  .ev-btn.primary { background: rgb(var(--accent)); border-color: transparent; color: rgb(var(--accent-ink)); }
+  .ev-figure { margin: 0; }
+  .ev-figure img {
+    display: block; max-width: 100%; height: auto; margin: 0 auto;
+    border-radius: 8px; border: 1px solid var(--gb-surface2); background: #fff;
   }
-  .ev-lightbox img { max-width: 100%; max-height: calc(100vh - 120px); border-radius: 8px; box-shadow: 0 10px 40px rgb(0 0 0 / 0.5); background: #fff; }
-  .ev-lightbox .ev-lb-bar { display: flex; gap: 8px; align-items: center; color: #eee; font-size: 12px; }
-  .ev-lightbox .ev-btn { color: #eee; border-color: rgb(255 255 255 / 0.3); }
-  .ev-lightbox .ev-btn:hover { background: rgb(255 255 255 / 0.12); color: #fff; }
+  .ev-frame {
+    display: block; width: 100%; height: calc(100vh - 230px); min-height: 360px;
+    border: 1px solid var(--gb-surface2); border-radius: 8px; background: #fff;
+  }
+  .ev-live-card {
+    border: 1px dashed var(--gb-surface2); border-radius: 10px; padding: 28px 24px;
+    text-align: center; color: var(--gb-subtext0); font-size: 12.5px; line-height: 1.5;
+  }
+  .ev-live-card .ev-live-url { font-family: var(--font-mono); font-size: 11px; color: var(--gb-overlay2); word-break: break-all; margin: 8px 0 14px; }
 
   /* ─── Agenda Tracker Panel ─────────────────────────────────── */
   .agenda-panel {
@@ -3450,7 +3481,11 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   <!-- Main Column -->
   <div class="main" id="mainCol">
     <div id="idleOverlay"></div>
-    <div class="evidence-panel evidence-inline hidden" id="evidenceInline" aria-label="Evidence"></div>
+    <div id="evTabBar" hidden>
+      <div id="evTabStrip" role="tablist" aria-label="Meeting and evidence"></div>
+      <button id="evTabList" class="ev-tab-btn" type="button" data-ev-act="menu" title="All tabs" aria-label="All tabs" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
+    </div>
+    <div id="evView" role="tabpanel"></div>
     <div id="quickActionsSlot"></div>
     <div class="intel-status" id="intelStatus" style="display:none">
       <span class="intel-dot"></span>
@@ -3465,7 +3500,6 @@ export const PRESENT_HTML = `<!DOCTYPE html>
 
   <!-- TOC Sidebar -->
   <nav class="toc" id="toc">
-    <div class="evidence-panel hidden" id="evidencePanel" aria-label="Evidence"></div>
     <div class="agenda-panel hidden" id="agendaPanel">
       <div class="agenda-header">
         <span class="agenda-title">Agenda</span>
@@ -5946,13 +5980,18 @@ export const PRESENT_HTML = `<!DOCTYPE html>
 
   // ─── Evidence tabs (a staged prep's live pages + snapshots) ──
   // present/evidence.ts. A staged prep can carry tabs; when its session starts
-  // the server sends evidence.tabs, opens the live ones in the default
-  // browser, and serves each snapshot by index. They ride the card ↗ path:
-  // a snapshot's "Open" is /present/evidence/:i/view, a same-server page the
-  // app hands to the browser, and a live tab opens its URL, where the logins
-  // are. Copy link / Copy image are for pasting into the call chat.
+  // the server sends evidence.tabs and opens the live ones in the default
+  // browser (where the logins are). Here they are tabs in Onyx's design atop
+  // the main column: "Meeting" is the column as it always was, and each other
+  // tab shows one piece of evidence in its place, inside the app, with Copy
+  // image / Copy link for the call chat. ↗ Browser tab is the card ↗ path
+  // (/present/evidence/:i/view), for a screen share.
   var evTabs = [];
   var evSessionId = null;
+  var evActive = 'meeting'; // or a tab's index
+  var evClosed = {};        // index -> true: off the strip, back from All tabs
+  var evMeetingNew = false; // the meeting moved while evidence was showing
+  var EV_X_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
 
   // The page's escapeHtml leaves quotes alone; attributes need them escaped.
   function evAttr(v) { return escapeHtml(String(v)).replace(/"/g, '&quot;'); }
@@ -5961,48 +6000,129 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     return '/present/evidence/' + i + '/' + what + (evSessionId ? '?session=' + encodeURIComponent(evSessionId) : '');
   }
 
-  function evItemHtml(t) {
-    var h = '<div class="ev-item" data-ev-i="' + t.index + '">';
-    if (t.snapshot && t.snapshot.kind === 'image') {
-      h += '<img class="ev-thumb" data-ev-act="zoom" data-ev-i="' + t.index + '" src="' + evAttr(evUrl(t.index, 'file')) +
-        '" alt="' + evAttr(t.title) + '" loading="lazy">';
-    } else if (t.snapshot) {
-      h += '<span class="ev-file">' + escapeHtml(t.snapshot.kind.toUpperCase() + ' \\u00b7 ' + t.snapshot.name) + '</span>';
+  // Strip order: Meeting, then the open evidence tabs.
+  function evStripKeys() {
+    var keys = ['meeting'];
+    evTabs.forEach(function(t) { if (!evClosed[t.index]) keys.push(t.index); });
+    return keys;
+  }
+
+  function evPillHtml(key) {
+    var on = evActive === key;
+    if (key === 'meeting') {
+      return '<div class="ev-tab ev-tab-meeting" role="tab" id="evTab-meeting" data-ev-act="select" data-ev-tab="meeting" aria-selected="' + on +
+        '" tabindex="' + (on ? 0 : -1) + '" title="The meeting (\\u23181)"><span class="ev-tab-title">Meeting</span>' +
+        (evMeetingNew && !on ? '<span class="ev-tab-dot" aria-label="New since you looked"></span>' : '') + '</div>';
     }
-    h += '<div class="ev-title">' + escapeHtml(t.title) + '</div>';
-    if (t.note) h += '<div class="ev-note">' + escapeHtml(t.note) + '</div>';
-    h += '<div class="ev-actions">';
-    if (t.url) h += '<button class="ev-btn" data-ev-act="live" data-ev-i="' + t.index + '" title="Open the live page in your browser">\\u2197 Live</button>';
-    if (t.snapshot) h += '<button class="ev-btn" data-ev-act="view" data-ev-i="' + t.index + '" title="Open the snapshot in a browser tab">\\u2197 Snapshot</button>';
-    if (t.url) h += '<button class="ev-btn" data-ev-act="link" data-ev-i="' + t.index + '" title="Copy the link for the call chat">Copy link</button>';
-    if (t.snapshot && t.snapshot.kind === 'image') h += '<button class="ev-btn" data-ev-act="image" data-ev-i="' + t.index + '" title="Copy the picture for the call chat">Copy image</button>';
-    h += '</div></div>';
-    return h;
+    var t = evTabs[key];
+    var label = evAttr(t.title);
+    return '<div class="ev-tab" role="tab" id="evTab-' + key + '" data-ev-act="select" data-ev-tab="' + key + '" aria-selected="' + on +
+      '" tabindex="' + (on ? 0 : -1) + '" title="' + label + '"><span class="ev-tab-title">' + escapeHtml(t.title) + '</span>' +
+      '<button class="ev-tab-x" type="button" tabindex="-1" data-ev-act="close" data-ev-tab="' + key + '" title="Close tab" aria-label="Close ' + label + '">' + EV_X_ICON + '</button></div>';
+  }
+
+  // Onyx's fitTabs: when the pills overflow, hide the ones farthest from the
+  // tab showing; the All tabs button says how many are hidden.
+  function evFitTabs() {
+    var strip = document.getElementById('evTabStrip');
+    var list = document.getElementById('evTabList');
+    if (!strip || !list) return;
+    var pills = Array.prototype.slice.call(strip.children);
+    pills.forEach(function(p) { p.hidden = false; });
+    var at = pills.findIndex(function(p) { return p.getAttribute('aria-selected') === 'true'; });
+    var lo = 0, hi = pills.length - 1;
+    while (strip.scrollWidth > strip.clientWidth + 1 && hi > lo) {
+      if (hi > at && (hi - at >= at - lo || lo >= at)) { pills[hi].hidden = true; hi--; }
+      else if (lo < at && lo !== 0) { pills[lo].hidden = true; lo++; }
+      else if (lo === 0 && at > 1) { pills[1].hidden = true; lo = 1; }
+      else break;
+    }
+    var more = pills.filter(function(p) { return p.hidden; }).length + Object.keys(evClosed).length;
+    var label = more ? 'All tabs (' + more + ' more)' : 'All tabs';
+    list.title = label;
+    list.setAttribute('aria-label', label);
+  }
+
+  function evRenderView() {
+    var main = document.getElementById('mainCol');
+    var view = document.getElementById('evView');
+    if (!main || !view) return;
+    var t = evActive === 'meeting' ? null : evTabs[evActive];
+    main.classList.toggle('ev-on', !!t);
+    if (!t) { view.innerHTML = ''; return; }
+    view.setAttribute('aria-labelledby', 'evTab-' + evActive);
+    var i = t.index;
+    var acts = '';
+    if (t.snapshot && t.snapshot.kind === 'image') acts += '<button class="ev-btn primary" data-ev-act="image" data-ev-i="' + i + '">Copy image</button>';
+    if (t.url) acts += '<button class="ev-btn' + (t.snapshot ? '' : ' primary') + '" data-ev-act="link" data-ev-i="' + i + '">Copy link</button>';
+    if (t.url) acts += '<button class="ev-btn" data-ev-act="live" data-ev-i="' + i + '" title="Opens in your browser, where you are logged in">\\u2197 Open live</button>';
+    if (t.snapshot) acts += '<button class="ev-btn" data-ev-act="view" data-ev-i="' + i + '" title="The snapshot in a browser tab, for a screen share">\\u2197 Browser tab</button>';
+    var h = '<div class="ev-view-head"><div><div class="ev-view-title">' + escapeHtml(t.title) + '</div>' +
+      (t.note ? '<div class="ev-view-note">' + escapeHtml(t.note) + '</div>' : '') +
+      '</div><div class="ev-view-actions">' + acts + '</div></div>';
+    if (t.snapshot && t.snapshot.kind === 'image') {
+      h += '<figure class="ev-figure"><img src="' + evAttr(evUrl(i, 'file')) + '" alt="' + evAttr(t.title) + '"></figure>';
+    } else if (t.snapshot) {
+      // A PDF renders in the frame; an html snapshot comes sandboxed (the
+      // server's CSP), so its scripts cannot reach this page or the API.
+      h += '<iframe class="ev-frame" src="' + evAttr(evUrl(i, 'file')) + '" title="' + evAttr(t.title) + '"' +
+        (t.snapshot.kind === 'html' ? ' sandbox="allow-scripts"' : '') + '></iframe>';
+    } else {
+      h += '<div class="ev-live-card">This page needs your login, so it opens in your browser rather than here.' +
+        '<div class="ev-live-url">' + escapeHtml(t.url || '') + '</div>' +
+        '<button class="ev-btn primary" data-ev-act="live" data-ev-i="' + i + '">\\u2197 Open live</button></div>';
+    }
+    view.innerHTML = h;
   }
 
   function renderEvidence() {
-    var html = evTabs.length
-      ? '<div class="agenda-header"><span class="agenda-title">Evidence</span><span class="agenda-progress">' + evTabs.length + ' tab' + (evTabs.length === 1 ? '' : 's') + '</span></div>' +
-        '<div class="ev-list">' + evTabs.map(evItemHtml).join('') + '</div>'
-      : '';
-    ['evidencePanel', 'evidenceInline'].forEach(function(id) {
-      var el = document.getElementById(id);
-      if (!el) return;
-      el.innerHTML = html;
-      el.classList.toggle('hidden', !evTabs.length);
-    });
+    var bar = document.getElementById('evTabBar');
+    var strip = document.getElementById('evTabStrip');
+    if (!bar || !strip) return;
+    if (evActive !== 'meeting' && (!evTabs[evActive] || evClosed[evActive])) evActive = 'meeting';
+    if (evActive === 'meeting') evMeetingNew = false;
+    bar.hidden = !evTabs.length;
+    strip.innerHTML = evTabs.length ? evStripKeys().map(evPillHtml).join('') : '';
+    evRenderView();
+    evFitTabs();
+  }
+
+  function evSelect(key, focus) {
+    evActive = key;
+    evCloseMenu();
+    renderEvidence();
+    if (focus) {
+      var pill = document.getElementById('evTab-' + key);
+      if (pill) pill.focus();
+    }
+    var main = document.getElementById('mainCol');
+    if (main) main.scrollTop = 0;
+  }
+
+  function evCloseTab(key) {
+    if (key === 'meeting') return;
+    var keys = evStripKeys();
+    var at = keys.indexOf(key);
+    evClosed[key] = true;
+    if (evActive === key) evActive = keys[at + 1] !== undefined ? keys[at + 1] : keys[at - 1];
+    renderEvidence();
   }
 
   function setEvidence(tabs, forSession) {
+    var fresh = forSession && forSession !== evSessionId;
     evTabs = Array.isArray(tabs) ? tabs : [];
     if (forSession) evSessionId = forSession;
+    if (fresh) { evActive = 'meeting'; evClosed = {}; evMeetingNew = false; }
     renderEvidence();
   }
 
   function clearEvidence() {
     evTabs = [];
     evSessionId = null;
-    evCloseLightbox();
+    evActive = 'meeting';
+    evClosed = {};
+    evMeetingNew = false;
+    evCloseMenu();
     renderEvidence();
   }
 
@@ -6015,10 +6135,53 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       .catch(function() { /* the meeting works without it */ });
   }
 
+  // The Meeting pill gets a dot when the coach, pulse or a card changes while
+  // evidence is showing, so nothing lands unseen behind a tab.
+  if (typeof MutationObserver !== 'undefined') {
+    var evWatch = new MutationObserver(function() {
+      if (evActive !== 'meeting' && !evMeetingNew) { evMeetingNew = true; renderEvidence(); }
+    });
+    ['results', 'coachSlot', 'pulseSlot'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (el) evWatch.observe(el, { childList: true, subtree: true });
+    });
+  }
+
+  // All tabs: every tab, the hidden and the closed ones included.
+  var evMenuEl = null;
+  function evCloseMenu() {
+    if (!evMenuEl) return;
+    evMenuEl.remove();
+    evMenuEl = null;
+    var list = document.getElementById('evTabList');
+    if (list) list.setAttribute('aria-expanded', 'false');
+  }
+  function evOpenMenu() {
+    var list = document.getElementById('evTabList');
+    if (!list) return;
+    evCloseMenu();
+    var row = function(key, title, closed) {
+      return '<button role="menuitem" data-ev-act="pick" data-ev-tab="' + key + '"><span class="ev-menu-mark">' + (evActive === key ? '\\u2713' : '') + '</span>' +
+        '<span class="ev-tab-title">' + escapeHtml(title) + '</span>' + (closed ? '<span class="ev-menu-closed">closed</span>' : '') + '</button>';
+    };
+    evMenuEl = document.createElement('div');
+    evMenuEl.className = 'ev-menu';
+    evMenuEl.setAttribute('role', 'menu');
+    evMenuEl.setAttribute('aria-label', 'All tabs');
+    evMenuEl.innerHTML = row('meeting', 'Meeting', false) + evTabs.map(function(t) { return row(t.index, t.title, !!evClosed[t.index]); }).join('');
+    var bar = document.getElementById('evTabBar');
+    bar.appendChild(evMenuEl);
+    evMenuEl.style.top = (list.offsetTop + list.offsetHeight + 4) + 'px';
+    evMenuEl.style.left = Math.max(8, list.offsetLeft + list.offsetWidth - evMenuEl.offsetWidth) + 'px';
+    list.setAttribute('aria-expanded', 'true');
+    var first = evMenuEl.querySelector('button');
+    if (first) first.focus();
+  }
+
   function evCopyImage(i) {
     var url = evUrl(i, 'file');
     function ok() { showToast('Image copied \\u2014 paste it into the call chat'); }
-    function fail() { showToast('Could not copy the image \\u2014 open the snapshot and copy it there', { error: true }); }
+    function fail() { showToast('Could not copy the image \\u2014 open it in a browser tab and copy it there', { error: true }); }
     var nb = window.__copilotNativeBridge;
     // In the app: AppKit puts it on the pasteboard (WKWebView's own clipboard
     // API needs a gesture it doesn't reliably keep across a fetch).
@@ -6037,47 +6200,63 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]).then(ok, fail);
   }
 
-  var evLightboxEl = null;
-  function evCloseLightbox() {
-    if (evLightboxEl) { evLightboxEl.remove(); evLightboxEl = null; }
-  }
-  function evOpenLightbox(i) {
-    var t = evTabs[i];
-    if (!t || !t.snapshot) return;
-    evCloseLightbox();
-    evLightboxEl = document.createElement('div');
-    evLightboxEl.className = 'ev-lightbox';
-    evLightboxEl.setAttribute('role', 'dialog');
-    evLightboxEl.setAttribute('aria-label', t.title);
-    evLightboxEl.innerHTML = '<img src="' + evAttr(evUrl(i, 'file')) + '" alt="' + evAttr(t.title) + '">' +
-      '<div class="ev-lb-bar"><span>' + escapeHtml(t.title) + '</span>' +
-      '<button class="ev-btn" data-ev-act="image" data-ev-i="' + i + '">Copy image</button>' +
-      (t.url ? '<button class="ev-btn" data-ev-act="link" data-ev-i="' + i + '">Copy link</button>' : '') +
-      '<button class="ev-btn" data-ev-act="view" data-ev-i="' + i + '">\\u2197 Browser tab</button>' +
-      '<button class="ev-btn" data-ev-act="close">Close</button></div>';
-    evLightboxEl.addEventListener('click', function(e) { if (e.target === evLightboxEl) evCloseLightbox(); });
-    document.body.appendChild(evLightboxEl);
-  }
-  document.addEventListener('keydown', function(e) {
-    if (evLightboxEl && e.key === 'Escape') { e.stopPropagation(); evCloseLightbox(); }
-  }, true);
+  function evKey(v) { return v === 'meeting' ? 'meeting' : Number(v); }
 
   document.addEventListener('click', function(e) {
-    var btn = e.target && e.target.closest ? e.target.closest('[data-ev-act]') : null;
-    if (!btn) return;
+    var el = e.target && e.target.closest ? e.target.closest('[data-ev-act]') : null;
+    if (!el) {
+      if (evMenuEl && !(e.target.closest && e.target.closest('.ev-menu'))) evCloseMenu();
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
-    var act = btn.getAttribute('data-ev-act');
-    if (act === 'close') { evCloseLightbox(); return; }
-    var i = Number(btn.getAttribute('data-ev-i'));
+    var act = el.getAttribute('data-ev-act');
+    if (act === 'menu') { evMenuEl ? evCloseMenu() : evOpenMenu(); return; }
+    if (act === 'select') { evSelect(evKey(el.getAttribute('data-ev-tab'))); return; }
+    if (act === 'close') { evCloseTab(evKey(el.getAttribute('data-ev-tab'))); return; }
+    if (act === 'pick') {
+      var key = evKey(el.getAttribute('data-ev-tab'));
+      if (key !== 'meeting') delete evClosed[key];
+      evSelect(key, true);
+      return;
+    }
+    var i = Number(el.getAttribute('data-ev-i'));
     var t = evTabs[i];
     if (!t) return;
     if (act === 'live' && t.url) window.open(t.url, '_blank');
     else if (act === 'view') window.open(evUrl(i, 'view'), '_blank');
     else if (act === 'link' && t.url) mcPubCopy(t.url);
     else if (act === 'image') evCopyImage(i);
-    else if (act === 'zoom') evOpenLightbox(i);
   });
+
+  // Onyx's keys: arrows, Home and End move along the strip, Delete closes;
+  // Escape leaves the menu. ⌘1 is Meeting, ⌘2.. the evidence in strip order.
+  document.addEventListener('keydown', function(e) {
+    if (evMenuEl && e.key === 'Escape') {
+      e.preventDefault();
+      evCloseMenu();
+      var list = document.getElementById('evTabList');
+      if (list) list.focus();
+      return;
+    }
+    if (!evTabs.length) return;
+    var pill = e.target && e.target.closest ? e.target.closest('#evTabStrip .ev-tab') : null;
+    if (pill) {
+      var keys = evStripKeys();
+      var n = keys.length;
+      var at = keys.indexOf(evKey(pill.getAttribute('data-ev-tab')));
+      var to = e.key === 'ArrowRight' ? (at + 1) % n : e.key === 'ArrowLeft' ? (at + n - 1) % n
+        : e.key === 'Home' ? 0 : e.key === 'End' ? n - 1 : -1;
+      if (to >= 0) { e.preventDefault(); evSelect(keys[to], true); return; }
+      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); evCloseTab(keys[at]); return; }
+    }
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && /^[1-9]$/.test(e.key)) {
+      var target = evStripKeys()[Number(e.key) - 1];
+      if (target !== undefined) { e.preventDefault(); evSelect(target, true); }
+    }
+  });
+
+  window.addEventListener('resize', function() { if (evTabs.length) evFitTabs(); });
 
   window.downloadMockupHtml = function(id) {
     var html = mockupHtml.get(id);

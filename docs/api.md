@@ -47,7 +47,7 @@
 | `pulse.failed` | A pulse could not be read | `reason`, `mode`, `trigger` |
 | `pulse.closeout` | A timer's close-out (calendar or wrap-up language) found things to settle; the app raises a notification | `body` |
 | `ask.state` | One of the coach's questions was taken (`started`), answered (`done`) or `failed`. The dashboard's buttons show progress from it; the app turns `title`/`body` into a notification when the dashboard is not in front | `kind` (checkin/missed/suggest/wrapup), `phase`, `title?`, `body?`, `empty?` |
-| `evidence.tabs` | A staged prep's evidence tabs, once its `meeting.prep` attaches. The dashboard's Evidence panel renders them; a reload fetches `GET /present/evidence` instead | `tabs [{ index, title, url, note, snapshot: {kind: image\|pdf\|html, name} \| null }]` |
+| `evidence.tabs` | A staged prep's evidence tabs, once its `meeting.prep` attaches. The dashboard renders them as tabs atop the main column; a reload fetches `GET /present/evidence` instead | `tabs [{ index, title, url, note, snapshot: {kind: image\|pdf\|html, name} \| null }]` |
 | `publish.state` | A card's publish-as-link job moved on: `polishing` → `uploading` → `done` (with `url`) or `failed` (with `error`); `revoked` after Unpublish. Replay pages, which have no WebSocket, poll `GET /present/published` instead | `actionId, phase, url?, error?` |
 | `metrics` | Debug metrics snapshot | `data` |
 
