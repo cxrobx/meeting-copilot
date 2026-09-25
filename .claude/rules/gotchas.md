@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 28 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 29 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -34,6 +34,7 @@ Organized by category. 28 items + recovery playbook, condensed format. Original 
 | 26 | Grok's stream restates the whole utterance — lines double unless compared by words | External APIs |
 | 27 | A popover inside the sticky evidence tab bar hit-tests but never paints | Frontend |
 | 28 | The mic engine stops mid-meeting on a configuration change, silently | Environment |
+| 29 | An aborted OpenAI stream ends quietly: it looks finished and reports no usage | External APIs |
 | — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
@@ -220,6 +221,13 @@ this default.
 **Solution** (applied 2026-09-23): `streaming.ts` compares by words (`restatesLocked`, ≥80% of the locked words in place). A restating final replaces the locked text; a restating partial is shown alone; text of cap-closed lines is `carried` and stripped (`dropLeadingWords`) from the rest of that utterance.
 **Check**: `__tests__/transcription-streaming.test.ts` replays both real shapes. `npm run eval:gate -- <recording> --noise` compares against a second ungated run; a duplication regression shows as ungated-vs-ungated recall collapsing.
 **Pattern**: `server/src/transcription/streaming.ts` (`onPartial`).
+
+### 29. An Aborted OpenAI Stream Ends Quietly: It Looks Finished and Reports No Usage
+**Symptom**: The meeting chat's Stop left a half answer marked done (2026-09-25, "## Northwind next"), and the session's dollar ceiling fell behind whenever a stream was cut short.
+**Cause**: With an `AbortSignal`, the `openai` SDK's `for await` over `responses.create({ stream: true })` just ends: no throw and no `response.completed`, so no `usage`. A caller that checks only for an exception reads a stopped answer as finished, and `recordLlmUsage` was told zero tokens for text that was billed.
+**Solution** (applied 2026-09-25): after the answer returns, check `signal.aborted` yourself (`chat/service.ts`, marks it `cancelled`). `openaiFastResearchStream` counts a stream with no usage at a pessimistic estimate (`estimatedUsage`, three characters a token).
+**Check**: `__tests__/chat.test.ts` ("keeps what streamed when stopped") uses an answerer that resolves on abort, the SDK's shape; `__tests__/openai-usage.test.ts` fakes a stream that ends without `response.completed`. Both fail without the fix (verified).
+**Pattern**: `server/src/api/openai.ts` (`estimatedUsage`), `server/src/chat/service.ts` (`answerTurn`).
 
 ## Frontend (dashboard)
 
