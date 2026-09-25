@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import type { TranscriptSegment } from '../transcription/types.js';
+import { CHAT_TABLE_SQL } from '../chat/store.js';
 
 const BASE_DIR = join(homedir(), '.meeting-copilot', 'sessions');
 
@@ -237,6 +238,9 @@ export class SessionStore {
       CREATE INDEX IF NOT EXISTS idx_coach_suggestion_session ON coach_suggestion(sessionId);
       CREATE INDEX IF NOT EXISTS idx_pulse_session ON pulse(sessionId);
     `);
+    // The meeting chat's thread (chat/store.ts, which also creates it for a
+    // meeting stored before the chat existed).
+    this.db.exec(CHAT_TABLE_SQL);
     // A session DB opened again after an upgrade (a server restart mid-
     // meeting) keeps its old pulse table; CREATE IF NOT EXISTS won't add to it.
     const pulseColumns = this.db.prepare('PRAGMA table_info(pulse)').all() as Array<{ name: string }>;
@@ -444,6 +448,7 @@ export class SessionStore {
   }
 
   deleteSession(): void {
+    this.db.prepare('DELETE FROM chat_message WHERE sessionId = ?').run(this.sessionId);
     this.db.prepare('DELETE FROM coach_suggestion WHERE sessionId = ?').run(this.sessionId);
     this.db.prepare('DELETE FROM pulse WHERE sessionId = ?').run(this.sessionId);
     this.db.prepare('DELETE FROM context_summary WHERE sessionId = ?').run(this.sessionId);

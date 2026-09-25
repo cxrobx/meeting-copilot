@@ -23,6 +23,8 @@
 | `meeting.prep` | The start form's prep brief, sent once live. A staged prep's file moves into the session as `prep.json`; the brief (the one shown, else the file's) becomes a pinned context doc. Its evidence tabs are broadcast as `evidence.tabs` and every live URL opens in the default browser (`COPILOT_OPEN_EVIDENCE=0` stops that) | `prepId?` (staged), `brief?`, `sources?` |
 | `pulse.request` | A pulse read now: `checkin` is "How am I doing?", `missed` is "Missed anything?", `closeout` (or no kind) is the Wrap-up check. Sent by the coach head and by the app's ⌃⌥1/⌃⌥2 hotkeys | `kind?` |
 | `coach.ask` | "Suggest": one coach card now, with the live coach on or off. Sent by the coach head and by ⌃⌥3 | `focus?` (the Quick Actions box) |
+| `chat.send` | A question for the live meeting's chat (`chat/service.ts`). The app's menu bar Ask sends it; the dashboard asks over `POST /present/chat` instead, which also works on a stored meeting. Ignored with no live meeting | `text`, `origin?: 'menubar'` (default) \| `'dashboard'` |
+| `chat.cancel` | Stop the live meeting's chat answers (queued or streaming) | — |
 
 ### Server → Client Messages
 
@@ -49,6 +51,8 @@
 | `ask.state` | One of the coach's questions was taken (`started`), answered (`done`) or `failed`. The dashboard's buttons show progress from it; the app turns `title`/`body` into a notification when the dashboard is not in front | `kind` (checkin/missed/suggest/wrapup), `phase`, `title?`, `body?`, `empty?` |
 | `evidence.tabs` | A staged prep's evidence tabs, once its `meeting.prep` attaches. The dashboard renders them as tabs atop the main column; a reload fetches `GET /present/evidence` instead | `tabs [{ index, title, url, note, snapshot: {kind: image\|pdf\|html, name} \| null }]` |
 | `publish.state` | A card's publish-as-link job moved on: `polishing` → `uploading` → `done` (with `url`) or `failed` (with `error`); `revoked` after Unpublish. Replay pages, which have no WebSocket, poll `GET /present/published` instead | `actionId, phase, url?, error?` |
+| `chat.message` | A meeting chat message was added or changed: the question, the answer as it starts (`state: "streaming"`, empty), and the finished answer (`done`, `error` with `error`, or `cancelled` with what streamed). Idempotent by `message.id`; the app shows menu bar answers from it | `sessionId, message { id, role: user\|assistant, content, attachments[], origin: dashboard\|menubar, state, error?, via?, createdAt }` |
+| `chat.delta` | Answer text as it streams. `seq` counts from 1 per answer: the page that asked also gets each delta over its POST, and applies it once | `sessionId, id, seq, text` |
 | `metrics` | Debug metrics snapshot | `data` |
 
 ## REST Endpoints
@@ -76,7 +80,7 @@
 | GET | `/present/coach?session=<uuid>` | Coach cards a stored session showed (from `coach_suggestion`; older sessions fall back to the event log's headlines) |
 | GET | `/present/pulse?session=<uuid>` | Meeting pulses a stored session produced, oldest first (`[]` before 2026-09-22) |
 | GET | `/present/evidence[?session=<uuid>]` | The session's evidence tabs, from its `prep.json` (no file paths). `{ tabs: [...] }`, same shape as `evidence.tabs` |
-| GET | `/present/evidence/:i/file[?session=<uuid>]` | Tab `i`'s snapshot file, served by index only (never by a path from the request); 404 when it has none or the file is gone. `html` goes out under `CSP: sandbox allow-scripts` |
+| GET | `/present/evidence/:i/file[?session=<uuid>][&frame=1]` | Tab `i`'s snapshot file, served by index only (never by a path from the request); 404 when it has none or the file is gone. `html` goes out under `CSP: sandbox allow-scripts`; with `frame=1` (the dashboard's frame) it also carries the selection bridge, which posts what is selected up to the page for the selection toolbar |
 | GET | `/present/evidence/:i/view[?session=<uuid>]` | Tab `i` as its own page, the ↗ Snapshot button: the Artifact Kit page with the note, the image (a PDF embedded) and the live link. An `html` snapshot redirects to `/file` |
 | GET | `/present/action/:id/view[?session=<uuid>]` | One card as its own page (the ↗ button). A mockup/`html` artifact is sent as-is under `CSP: sandbox allow-scripts`; anything else becomes a reader page in the HTML Artifact Kit look, server-rendered, reloading every 5 s while a deep follow-up is pending |
 | GET | `/present/published[?session=<uuid>]` | The session's live links `{ records: {actionId: {url, key, via, at}}, busy, jobs }`; `jobs` = each card's latest `publish.state` since the server started |
@@ -84,6 +88,9 @@
 | DELETE | `/present/action/:id/publish[?session=<uuid>]` | Take the page down (R2 delete) and mark the record revoked |
 | GET | `/present/events` | SSE fallback (replay only; suggested/running/completed) |
 | POST | `/present/ask` | Highlight-to-ask (SSE token stream) |
+| GET | `/present/chat?session=<uuid>` | The meeting chat's thread, oldest first `{ sessionId, messages, busy }` (`sessionId: null` with no meeting). An answer the server lost mid-stream reads as `error` |
+| POST | `/present/chat?session=<uuid>` | Ask the meeting chat. Body `{ text, attachments? }`: up to 6 of `{ kind: quote\|card\|tab\|pulse\|answer, label, text, context?, actionId?, tabIndex? }` (a `tab` is filled from the session's `prep.json` by `tabIndex`, never from `text`). Streams this turn as SSE, `event: message` (the question, then the answer's start and end) and `event: delta` (`{id, seq, text}`); the same events go out over the WebSocket. 400 empty, 404 no such meeting, 409 no meeting at all. Closing the response does not stop the answer |
+| POST | `/present/chat/cancel?session=<uuid>` | Stop that meeting's queued or streaming answers `{ cancelled: n }` |
 | POST | `/present/review` | On-demand Opus self-review for a session |
 | GET | `/vendor/*` | Vendored dashboard assets (marked/DOMPurify/hljs/fonts) |
 | POST | `/transcribe` | **Gated legacy path** — 410 unless `COPILOT_ENABLE_HTTP_TRANSCRIBE=1` (bypasses dedup + stitcher) |
@@ -94,7 +101,7 @@ Each session stores data at `~/.meeting-copilot/sessions/<uuid>/`:
 
 | File | Purpose |
 |------|---------|
-| `session.db` | SQLite — session, transcript, action, context_summary tables |
+| `session.db` | SQLite — session, transcript, action, context_summary, coach_suggestion, pulse and chat_message (the meeting chat's thread) tables |
 | `events.jsonl` | Append-only event log |
 | `manifest.json` | Metadata snapshot for external tools (refreshed on late results) |
 | `published.json` | Links published from this session's cards, by action id (`revokedAt` once taken down). Every publish and revoke is also appended to the global `~/.meeting-copilot/published.jsonl` ledger |

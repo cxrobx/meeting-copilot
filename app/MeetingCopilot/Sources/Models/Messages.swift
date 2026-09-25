@@ -33,10 +33,13 @@ enum ClientMessage: Encodable {
     case pulseRequest(kind: String)
     /// "Suggest": one coach card now.
     case coachAsk(focus: String?)
+    /// The menu bar's Ask: a question for the live meeting's chat.
+    case chatSend(text: String)
 
     private enum CodingKeys: String, CodingKey {
         case type, data, source, actionId, title, projectNames, agenda, attendees, contextPaths, actionType, prompt,
-             chunkId, audioDurationSec, captureStartedAt, captureEndedAt, sequence, isContinuation, kind, focus
+             chunkId, audioDurationSec, captureStartedAt, captureEndedAt, sequence, isContinuation, kind, focus,
+             text, origin
     }
 
     private static let iso8601: ISO8601DateFormatter = {
@@ -88,6 +91,10 @@ enum ClientMessage: Encodable {
         case .coachAsk(let focus):
             try container.encode("coach.ask", forKey: .type)
             try container.encodeIfPresent(focus, forKey: .focus)
+        case .chatSend(let text):
+            try container.encode("chat.send", forKey: .type)
+            try container.encode(text, forKey: .text)
+            try container.encode("menubar", forKey: .origin)
         }
     }
 }
@@ -114,10 +121,13 @@ enum ServerMessage: Decodable {
     case captureHealth(mic: String, meeting: String)
     /// The dashboard's Restart mic button, relayed by the server.
     case captureRestartMic
+    /// A message in the meeting chat (server/src/chat/service.ts): a question,
+    /// or an answer as it starts and when it ends.
+    case chatMessage(ChatReply)
 
     private enum CodingKeys: String, CodingKey {
         case type, segment, action, actionId, state, result, sessionId, data, body, pulse,
-             kind, phase, title, empty, mic, meeting
+             kind, phase, title, empty, mic, meeting, message
     }
 
     init(from decoder: Decoder) throws {
@@ -173,6 +183,14 @@ enum ServerMessage: Decodable {
             )
         case "capture.restartMic":
             self = .captureRestartMic
+        case "chat.message":
+            // Only the menu bar reads these; a shape it can't read must not
+            // fail the decode (gotcha #23).
+            if let reply = try? container.decode(ChatReply.self, forKey: .message) {
+                self = .chatMessage(reply)
+            } else {
+                self = .metrics(DebugMetrics(transcriptLatencyMs: nil, activeWorkers: nil, audioBufferSizeBytes: nil, serverUptime: nil))
+            }
         default:
             // Ignore unknown message types gracefully
             self = .metrics(DebugMetrics(transcriptLatencyMs: nil, activeWorkers: nil, audioBufferSizeBytes: nil, serverUptime: nil))
@@ -191,6 +209,78 @@ struct AskState: Equatable {
     let body: String?
     /// done with no answer: Suggest found nothing worth saying.
     let empty: Bool
+}
+
+// MARK: - Meeting Chat
+
+/// One message of the meeting chat: `ChatMessage` in server/src/chat/store.ts.
+/// Only the fields the menu bar shows. The dashboard renders the thread.
+struct ChatReply: Decodable, Equatable {
+    let id: String
+    /// "user" | "assistant"
+    let role: String
+    let content: String
+    /// "dashboard" | "menubar": where the question was asked.
+    let origin: String
+    /// "streaming" | "done" | "error" | "cancelled"
+    let state: String
+    let error: String?
+
+    var isAnswer: Bool { role == "assistant" }
+    var isFinished: Bool { state != "streaming" }
+
+    /// The answer as plain text for the popover and a notification: no
+    /// Sources line, no markdown marks, links as their titles.
+    var plainContent: String {
+        var text = content
+        if let range = text.range(of: "\n\n**Sources:**") { text = String(text[..<range.lowerBound]) }
+        text = text.replacingOccurrences(of: #"\[([^\]]+)\]\([^)]+\)"#, with: "$1", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"(?m)^#{1,6}\s+"#, with: "", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"(?m)^\s*[-*]\s+"#, with: "• ", options: .regularExpression)
+        text = text.replacingOccurrences(of: "**", with: "")
+        text = text.replacingOccurrences(of: "`", with: "")
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// The menu bar's Ask: its question, and the one chat answer that belongs to
+/// it. The server sends a question and its answer's first, "streaming" copy
+/// back to back (chat/service.ts `send`), so the answer right after the echo
+/// of our question is ours. Any other one (an earlier question still
+/// finishing, the previous meeting's) is not, and is ignored.
+struct MenubarChat: Equatable {
+    private(set) var question: String?
+    private(set) var answer: ChatReply?
+    private var claimNext = false
+
+    /// Sent from the Ask box; the server's echo confirms it.
+    mutating func asked(_ text: String) {
+        question = text
+        answer = nil
+        claimNext = false
+    }
+
+    /// Take a chat.message. Returns the answer when it has just finished
+    /// (for the notification), nil otherwise.
+    mutating func receive(_ reply: ChatReply) -> ChatReply? {
+        guard reply.origin == "menubar" else { return nil }
+        if !reply.isAnswer {
+            question = reply.content
+            answer = nil
+            claimNext = true
+            return nil
+        }
+        // Ours starts "streaming"; a finished one arriving here is a late
+        // answer to something else and must not take the claim.
+        if claimNext && !reply.isFinished {
+            claimNext = false
+            answer = reply
+            return nil
+        }
+        guard answer?.id == reply.id else { return nil }
+        answer = reply
+        return reply.isFinished ? reply : nil
+    }
 }
 
 // MARK: - Meeting Pulse

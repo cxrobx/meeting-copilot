@@ -42,6 +42,7 @@ import { DebugHandler } from './debug/index.js';
 import { cleanupOldSessions, cleanStalePresence } from './session/cleanup.js';
 import { writePresence, removePresence, appendTranscript, setSharingEnabled } from './session/shared.js';
 import { createPresentRouter, findAction } from './present/index.js';
+import { ChatService, ChatError, defaultChatAnswerer, type ChatEvent } from './chat/service.js';
 import { PublishJobs, type PublishStateMessage } from './publish/index.js';
 import { polishToPage } from './publish/polish.js';
 import { wranglerUploader } from './publish/uploader.js';
@@ -142,6 +143,10 @@ type InboundMessage =
   | { type: 'pulse.request'; kind?: 'closeout' | 'checkin' | 'missed' }
   // "Suggest": one coach card now, optionally about the prompt box's text.
   | { type: 'coach.ask'; focus?: string }
+  // Meeting chat from the app (the menu bar's Ask box). The dashboard asks
+  // over POST /present/chat, which also works on a stored meeting.
+  | { type: 'chat.send'; text?: string; origin?: 'menubar' | 'dashboard' }
+  | { type: 'chat.cancel' }
   // The dashboard's "Restart mic" button: relayed to the app.
   | { type: 'capture.restartMic' };
 
@@ -151,6 +156,7 @@ type OutboundMessage =
   // banner while the mic is not ok; the app raises NO MIC from it too.
   | { type: 'capture.health'; mic: TrackState; meeting: TrackState }
   | { type: 'capture.restartMic' }
+  | ChatEvent
   | {
       type: 'transcript.update';
       segment: {
@@ -594,7 +600,7 @@ registry.register(new CodeGenWorker());
 registry.register(new AnalysisWorker());
 registry.register(new ReviewWorker());
 
-// Every research request (suggested card, Research button, menu bar Ask)
+// Every research request (suggested card, Research button)
 // answers Fast, and Deep research runs alongside and appends what it adds
 // (workers/deep-follow-up.ts). Both deep calls run on the
 // subscription CLI. COPILOT_RESEARCH_DEEP_FOLLOWUP=0 turns it off.
@@ -640,7 +646,27 @@ const publishJobs = new PublishJobs({
   broadcast: (message) => broadcast(message),
   log: (message) => log('publish', message),
 });
-app.use(createPresentRouter(registry, { getSessionId: liveSessionId, publish: publishJobs }));
+// Meeting chat (chat/service.ts): the whole meeting as context, answered on
+// the metered path (gpt-6-luna + web search), the subscription CLI as fallback.
+const chat = new ChatService({
+  sessionDir: (id) => join(COPILOT_DIR, 'sessions', id),
+  liveContext: (id) => (sessionStore?.id === id
+    ? {
+        live: sessionActive,
+        agenda: agendaForPulse(),
+        goals: meetingGoals,
+        // The prep brief is pinned in the docs; the chat reads it from prep.json.
+        docs: (hint) => {
+          const docs = intelligence.getContextDocs().filter((d) => !d.pinned);
+          return docs.length ? buildContextBlock(docs, hint) : '';
+        },
+      }
+    : null),
+  broadcast: (event) => broadcast(event),
+  answer: defaultChatAnswerer((message) => log('chat', message)),
+  log: (message) => log('chat', message),
+});
+app.use(createPresentRouter(registry, { getSessionId: liveSessionId, publish: publishJobs, chat }));
 
 // Routes (health, preflight, settings, transcribe, projects, debug)
 app.use(createRoutes({
@@ -1462,6 +1488,29 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         debugLog(`[Coach] ask failed: ${reason}`);
         broadcast({ type: 'ask.state', kind: 'suggest', phase: 'failed', title: "Suggest didn't come back", body: reason });
       });
+      break;
+    }
+
+    case 'chat.send': {
+      // The menu bar's Ask: the live meeting's chat. The answer comes back as
+      // chat.message events, which the app shows in the popover.
+      const sessionId = sessionStore?.id;
+      if (!sessionActive || !sessionId) {
+        debugLog('[Chat] chat.send with no live meeting');
+        break;
+      }
+      try {
+        const turn = chat.send({ sessionId, text: message.text, origin: message.origin === 'dashboard' ? 'dashboard' : 'menubar' });
+        eventLogger?.log('chat.send', { origin: message.origin ?? 'menubar', length: (message.text ?? '').length });
+        turn.done.catch(() => {});
+      } catch (err) {
+        debugLog(`[Chat] ${err instanceof ChatError ? err.message : safeErrorMessage(err)}`);
+      }
+      break;
+    }
+
+    case 'chat.cancel': {
+      if (sessionStore) chat.cancel(sessionStore.id);
       break;
     }
 

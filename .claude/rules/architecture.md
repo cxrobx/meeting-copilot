@@ -88,12 +88,14 @@ Audio → Transcription → Buffer (15s cadence)
 | Worker | Status | Purpose |
 |--------|--------|---------|
 | Research (Deep) | Implemented | Opus 5.5 agent loop with WebSearch/WebFetch on the subscription CLI, ~30-65 s. Runs as the follow-up on every Research request; alone only with `COPILOT_SUGGESTED_RESEARCH=deep` |
-| Fast Research | Implemented | Streaming quick research (OpenAI-preferred, Haiku CLI fallback). Every request (suggested card, Research button, menu bar Ask) also gets a deep follow-up: `workers/deep-follow-up.ts` runs Deep alongside, then appends "Deep research adds" to the finished card (outside the worker slots, max 2 at once) |
+| Fast Research | Implemented | Streaming quick research (OpenAI-preferred, Haiku CLI fallback). Every request (suggested card, Research button) also gets a deep follow-up: `workers/deep-follow-up.ts` runs Deep alongside, then appends "Deep research adds" to the finished card (outside the worker slots, max 2 at once) |
 | Summary | Implemented | Running meeting summary |
 | Analysis | Implemented | Data/argument analysis |
 | Mockup | Implemented | ASCII wireframe + HTML mockup (two-phase, early ASCII emit) |
 | CodeGen | Implemented | Code generation from discussion |
 | Review | Implemented | Opus self-review scorecard + cross-meeting trends |
+
+The **meeting chat** (`server/src/chat/`) is not a worker: it answers the user's typed question directly (no suggestion, no approval step beyond the question itself), one turn at a time per session, with the whole meeting rebuilt as context each turn. See `docs/api.md` (`/present/chat`, `chat.*`).
 
 ## Shared Transcript Protocol
 

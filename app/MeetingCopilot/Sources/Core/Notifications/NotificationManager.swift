@@ -145,7 +145,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
     /// Session end: a "Reading the meeting…" banner will never be answered.
     func clearAskNotifications() {
-        let identifiers = ["checkin", "missed", "suggest", "wrapup"].map { "ask-\($0)" }
+        let identifiers = ["checkin", "missed", "suggest", "wrapup", "chat"].map { "ask-\($0)" }
         center.removeDeliveredNotifications(withIdentifiers: identifiers)
     }
 

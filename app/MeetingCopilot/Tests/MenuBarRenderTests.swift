@@ -136,6 +136,22 @@ final class MenuBarRenderTests: XCTestCase {
         )
         try render(MenuBarView(sessionManager: live, feed: liveFeed, actions: Self.noActions), to: out.appendingPathComponent("live-\(suffix).png"))
 
+        // The Ask box's question, answered by the meeting chat.
+        let waiting = live.actions
+        live.actions = []
+        let asked = "What did Rory say about the rollout date?"
+        live.menubarChat.asked(asked)
+        _ = live.menubarChat.receive(ChatReply(id: "q1", role: "user", content: asked, origin: "menubar", state: "done", error: nil))
+        _ = live.menubarChat.receive(ChatReply(id: "a1", role: "assistant", content: "", origin: "menubar", state: "streaming", error: nil))
+        _ = live.menubarChat.receive(ChatReply(
+            id: "a1", role: "assistant",
+            content: "He didn't give one. At **[12:05]** Rory said the pilot scope is agreed, but nobody owns the rollout date yet.\n\n- Ask him to name an owner before the end.",
+            origin: "menubar", state: "done", error: nil
+        ))
+        try render(MenuBarView(sessionManager: live, feed: liveFeed, actions: Self.noActions), to: out.appendingPathComponent("live-ask-\(suffix).png"))
+        live.menubarChat = MenubarChat()
+        live.actions = waiting
+
         // Live with the capture watchdog's silence warning.
         live.captureWarning = "No meeting audio for 25 s. Check System Settings → Privacy & Security → System Audio Recording."
         live.latestPulse = nil
@@ -167,6 +183,6 @@ final class MenuBarRenderTests: XCTestCase {
 
     private static let noActions = MenuBarActions(
         startSession: {}, setUpInvite: { _ in }, openSession: { _ in }, openHistory: {},
-        togglePanel: {}, openSettings: {}, openNotesFolder: {}, quit: {}
+        togglePanel: {}, openChat: {}, openSettings: {}, openNotesFolder: {}, quit: {}
     )
 }

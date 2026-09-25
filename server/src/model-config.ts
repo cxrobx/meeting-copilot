@@ -20,6 +20,10 @@ export const MODEL_CONFIG = {
   // when the API is off.
   compression: process.env.COPILOT_COMPRESSION_MODEL || 'gpt-6-luna',
   fastResearch: process.env.COPILOT_RESEARCH_MODEL || 'gpt-6-luna',
+  // Meeting chat (chat/service.ts): the drawer's back-and-forth, with the
+  // meeting as context and web search. Metered, like fast research; the
+  // subscription CLI (the worker model) answers when the API is off or fails.
+  chat: process.env.COPILOT_CHAT_MODEL || 'gpt-6-luna',
   haiku: process.env.COPILOT_HAIKU_MODEL || 'claude-haiku-4-5-20251001',
   suggestion: process.env.COPILOT_SUGGEST_MODEL || process.env.COPILOT_SUGGESTION_MODEL || 'claude-sonnet-5',
   worker: process.env.COPILOT_WORKER_MODEL || 'claude-sonnet-5',

@@ -293,6 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             openSession: { [weak self] id in self?.showPanelAndRun("session", id) },
             openHistory: { [weak self] in self?.showPanelAndRun("history") },
             togglePanel: { [weak self] in self?.togglePanel() },
+            openChat: { [weak self] in self?.showPanelAndRun("chat") },
             openSettings: { [weak self] in self?.showPanelAndRun("settings") },
             openNotesFolder: {
                 // Summaries are filed here when auto-save is on (workers/summary.ts).

@@ -130,6 +130,18 @@ describe('evidence routes', () => {
     expect(view.headers.get('location')).toBe(`/present/evidence/2/file${q}`);
   });
 
+  it('adds the selection bridge only for the dashboard frame, still sandboxed', async () => {
+    const framed = await fetch(`${base}/present/evidence/2/file${q}&frame=1`);
+    expect(framed.headers.get('content-security-policy')).toBe('sandbox allow-scripts');
+    const body = await framed.text();
+    expect(body).toContain('saved page');
+    expect(body.indexOf('mcEvidenceSelection')).toBeLessThan(body.indexOf('</body>'));
+    expect(await (await fetch(`${base}/present/evidence/2/file${q}`)).text()).not.toContain('mcEvidenceSelection');
+    // An image is sent as itself whatever the query says.
+    const png = await fetch(`${base}/present/evidence/0/file${q}&frame=1`);
+    expect(png.headers.get('content-type')).toBe('image/png');
+  });
+
   it('opens a snapshot as a kit page with its note and live link', async () => {
     const res = await fetch(`${base}/present/evidence/0/view${q}`);
     expect(res.status).toBe(200);

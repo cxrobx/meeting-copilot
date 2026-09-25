@@ -11,6 +11,8 @@ struct MenuBarActions {
     var openSession: (_ id: String) -> Void
     var openHistory: () -> Void
     var togglePanel: () -> Void
+    /// Front the panel with its Chat drawer open.
+    var openChat: () -> Void
     var openSettings: () -> Void
     var openNotesFolder: () -> Void
     var quit: () -> Void
@@ -310,7 +312,7 @@ private struct LiveSection: View {
             PulseSection(sessionManager: sessionManager)
             CopilotSection(sessionManager: sessionManager, actions: actions, close: close)
             if sessionManager.state == .live || sessionManager.state == .degraded {
-                AskSection(sessionManager: sessionManager)
+                AskSection(sessionManager: sessionManager, actions: actions)
             }
         }
     }
@@ -627,6 +629,7 @@ private struct SuggestionRow: View {
 
 private struct AskSection: View {
     let sessionManager: SessionManager
+    let actions: MenuBarActions
     @Environment(\.menuBarTheme) private var theme
 
     private enum Status: Equatable { case idle, sending, sent, failed }
@@ -638,8 +641,8 @@ private struct AskSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             SectionHeader(title: "Ask") {
-                Chip(text: "fast + deep", kind: .plain)
-                    .help("Answers in seconds with web search, then Deep research adds what it finds about a minute later — the dashboard's Research action")
+                Chip(text: "meeting chat", kind: .plain)
+                    .help("Answers from the whole meeting, and searches the web when it needs to. The thread is in the panel's Chat (⌘J).")
             }
             HStack(spacing: 6) {
                 TextField("Ask the copilot…", text: $question)
@@ -658,22 +661,57 @@ private struct AskSection: View {
                     .buttonStyle(PillButtonStyle(kind: .normal, small: true))
                     .disabled(trimmed.isEmpty || status == .sending)
             }
-            switch status {
-            case .sent:
-                Text("Asked — the answer lands in the panel")
-                    .font(theme.font(10.5))
-                    .foregroundStyle(theme.textSubtle)
-            case .failed:
+            if status == .failed {
                 Text("Not connected — couldn't ask. Try again in a moment.")
                     .font(theme.font(10.5))
                     .foregroundStyle(theme.danger)
-            case .idle, .sending:
-                EmptyView()
+            } else if sessionManager.menubarQuestion != nil {
+                // From the session, not this view's state: the answer is still
+                // here when the popover is opened again.
+                answer
             }
         }
     }
 
     private var trimmed: String { question.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// The chat's answer to the last question, as it arrives.
+    @ViewBuilder private var answer: some View {
+        let reply = sessionManager.menubarAnswer
+        VStack(alignment: .leading, spacing: 6) {
+            if let asked = sessionManager.menubarQuestion {
+                Text(asked)
+                    .font(theme.font(10.5, .medium))
+                    .foregroundStyle(theme.textSubtle)
+                    .lineLimit(2)
+            }
+            if let reply, reply.isFinished {
+                if reply.state == "done" {
+                    Text(reply.plainContent)
+                        .font(theme.font(11.5))
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(9)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                } else {
+                    Text(reply.state == "cancelled" ? "Stopped." : "The chat didn't answer: \(reply.error ?? "unknown error")")
+                        .font(theme.font(10.5))
+                        .foregroundStyle(theme.danger)
+                }
+                Button("Open in Chat", action: actions.openChat)
+                    .buttonStyle(PillButtonStyle(kind: .normal, small: true))
+                    .help("The whole thread, in the panel's Chat drawer")
+            } else {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text("Reading the meeting…")
+                        .font(theme.font(10.5))
+                        .foregroundStyle(theme.textSubtle)
+                }
+            }
+        }
+        .modifier(CardStyle(border: theme.borderSubtle, padding: 10))
+    }
 
     private func send() {
         guard !trimmed.isEmpty, status != .sending else { return }

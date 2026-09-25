@@ -39,6 +39,49 @@ describe('/present dashboard script', () => {
     expect(open).toContain('document.body.appendChild(evMenuEl)');
     expect(open).not.toMatch(/getElementById\('evTabBar'\)[\s\S]*appendChild/);
   });
+  // The meeting chat (chat/service.ts): a fixed drawer (not a popover inside
+  // a scroller, gotcha #27), opened from the header, the menu bar and ⌘J,
+  // and fed from every place the page can select or attach.
+  it('wires the chat drawer to the header, the menu bar, the socket and the attach points', () => {
+    expect(PRESENT_HTML).toMatch(/\.chat-drawer \{[^}]*position: fixed;/);
+    expect(PRESENT_HTML).toContain('<aside class="chat-drawer" id="chatDrawer"');
+    expect(PRESENT_HTML).toContain('id="chatBtn" type="button" data-chat-act="toggle"');
+    expect(PRESENT_HTML).toMatch(/window\.__copilotMenubar = function\(cmd, arg\) \{\s+if \(cmd === 'chat'\) \{\s+chatOpen\(true\);/);
+    expect(PRESENT_HTML).toMatch(/case 'chat\.message':\s+case 'chat\.delta':\s+chatOnSocket\(msg\);/);
+    // Attach points: selection toolbar, both right-click menus, the ask panel,
+    // an evidence tab, the pulse.
+    expect(PRESENT_HTML).toContain("mkBtn('Add to chat', '+'");
+    expect(PRESENT_HTML).toContain('chatAttachSelection(askSel); });\n    askMenuEl.appendChild(askToChat);');
+    expect(PRESENT_HTML).toContain('chatAttachCard(cardSel); });\n    cardMenuEl.appendChild(cardToChat);');
+    expect(PRESENT_HTML).toContain('askpanel-chat');
+    expect(PRESENT_HTML).toContain("else if (act === 'chat') chatAttach({ kind: 'tab'");
+    expect(PRESENT_HTML).toContain('data-chat-act="pulse"');
+    // An html evidence frame asks for the selection bridge, and only its own
+    // frame's messages are believed.
+    expect(PRESENT_HTML).toContain("frameSrc += (frameSrc.indexOf('?') < 0 ? '?' : '&') + 'frame=1'");
+    expect(PRESENT_HTML).toContain('e.source !== frame.contentWindow');
+  });
+
+  // The page that asked gets every delta twice (POST + socket), in no
+  // guaranteed relative order. Runs the shipped function itself.
+  it('applies each chat delta once, in order, whichever channel brings it first', () => {
+    const src = /\n  (function chatApplyDelta\(d\) \{[\s\S]*?\n  \})\n/.exec(PRESENT_HTML)?.[1] ?? '';
+    expect(src).not.toBe('');
+    const run = (m: Record<string, unknown>, deltas: Array<[number, string]>) => {
+      const chatById = { a: m };
+      const apply = new Function('chatById', 'chatQueueRender', `${src}; return chatApplyDelta;`)(chatById, () => {});
+      for (const [seq, text] of deltas) apply({ id: 'a', seq, text });
+      return m.content;
+    };
+    const fresh = () => ({ id: 'a', state: 'streaming', content: '', _seq: 0 });
+    // Both channels, one reordered: 1 2 3 4 over the POST, 2 1 4 3 over the socket.
+    expect(run(fresh(), [[2, 'b'], [1, 'a'], [1, 'a'], [2, 'b'], [4, 'd'], [3, 'c'], [3, 'c'], [4, 'd']])).toBe('abcd');
+    // Loaded mid-answer (no _seq): the first delta it sees is its start.
+    expect(run({ id: 'a', state: 'streaming', content: '' }, [[7, 'g'], [8, 'h'], [7, 'g']])).toBe('gh');
+    // A finished answer takes no more deltas.
+    expect(run({ id: 'a', state: 'done', content: 'final' }, [[1, 'x']])).toBe('final');
+  });
+
   // A selected evidence tab hid Quick Actions and the coach with the rest of
   // the column, so one stray click looked like every button was gone
   // mid-meeting (2026-09-25). They stay, and the evidence renders below them.

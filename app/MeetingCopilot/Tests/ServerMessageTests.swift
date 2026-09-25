@@ -157,4 +157,44 @@ final class ServerMessageTests: XCTestCase {
         XCTAssertEqual(try json(.pulseRequest(kind: "checkin")), ["type": "pulse.request", "kind": "checkin"])
         XCTAssertEqual(try json(.coachAsk(focus: nil)), ["type": "coach.ask"])
     }
+
+    // MARK: - Meeting chat (server/src/chat/service.ts)
+
+    func testChatSendEncodesWhatTheServerReads() throws {
+        let data = try JSONEncoder.copilotEncoder.encode(ClientMessage.chatSend(text: "What did Rory commit to?"))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: String])
+        XCTAssertEqual(object, ["type": "chat.send", "text": "What did Rory commit to?", "origin": "menubar"])
+    }
+
+    func testChatMessageDecodesTheRealBroadcast() throws {
+        // Captured from the server's WebSocket on 2026-09-25.
+        let message = try decode(#"""
+        {"type":"chat.message","sessionId":"e3cf5767-4dcd-48c0-a059-865564eb38f6","message":{"id":"a1","role":"assistant",
+         "content":"The agenda has **Pricing** and **Next steps**. Nothing has been said yet.","attachments":[],
+         "origin":"menubar","state":"done","via":"gpt-6-luna","createdAt":1790352969123}}
+        """#)
+        guard case .chatMessage(let reply) = message else {
+            return XCTFail("expected .chatMessage, got \(message)")
+        }
+        XCTAssertEqual(reply.origin, "menubar")
+        XCTAssertTrue(reply.isAnswer)
+        XCTAssertTrue(reply.isFinished)
+        XCTAssertEqual(reply.plainContent, "The agenda has Pricing and Next steps. Nothing has been said yet.")
+    }
+
+    func testChatDeltasAndOddShapesNeverFailTheDecode() throws {
+        guard case .metrics = try decode(#"{"type":"chat.delta","sessionId":"s","id":"a1","seq":3,"text":"Pri"}"#) else {
+            return XCTFail("chat.delta is the dashboard's")
+        }
+        guard case .metrics = try decode(#"{"type":"chat.message","sessionId":"s","message":{"id":"a1"}}"#) else {
+            return XCTFail("a chat.message the app can't read falls through")
+        }
+    }
+
+    func testChatAnswerAsPlainText() {
+        let reply = ChatReply(id: "a", role: "assistant",
+                              content: "## Ask Brightline\n- **Tracking audit:** see [GA4 help](https://support.google.com/x)\n- `DebugView` check\n\n**Sources:** [GA4 help](https://support.google.com/x)",
+                              origin: "menubar", state: "done", error: nil)
+        XCTAssertEqual(reply.plainContent, "Ask Brightline\n• Tracking audit: see GA4 help\n• DebugView check")
+    }
 }

@@ -201,6 +201,16 @@ export async function openaiTriageJson(
   return openaiStructuredJson(prompt, systemPrompt, schema, options);
 }
 
+/**
+ * Tokens for a stream that never reported its usage. An aborted stream (Stop,
+ * a closed highlight-to-ask panel) ends without `response.completed`, and it
+ * was billed up to the abort, so counting it as zero let the session's dollar
+ * ceiling fall behind. Three characters a token errs high, as the prices do.
+ */
+export function estimatedUsage(inputChars: number, outputChars: number): { input_tokens: number; output_tokens: number } {
+  return { input_tokens: Math.ceil(inputChars / 3), output_tokens: Math.ceil(outputChars / 3) };
+}
+
 export interface FastResearchSource {
   url: string;
   title: string;
@@ -219,6 +229,10 @@ export interface FastResearchResult {
 export async function openaiFastResearchStream(params: {
   systemPrompt: string;
   userContent: string;
+  /** Earlier turns of a conversation (the meeting chat), oldest first. */
+  history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** Defaults to the fast-research model. */
+  model?: string;
   signal?: AbortSignal;
   onDelta?: (text: string) => void;
   label?: string;
@@ -226,15 +240,17 @@ export async function openaiFastResearchStream(params: {
   const client = getClient();
   beginLlmRequest();
   const tag = params.label ?? 'fast-research';
+  const model = params.model ?? FAST_RESEARCH_MODEL;
   const started = Date.now();
   let firstTokenAt = 0;
 
   const stream = await client.responses.create(
     {
-      model: FAST_RESEARCH_MODEL,
+      model,
       tools: [{ type: 'web_search' }],
       input: [
         { role: 'system', content: params.systemPrompt },
+        ...(params.history ?? []).map((m) => ({ role: m.role, content: m.content })),
         { role: 'user', content: params.userContent },
       ],
       stream: true,
@@ -288,7 +304,12 @@ export async function openaiFastResearchStream(params: {
   // It now runs for every approved research suggestion, so it has to count.
   // Measured: ~4.5k input tokens of tool overhead even with no search, up to
   // ~17k with two searches — and each search is billed per call on top.
-  const prices = tokenPrices(FAST_RESEARCH_MODEL);
+  const prices = tokenPrices(model);
+  if (!usage) {
+    const inputChars = params.systemPrompt.length + params.userContent.length
+      + (params.history ?? []).reduce((n, m) => n + m.content.length, 0);
+    usage = estimatedUsage(inputChars, accumulated.length) as OpenAI.Responses.ResponseUsage;
+  }
   recordLlmUsage({
     inputTokens: usage?.input_tokens ?? 0,
     outputTokens: usage?.output_tokens ?? 0,
@@ -299,6 +320,6 @@ export async function openaiFastResearchStream(params: {
 
   const elapsed = Date.now() - started;
   const ttft = firstTokenAt > 0 ? firstTokenAt - started : -1;
-  log('api/openai', `${tag} model=${FAST_RESEARCH_MODEL} ttftMs=${ttft} totalMs=${elapsed} sources=${sources.length} chars=${accumulated.length} in=${usage?.input_tokens ?? 0} out=${usage?.output_tokens ?? 0} searches=${searches}`);
+  log('api/openai', `${tag} model=${model} ttftMs=${ttft} totalMs=${elapsed} sources=${sources.length} chars=${accumulated.length} in=${usage?.input_tokens ?? 0} out=${usage?.output_tokens ?? 0} searches=${searches}`);
   return { text: accumulated, sources };
 }

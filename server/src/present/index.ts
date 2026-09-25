@@ -19,7 +19,8 @@ import { applyVaultLook, getVaultLook } from './vault-look.js';
 import { buildReaderPage, viewContent, type ViewableAction } from './view-page.js';
 import { readPublished, type PublishJobs } from '../publish/index.js';
 import { readSessionTabs } from '../prep/staged.js';
-import { buildEvidencePage, evidenceView, sessionDirFor, snapshotFile } from './evidence.js';
+import { buildEvidencePage, evidenceView, sessionDirFor, snapshotFile, withSelectionBridge } from './evidence.js';
+import { ChatError, type ChatEvent, type ChatService } from '../chat/service.js';
 
 // ─── Highlight-to-ask prompts ───────────────────────────────────────────────
 const ASK_SYSTEM: Record<string, string> = {
@@ -116,6 +117,8 @@ export interface PresentRouterOptions {
   getSessionId?: () => string | undefined;
   /** Publish-as-link; its routes 503 without it. */
   publish?: PublishJobs;
+  /** The meeting chat; its routes 503 without it. */
+  chat?: ChatService;
 }
 
 export function createPresentRouter(registry: WorkerRegistry, options: PresentRouterOptions = {}): Router {
@@ -317,6 +320,18 @@ export function createPresentRouter(registry: WorkerRegistry, options: PresentRo
     res.set('Cache-Control', 'no-store');
     // An html snapshot is someone's page: an opaque origin, like a mockup.
     if (file.kind === 'html') res.set('Content-Security-Policy', 'sandbox allow-scripts');
+    // In the dashboard's frame it also reports its selection (withSelectionBridge).
+    if (file.kind === 'html' && req.query.frame === '1') {
+      let html: string;
+      try {
+        html = readFileSync(file.path, 'utf8');
+      } catch {
+        res.status(404).type('text').send('That snapshot could not be read.');
+        return;
+      }
+      res.type('html').send(withSelectionBridge(html));
+      return;
+    }
     res.sendFile(file.path, (err) => {
       if (err && !res.headersSent) res.status(404).type('text').send('That snapshot could not be read.');
     });
@@ -651,6 +666,65 @@ export function createPresentRouter(registry: WorkerRegistry, options: PresentRo
     }
     send('done', {});
     res.end();
+  });
+
+  // ─── Meeting chat (chat/service.ts) ──────────────────────────────────
+  // GET the thread; POST asks and streams that one turn back (`event:
+  // message|delta`), which is how a replay dashboard, with no socket, gets
+  // it. The same events go out over the WebSocket for the app and any other
+  // dashboard. A closed response does not stop the answer: it is saved, and
+  // Stop is POST /present/chat/cancel.
+  router.get('/present/chat', (req, res) => {
+    if (!options.chat) { res.status(503).json({ error: 'The chat is not set up on this server.' }); return; }
+    if (badSession(req)) { res.status(400).json({ error: 'session must be a session id' }); return; }
+    const sessionId = sessionFor(req);
+    res.set('Cache-Control', 'no-store');
+    if (!isSessionId(sessionId)) { res.json({ sessionId: null, messages: [], busy: false }); return; }
+    try {
+      res.json({ sessionId, messages: options.chat.thread(sessionId), busy: options.chat.busy(sessionId) });
+    } catch (err) {
+      res.status(500).json({ error: `Could not read the chat: ${String(err)}` });
+    }
+  });
+
+  router.post('/present/chat', (req, res) => {
+    if (!options.chat) { res.status(503).json({ error: 'The chat is not set up on this server.' }); return; }
+    if (badSession(req)) { res.status(400).json({ error: 'session must be a session id' }); return; }
+    const sessionId = sessionFor(req);
+    if (!isSessionId(sessionId)) {
+      res.status(409).json({ error: 'No meeting yet. Start a session, or open a past one, to chat about it.' });
+      return;
+    }
+    const body = (req.body ?? {}) as { text?: unknown; attachments?: unknown };
+    const write = (event: ChatEvent) => {
+      if (res.writableEnded || res.destroyed) return;
+      if (event.type === 'chat.delta') res.write(`event: delta\ndata: ${JSON.stringify({ id: event.id, seq: event.seq, text: event.text })}\n\n`);
+      else res.write(`event: message\ndata: ${JSON.stringify(event.message)}\n\n`);
+    };
+    let turn: ReturnType<ChatService['send']>;
+    try {
+      turn = options.chat.send({ sessionId, text: body.text, attachments: body.attachments, origin: 'dashboard' }, (e) => {
+        if (!res.headersSent) return; // the first two, sent below once the stream is open
+        write(e);
+      });
+    } catch (err) {
+      const status = err instanceof ChatError ? err.status : 500;
+      res.status(status).json({ error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+    write({ type: 'chat.message', sessionId, message: turn.user });
+    write({ type: 'chat.message', sessionId, message: turn.assistant });
+    turn.done.finally(() => {
+      if (!res.writableEnded && !res.destroyed) res.end();
+    });
+  });
+
+  router.post('/present/chat/cancel', (req, res) => {
+    if (!options.chat) { res.status(503).json({ error: 'The chat is not set up on this server.' }); return; }
+    if (badSession(req)) { res.status(400).json({ error: 'session must be a session id' }); return; }
+    const sessionId = sessionFor(req);
+    res.json({ cancelled: isSessionId(sessionId) ? options.chat.cancel(sessionId) : 0 });
   });
 
   // ─── GET /present/events — SSE stream (fallback for replay) ─────────
@@ -2843,9 +2917,147 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   .askpanel-foot {
     display: flex;
     justify-content: flex-end;
+    gap: 6px;
     padding: 6px 12px 10px;
     border-top: 1px solid var(--gb-surface1);
   }
+
+  /* ─── Meeting chat drawer ───────────────────────────────────
+     A thread with the whole meeting as context (chat/service.ts). It sits
+     under the header on the right and, where there is room, pushes the
+     columns over rather than covering the agenda. */
+  .chat-drawer {
+    position: fixed;
+    top: 50px;
+    right: 0;
+    bottom: 0;
+    width: 400px;
+    max-width: 100vw;
+    z-index: 450;
+    display: flex;
+    flex-direction: column;
+    background: var(--gb-mantle);
+    border-left: 1px solid var(--gb-surface2);
+  }
+  .chat-drawer[hidden] { display: none; }
+  .native .chat-drawer { top: 62px; }
+  body.chat-open .layout,
+  body.chat-open .stats-bar { margin-right: 400px; }
+  @media (max-width: 1100px) {
+    body.chat-open .layout,
+    body.chat-open .stats-bar { margin-right: 0; }
+    .chat-drawer { box-shadow: -18px 0 44px -24px rgb(var(--shadow-color) / 0.5); }
+  }
+  .chat-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px 10px 16px;
+    border-bottom: 1px solid var(--gb-surface2);
+  }
+  .chat-head-text { flex: 1; min-width: 0; }
+  .chat-title { font-size: 13px; font-weight: 700; color: var(--gb-text); }
+  .chat-sub { font-size: 11px; color: var(--gb-overlay2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chat-x {
+    background: none; border: none; cursor: pointer; font-size: 16px; line-height: 1;
+    color: var(--gb-overlay2); padding: 2px 4px; border-radius: 4px;
+  }
+  .chat-x:hover { color: var(--gb-text); background: var(--gb-surface1); }
+  .chat-thread {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 14px 16px 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    scrollbar-width: thin;
+  }
+  .chat-empty { font-size: 12px; color: var(--gb-subtext0); line-height: 1.55; }
+  .chat-empty p { margin: 0 0 10px; }
+  .chat-examples { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+  .chat-example {
+    font-family: inherit; font-size: 11px; font-weight: 600; text-align: left;
+    padding: 5px 10px; border-radius: 6px; cursor: pointer;
+    background: var(--gb-base); color: var(--gb-text); border: 1px solid var(--gb-surface2);
+  }
+  .chat-example:hover { border-color: rgb(var(--accent)); }
+  .chat-msg { font-size: 12.5px; line-height: 1.55; }
+  .chat-msg.user {
+    align-self: flex-end;
+    max-width: 92%;
+    background: rgb(var(--accent) / 0.1);
+    border: 1px solid rgb(var(--accent) / 0.22);
+    color: var(--gb-text);
+    border-radius: 10px 10px 3px 10px;
+    padding: 8px 11px;
+  }
+  .chat-msg.user .chat-text { white-space: pre-wrap; word-break: break-word; }
+  .chat-msg.user .chat-chips { margin-bottom: 6px; }
+  .chat-origin { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gb-overlay2); margin-bottom: 3px; }
+  .chat-msg.assistant { align-self: stretch; }
+  .chat-msg.assistant .card-body { font-size: 12.5px; color: var(--gb-text); }
+  .chat-msg.assistant .card-body > :first-child { margin-top: 0; }
+  .chat-msg.assistant .card-body > :last-child { margin-bottom: 0; }
+  .chat-msg.assistant.error .chat-note,
+  .chat-msg.assistant.cancelled .chat-note { color: var(--gb-red); }
+  .chat-meta { display: flex; align-items: center; gap: 10px; margin-top: 4px; font-size: 10.5px; color: var(--gb-overlay2); }
+  .chat-meta button {
+    font-family: inherit; font-size: 10.5px; font-weight: 600; background: none; border: none;
+    padding: 0; cursor: pointer; color: var(--gb-overlay2);
+  }
+  .chat-meta button:hover { color: var(--gb-text); }
+  .chat-thinking { display: inline-flex; align-items: center; gap: 6px; color: var(--gb-overlay2); font-size: 12px; }
+  .chat-compose { border-top: 1px solid var(--gb-surface2); padding: 10px 12px 12px; background: var(--gb-base); }
+  .chat-compose textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+    line-height: 1.5;
+    padding: 7px 9px;
+    border: 1px solid var(--gb-surface2);
+    border-radius: 8px;
+    background: var(--gb-surface1);
+    color: var(--gb-text);
+    outline: none;
+    resize: none;
+    min-height: 40px;
+    max-height: 160px;
+  }
+  .chat-compose textarea:focus { border-color: rgb(var(--accent)); }
+  .chat-compose textarea:disabled { opacity: 0.55; }
+  .chat-compose-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .chat-hint { flex: 1; min-width: 0; font-size: 10.5px; color: var(--gb-overlay2); }
+  .chat-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .chat-compose .chat-chips:not(:empty) { margin-bottom: 7px; }
+  .chat-chip {
+    display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
+    font-size: 10.5px; font-weight: 600; line-height: 1.3;
+    padding: 3px 5px 3px 8px; border-radius: 999px;
+    background: rgb(var(--accent) / 0.12); color: var(--gb-text);
+    border: 1px solid rgb(var(--accent) / 0.35);
+  }
+  .chat-msg.user .chat-chip { padding-right: 8px; background: var(--gb-base); }
+  .chat-chip-ico { color: rgb(var(--accent)); flex-shrink: 0; }
+  .chat-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+  .chat-chip-x {
+    background: none; border: none; cursor: pointer; padding: 0 3px; font-size: 13px; line-height: 1;
+    color: var(--gb-overlay2); border-radius: 50%;
+  }
+  .chat-chip-x:hover { color: var(--gb-text); }
+  #chatBtn { position: relative; }
+  #chatBtn[aria-pressed="true"] { background: var(--gb-surface1); color: var(--gb-text); }
+  #chatBtn.unread::after {
+    content: ''; position: absolute; top: 3px; right: 3px; width: 6px; height: 6px;
+    border-radius: 50%; background: rgb(var(--accent));
+  }
+  .pulse-chat {
+    font-family: inherit; font-size: 10px; font-weight: 600; cursor: pointer;
+    padding: 2px 8px; border-radius: 4px; background: transparent;
+    color: var(--gb-subtext0); border: 1px solid var(--gb-surface2);
+  }
+  .pulse-chat:hover { color: var(--gb-text); background: var(--gb-surface1); }
 
   /* ─── Newest-first transcript ──────────────────────────────── */
   .seg.newest { background: rgb(var(--warning) / 0.09); }
@@ -3495,6 +3707,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     <button class="btn btn-ghost" id="newMeetingBtn" style="display:none" onclick="newMeeting()">&larr; New Meeting</button>
     <button class="btn btn-green" id="startStopBtn" style="display:none" onclick="toggleSession()">Start</button>
     <button class="btn btn-ghost btn-sm" id="themeBtn" onclick="toggleTheme()" aria-label="Toggle light and dark theme" title="Toggle theme"></button>
+    <button class="btn btn-ghost btn-sm" id="chatBtn" type="button" data-chat-act="toggle" aria-pressed="false" aria-controls="chatDrawer" title="Chat about the meeting (&#8984;J)">Chat</button>
     <button class="btn btn-ghost btn-sm" id="stageBtn" onclick="toggleStage()" aria-label="Stage view" title="Stage view (declutters to transcript + prompts)">Stage</button>
     <button class="btn btn-ghost btn-sm" id="settingsBtn" onclick="openSettings()" aria-label="Settings" title="Settings">&#9881;</button>
   </div>
@@ -3590,6 +3803,21 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   </nav>
 </div>
 
+<aside class="chat-drawer" id="chatDrawer" aria-label="Meeting chat" hidden>
+  <div class="chat-head">
+    <div class="chat-head-text"><div class="chat-title">Chat</div><div class="chat-sub" id="chatSub">About this meeting</div></div>
+    <button class="chat-x" type="button" data-chat-act="close" title="Close (Esc)" aria-label="Close the chat">&times;</button>
+  </div>
+  <div class="chat-thread" id="chatThread" role="log" aria-live="polite"></div>
+  <div class="chat-compose">
+    <div class="chat-chips" id="chatChips"></div>
+    <textarea id="chatInput" rows="2" placeholder="Ask about the meeting&hellip;" aria-label="Ask about the meeting"></textarea>
+    <div class="chat-compose-row">
+      <span class="chat-hint">&#8629; send &middot; &#8679;&#8629; new line &middot; highlight anything and choose Add to chat</span>
+      <button class="btn btn-green btn-sm" type="button" id="chatSend" data-chat-act="send">Send</button>
+    </div>
+  </div>
+</aside>
 <div class="toast-stack" id="toastStack" role="status" aria-live="polite"></div>
 <div id="srAnnouncer" aria-live="polite" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap"></div>
 
@@ -3713,6 +3941,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
         '<span class="pulse-label">' + escapeHtml(pulseLabel(p)) + '</span>' +
         '<span class="pulse-status ' + escapeHtml(p.status) + '">' + escapeHtml(PULSE_STATUS[p.status] || p.status) + '</span>' +
         '<span class="pulse-meta">' + escapeHtml(meta) + '</span>' +
+        '<button class="pulse-chat" type="button" data-chat-act="pulse" title="Ask about this read in the chat">Add to chat</button>' +
         '<button class="coach-close" data-coach="dismiss-pulse" title="Dismiss">&times;</button>' +
       '</div>' +
       '<div class="pulse-read">' + escapeHtml(p.read) + '</div>' +
@@ -4855,6 +5084,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
 
   // ─── UI State Transitions ─────────────────────────────────
   function updateUI() {
+    chatSync();
     // State pill
     statePill.className = 'state-pill ' + sessionState;
     statePill.textContent = sessionState.charAt(0).toUpperCase() + sessionState.slice(1);
@@ -5326,6 +5556,10 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   }
 
   window.__copilotMenubar = function(cmd, arg) {
+    if (cmd === 'chat') {
+      chatOpen(true);
+      return;
+    }
     if (cmd === 'session') {
       if (arg) window.location.href = '/present?session=' + encodeURIComponent(arg);
       return;
@@ -6136,6 +6370,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     if (t.url) acts += '<button class="ev-btn' + (t.snapshot ? '' : ' primary') + '" data-ev-act="link" data-ev-i="' + i + '">Copy link</button>';
     if (t.url) acts += '<button class="ev-btn" data-ev-act="live" data-ev-i="' + i + '" title="Opens in your browser, where you are logged in">\\u2197 Open live</button>';
     if (t.snapshot) acts += '<button class="ev-btn" data-ev-act="view" data-ev-i="' + i + '" title="The snapshot in a browser tab, for a screen share">\\u2197 Browser tab</button>';
+    acts += '<button class="ev-btn" data-ev-act="chat" data-ev-i="' + i + '" title="Ask about this tab in the chat">Add to chat</button>';
     var h = '<div class="ev-view-head"><div><div class="ev-view-title">' + escapeHtml(t.title) + '</div>' +
       (t.note ? '<div class="ev-view-note">' + escapeHtml(t.note) + '</div>' : '') +
       '</div><div class="ev-view-actions">' + acts + '</div></div>';
@@ -6144,7 +6379,10 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     } else if (t.snapshot) {
       // A PDF renders in the frame; an html snapshot comes sandboxed (the
       // server's CSP), so its scripts cannot reach this page or the API.
-      h += '<iframe class="ev-frame" src="' + evAttr(evUrl(i, 'file')) + '" title="' + evAttr(t.title) + '"' +
+      // An html snapshot reports its selection up (?frame=1), for Add to chat.
+      var frameSrc = evUrl(i, 'file');
+      if (t.snapshot.kind === 'html') frameSrc += (frameSrc.indexOf('?') < 0 ? '?' : '&') + 'frame=1';
+      h += '<iframe class="ev-frame" src="' + evAttr(frameSrc) + '" title="' + evAttr(t.title) + '"' +
         (t.snapshot.kind === 'html' ? ' sandbox="allow-scripts"' : '') + '></iframe>';
     } else {
       h += '<div class="ev-live-card">This page needs your login, so it opens in your browser rather than here.' +
@@ -6417,6 +6655,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     else if (act === 'view') window.open(evUrl(i, 'view'), '_blank');
     else if (act === 'link' && t.url) mcPubCopy(t.url);
     else if (act === 'image') evCopyImage(i);
+    else if (act === 'chat') chatAttach({ kind: 'tab', label: t.title, text: t.note || '', tabIndex: i });
   });
 
   // Onyx's keys: arrows, Home and End move along the strip, Delete closes;
@@ -6679,6 +6918,12 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     });
     askMenuEl.appendChild(custom);
 
+    var askToChat = document.createElement('div');
+    askToChat.className = 'askmenu-item';
+    askToChat.innerHTML = '<span class="askmenu-ico">+</span>Add to chat';
+    askToChat.addEventListener('click', function() { hideAskMenu(); chatAttachSelection(askSel); });
+    askMenuEl.appendChild(askToChat);
+
     askMenuInputRow = document.createElement('div');
     askMenuInputRow.className = 'askmenu-input-row';
     askMenuInput = document.createElement('textarea');
@@ -6708,7 +6953,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
         '<button class="askpanel-x" title="Close">\\u00d7</button>' +
       '</div>' +
       '<div class="card-body askpanel-body"></div>' +
-      '<div class="askpanel-foot"><button class="btn btn-ghost askpanel-copy">Copy</button></div>';
+      '<div class="askpanel-foot"><button class="btn btn-ghost askpanel-chat">Continue in chat</button><button class="btn btn-ghost askpanel-copy">Copy</button></div>';
     askPanelEyebrow = askPanelEl.querySelector('.askpanel-eyebrow');
     askPanelQuote = askPanelEl.querySelector('.askpanel-quote');
     askPanelBody = askPanelEl.querySelector('.askpanel-body');
@@ -6718,6 +6963,15 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       if (navigator.clipboard && t) {
         navigator.clipboard.writeText(t).then(function() { showToast('Copied to clipboard'); }).catch(function() {});
       }
+    });
+    // The one-shot answer becomes the start of a thread: the highlight and
+    // the answer go to the chat as attachments, ready for a follow-up.
+    askPanelEl.querySelector('.askpanel-chat').addEventListener('click', function() {
+      var answer = (askPanelBody.innerText || '').trim();
+      var sel = askSel;
+      closeAskPanel();
+      if (sel && sel.text) chatAttachSelection(sel);
+      if (answer) chatAttach({ kind: 'answer', label: askPanelEyebrow.textContent || 'Answer', text: answer });
     });
     makeAskDragResize(askPanelEl, askPanelEl.querySelector('.askpanel-head'));
     document.body.appendChild(askPanelEl);
@@ -6783,6 +7037,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     return {
       text: text.slice(0, 1500),
       context: ctxParts.join('\\n').slice(0, 4000),
+      label: 'Transcript',
       rect: range.getBoundingClientRect(),
     };
   }
@@ -6911,6 +7166,12 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     cardMenuMockup.addEventListener('click', function() { openCardInput('mockup'); });
     cardMenuEl.appendChild(cardMenuMockup);
 
+    var cardToChat = document.createElement('div');
+    cardToChat.className = 'askmenu-item';
+    cardToChat.innerHTML = '<span class="askmenu-ico">+</span>Add to chat';
+    cardToChat.addEventListener('click', function() { hideCardMenu(); chatAttachCard(cardSel); });
+    cardMenuEl.appendChild(cardToChat);
+
     cardMenuInputRow = document.createElement('div');
     cardMenuInputRow.className = 'askmenu-input-row';
     cardMenuInput = document.createElement('textarea');
@@ -7011,7 +7272,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   function startCardPanelAsk(mode, question) {
     if (!cardSel) return;
     var headline = (cardSel.title || cardSel.text || 'this card').slice(0, 300);
-    askSel = { text: headline, context: cardSel.text, rect: cardSel.rect };
+    askSel = { text: headline, context: cardSel.text, label: cardSel.title || 'Card', rect: cardSel.rect };
     hideCardMenu();
     startAsk(mode, question);
   }
@@ -7052,7 +7313,8 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       var t = cardEl.querySelector('.card-title');
       ctx = ((t ? t.innerText + '\\n' : '') + (bodyEl.innerText || '')).slice(0, 4000);
     }
-    return { text: text.slice(0, 1500), context: ctx, rect: range.getBoundingClientRect() };
+    var cardTitleEl = cardEl ? cardEl.querySelector('.card-title') : null;
+    return { text: text.slice(0, 1500), context: ctx, label: cardTitleEl ? (cardTitleEl.innerText || 'Card') : 'Card', rect: range.getBoundingClientRect() };
   }
 
   // ─── Selection mini-toolbar ────────────────────────────────
@@ -7086,6 +7348,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       selBarInput.value = '';
       selBarInput.focus();
     });
+    mkBtn('Add to chat', '+', function() { var sel = askSel; hideSelBar(); chatAttachSelection(sel); });
 
     selBarInputRow = document.createElement('div');
     selBarInputRow.className = 'selbar-input-row';
@@ -7108,6 +7371,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   }
 
   function hideSelBar() {
+    chatFrameSel = false;
     if (selBarEl) {
       selBarEl.style.display = 'none';
       selBarInputRow.classList.remove('open');
@@ -7115,8 +7379,12 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   }
 
   function maybeShowSelBar() {
-    var captured = captureTranscriptSelection() || captureCardSelection();
+    var captured = captureTranscriptSelection() || captureCardSelection() || chatCaptureOtherSelection();
     if (!captured) { hideSelBar(); return; }
+    showSelBarFor(captured);
+  }
+
+  function showSelBarFor(captured) {
     askSel = captured;
     if (!selBarEl) buildSelBar();
     selBarInputRow.classList.remove('open');
@@ -7140,7 +7408,8 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     clearTimeout(selChangeTimer);
     selChangeTimer = setTimeout(function() {
       var s = window.getSelection();
-      if (!s || s.isCollapsed) hideSelBar();
+      // A selection inside an evidence frame leaves this page's collapsed.
+      if ((!s || s.isCollapsed) && !chatFrameSel) hideSelBar();
     }, 150);
   });
 
@@ -7213,6 +7482,488 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     else if (askMenuEl && askMenuEl.style.display === 'block') hideAskMenu();
     else if (askPanelEl && askPanelEl.classList.contains('open')) closeAskPanel();
   });
+
+  // ─── Meeting chat (chat/service.ts) ───────────────────────
+  // A drawer with a thread per meeting and the whole meeting as its context.
+  // Anything on the page can be attached: a highlight (the selection toolbar,
+  // the right-click menus), a whole card, an evidence tab, the pulse. This
+  // page's own turns stream back over the POST, because a replay has no
+  // socket; the socket carries them too, and every turn asked elsewhere (the
+  // menu bar's Ask). Deltas are numbered, so one that arrives both ways
+  // lands once.
+  var chatDrawerEl = document.getElementById('chatDrawer');
+  var chatThreadEl = document.getElementById('chatThread');
+  var chatChipsEl = document.getElementById('chatChips');
+  var chatInputEl = document.getElementById('chatInput');
+  var chatSendEl = document.getElementById('chatSend');
+  var chatSubEl = document.getElementById('chatSub');
+  var chatBtnEl = document.getElementById('chatBtn');
+  var chatMessages = [];
+  var chatById = {};
+  var chatPending = [];
+  var chatLoadedFor = null;
+  var chatLoading = false;
+  var chatRenderQueued = {};
+  var chatFrameSel = false;
+  var CHAT_MAX_ATTACH = 6;
+  var CHAT_ICONS = { quote: '\\u201C', card: '\\u25A4', tab: '\\u29C9', pulse: '\\u25C9', answer: '\\u21A9' };
+  var CHAT_KIND_NAMES = { card: 'Card', tab: 'Tab', pulse: 'Pulse', answer: 'Answer' };
+  var CHAT_EXAMPLES = ['What has been decided so far?', 'What did they ask that I have not answered yet?', 'Draft a short follow-up email'];
+
+  // The meeting the page is showing: a replay's, or the live one (none on
+  // the start form).
+  function chatSessionKey() {
+    if (replaySessionId) return replaySessionId;
+    return sessionState === 'idle' ? null : (sessionId || null);
+  }
+  function chatIsOpen() { return !!chatDrawerEl && !chatDrawerEl.hidden; }
+
+  function chatOpen(focus) {
+    if (!chatDrawerEl) return;
+    chatSync();
+    chatDrawerEl.hidden = false;
+    document.body.classList.add('chat-open');
+    chatBtnEl.setAttribute('aria-pressed', 'true');
+    chatBtnEl.classList.remove('unread');
+    if (evTabs.length) evFitTabs();
+    chatScrollToEnd(true);
+    if (focus && !chatInputEl.disabled) chatInputEl.focus();
+  }
+  function chatClose() {
+    if (!chatDrawerEl) return;
+    chatDrawerEl.hidden = true;
+    document.body.classList.remove('chat-open');
+    chatBtnEl.setAttribute('aria-pressed', 'false');
+    if (evTabs.length) evFitTabs();
+  }
+
+  // Follow the meeting: a different one empties the thread and loads its own.
+  function chatSync() {
+    if (!chatDrawerEl) return;
+    var key = chatSessionKey();
+    chatInputEl.disabled = !key;
+    chatSubEl.textContent = !key ? 'No meeting yet'
+      : replaySessionId ? 'About this past meeting'
+      : (sessionState === 'live' || sessionState === 'degraded') ? 'About this meeting, live'
+      : 'About this meeting';
+    if (key === chatLoadedFor) return;
+    chatMessages = [];
+    chatById = {};
+    chatPending = [];
+    chatLoadedFor = key;
+    chatRenderChips();
+    chatRender();
+    if (key) chatLoad(key);
+  }
+
+  function chatLoad(key) {
+    chatLoading = true;
+    if (!chatMessages.length) chatRender();
+    fetch('/present/chat?session=' + encodeURIComponent(key)).then(function(r) { return r.json(); }).then(function(data) {
+      if (chatLoadedFor !== key) return;
+      chatLoading = false;
+      (data.messages || []).forEach(chatStore);
+      chatRender();
+      chatScrollToEnd(true);
+    }).catch(function() {
+      chatLoading = false;
+      chatRender();
+    });
+  }
+
+  // One reducer for both channels. A message already here is only replaced
+  // by a finished one: a second "streaming" copy would wipe what streamed.
+  function chatStore(m) {
+    var have = chatById[m.id];
+    if (have) {
+      if (m.state === 'streaming') return have;
+      Object.keys(m).forEach(function(k) { have[k] = m[k]; });
+      return have;
+    }
+    var copy = Object.assign({}, m);
+    chatMessages.push(copy);
+    chatById[copy.id] = copy;
+    return copy;
+  }
+
+  function chatReceive(m) {
+    var isNew = !chatById[m.id];
+    var near = chatNearEnd();
+    var stored = chatStore(m);
+    // Seen from its start, so its deltas count from 1. One loaded mid-answer
+    // (a reload) takes its first delta as the start instead.
+    if (isNew && stored.state === 'streaming') stored._seq = 0;
+    if (isNew) chatRender(); else chatRenderOne(m.id);
+    if (isNew || near) chatScrollToEnd(true);
+    if (m.role === 'assistant' && m.state === 'done' && !chatIsOpen()) chatBtnEl.classList.add('unread');
+  }
+
+  // The page that asked gets each delta twice, over its POST and the socket,
+  // and the two need not arrive in the same order: apply each seq once, in
+  // order, holding any that come early.
+  function chatApplyDelta(d) {
+    var m = chatById[d.id];
+    if (!m || m.state !== 'streaming') return;
+    var seq = d.seq || (m._seq || 0) + 1;
+    if (m._seq !== undefined && seq <= m._seq) return;
+    if (m._seq !== undefined && seq > m._seq + 1) {
+      m._ahead = m._ahead || {};
+      m._ahead[seq] = d.text || '';
+      return;
+    }
+    m._seq = seq;
+    m.content = (m.content || '') + (d.text || '');
+    while (m._ahead && m._ahead[m._seq + 1] !== undefined) {
+      m._seq += 1;
+      m.content += m._ahead[m._seq];
+      delete m._ahead[m._seq];
+    }
+    chatQueueRender(d.id);
+  }
+
+  function chatOnSocket(msg) {
+    if (msg.type === 'chat.delta') {
+      if (msg.sessionId === chatLoadedFor) chatApplyDelta(msg);
+      return;
+    }
+    var m = msg.message;
+    if (!m || msg.sessionId !== chatLoadedFor) return;
+    var fromMenubar = m.role === 'user' && m.origin === 'menubar' && !chatById[m.id];
+    chatReceive(m);
+    // Asked from the menu bar: the thread is waiting here when the panel opens.
+    if (fromMenubar && !chatIsOpen()) chatOpen(false);
+  }
+
+  function chatChipHtml(a, removable, i) {
+    var name = a.kind === 'quote'
+      ? '\\u201C' + (a.text || '').slice(0, 44) + ((a.text || '').length > 44 ? '\\u2026' : '') + '\\u201D'
+      : (CHAT_KIND_NAMES[a.kind] || a.kind) + ': ' + a.label;
+    var tip = (a.kind === 'quote' ? a.label + ': ' : '') + (a.text || a.label || '').slice(0, 400);
+    return '<span class="chat-chip" title="' + evAttr(tip) + '"><span class="chat-chip-ico" aria-hidden="true">' + (CHAT_ICONS[a.kind] || '+') + '</span>' +
+      '<span class="chat-chip-text">' + escapeHtml(name) + '</span>' +
+      (removable ? '<button class="chat-chip-x" type="button" data-chat-act="unattach" data-chat-i="' + i + '" aria-label="Remove ' + evAttr(name) + '">&times;</button>' : '') +
+      '</span>';
+  }
+
+  function chatMsgHtml(m) {
+    var id = evAttr(m.id);
+    if (m.role === 'user') {
+      var chips = (m.attachments || []).map(function(a) { return chatChipHtml(a, false); }).join('');
+      return '<div class="chat-msg user" data-chat-id="' + id + '">' +
+        (m.origin === 'menubar' ? '<div class="chat-origin">From the menu bar</div>' : '') +
+        (chips ? '<div class="chat-chips">' + chips + '</div>' : '') +
+        (m.content ? '<div class="chat-text">' + escapeHtml(m.content) + '</div>' : '') +
+      '</div>';
+    }
+    var body = m.state === 'streaming' && !m.content
+      ? '<div class="chat-thinking"><span class="spinner"></span>Reading the meeting&hellip;</div>'
+      : (m.content ? '<div class="card-body chat-body">' + renderMarkdown(m.content) + '</div>' : '');
+    var meta = '';
+    if (m.state === 'error') {
+      meta = '<span class="chat-note">' + escapeHtml(m.error || 'The answer did not come back.') + '</span>' +
+        '<button type="button" data-chat-act="retry" data-chat-id="' + id + '">Try again</button>';
+    } else if (m.state === 'cancelled') {
+      meta = '<span class="chat-note">Stopped</span><button type="button" data-chat-act="retry" data-chat-id="' + id + '">Ask again</button>';
+    } else if (m.state === 'done') {
+      meta = '<button type="button" data-chat-act="copy" data-chat-id="' + id + '">Copy</button>' +
+        (m.via ? '<span>' + escapeHtml(m.via) + '</span>' : '');
+    }
+    return '<div class="chat-msg assistant ' + evAttr(m.state) + '" data-chat-id="' + id + '">' + body +
+      (meta ? '<div class="chat-meta">' + meta + '</div>' : '') + '</div>';
+  }
+
+  function chatEmptyHtml() {
+    return '<div class="chat-empty"><p>Ask anything about this meeting: what was said, what is still open, a draft to send. ' +
+      'The chat reads the whole transcript, the agenda, the pulse, the prep and every card, and searches the web when it needs to.</p>' +
+      '<p>Highlight text anywhere (transcript, cards, evidence) and choose <b>Add to chat</b> to ask about it.</p>' +
+      '<div class="chat-examples">' + CHAT_EXAMPLES.map(function(q) {
+        return '<button type="button" class="chat-example" data-chat-act="example" data-chat-text="' + evAttr(q) + '">' + escapeHtml(q) + '</button>';
+      }).join('') + '</div></div>';
+  }
+
+  function chatRender() {
+    if (!chatThreadEl) return;
+    var html;
+    if (!chatLoadedFor) {
+      html = '<div class="chat-empty"><p>No meeting yet. Start one, or open a past meeting from History, and ask anything about it here.</p></div>';
+    } else if (!chatMessages.length) {
+      html = chatLoading ? '<div class="chat-thinking"><span class="spinner"></span>Loading&hellip;</div>' : chatEmptyHtml();
+    } else {
+      html = chatMessages.map(chatMsgHtml).join('');
+    }
+    chatThreadEl.innerHTML = html;
+    highlightCode();
+    chatSyncSend();
+  }
+
+  function chatRenderOne(id) {
+    var m = chatById[id];
+    var el = null;
+    var nodes = chatThreadEl.querySelectorAll('.chat-msg');
+    for (var i = 0; i < nodes.length; i++) if (nodes[i].getAttribute('data-chat-id') === id) { el = nodes[i]; break; }
+    if (!m || !el) { chatRender(); return; }
+    var near = chatNearEnd();
+    var holder = document.createElement('div');
+    holder.innerHTML = chatMsgHtml(m);
+    el.replaceWith(holder.firstChild);
+    highlightCode();
+    if (near) chatScrollToEnd(true);
+    chatSyncSend();
+  }
+
+  // Deltas re-render at most once a frame, as the cards' streams do.
+  function chatQueueRender(id) {
+    if (chatRenderQueued[id]) return;
+    chatRenderQueued[id] = true;
+    requestAnimationFrame(function() {
+      delete chatRenderQueued[id];
+      chatRenderOne(id);
+    });
+  }
+
+  function chatNearEnd() {
+    return !chatThreadEl || chatThreadEl.scrollHeight - chatThreadEl.scrollTop - chatThreadEl.clientHeight < 80;
+  }
+  function chatScrollToEnd(force) {
+    if (chatThreadEl && (force || chatNearEnd())) chatThreadEl.scrollTop = chatThreadEl.scrollHeight;
+  }
+
+  function chatBusy() {
+    return chatMessages.some(function(m) { return m.role === 'assistant' && m.state === 'streaming'; });
+  }
+  // While an answer streams the button stops it; Enter still asks, and the
+  // server answers in order.
+  function chatSyncSend() {
+    if (!chatSendEl) return;
+    var busy = chatBusy();
+    chatSendEl.textContent = busy ? 'Stop' : 'Send';
+    chatSendEl.setAttribute('data-chat-act', busy ? 'stop' : 'send');
+    chatSendEl.className = busy ? 'btn btn-ghost btn-sm' : 'btn btn-green btn-sm';
+    chatSendEl.disabled = !chatLoadedFor;
+  }
+
+  function chatRenderChips() {
+    if (!chatChipsEl) return;
+    chatChipsEl.innerHTML = chatPending.map(function(a, i) { return chatChipHtml(a, true, i); }).join('');
+  }
+
+  function chatAutosize() {
+    chatInputEl.style.height = 'auto';
+    chatInputEl.style.height = Math.min(160, chatInputEl.scrollHeight + 2) + 'px';
+  }
+
+  function chatAttach(att) {
+    if (!att || !chatDrawerEl) return;
+    chatSync();
+    if (!chatSessionKey()) {
+      showToast('Start a meeting, or open a past one, to chat about it.', { error: true });
+      return;
+    }
+    var dup = chatPending.some(function(a) {
+      return a.kind === att.kind && a.label === att.label && a.text === att.text && a.tabIndex === att.tabIndex;
+    });
+    if (!dup) {
+      if (chatPending.length >= CHAT_MAX_ATTACH) showToast('Six attachments at most. Send, or remove one first.', { error: true });
+      else chatPending.push(att);
+    }
+    chatRenderChips();
+    chatOpen(true);
+  }
+
+  function chatAttachSelection(sel) {
+    if (!sel || !sel.text) return;
+    chatAttach({ kind: 'quote', label: sel.label || 'Transcript', text: sel.text, context: sel.context || '' });
+  }
+
+  function chatAttachCard(sel) {
+    if (!sel) return;
+    chatAttach({ kind: 'card', label: sel.title || 'Card', text: sel.text || '', actionId: sel.actionId || '' });
+  }
+
+  function chatAttachPulse() {
+    var p = pulseAnswer && pulseAnswer.pulse;
+    if (!p) return;
+    var parts = [p.read];
+    function add(title, items) {
+      if (items && items.length) parts.push(title + ':\\n' + items.map(function(it) { return '- ' + it.text; }).join('\\n'));
+    }
+    add('Escalate now', p.escalations);
+    add('Close out before the end', p.closeOut);
+    add('May have been missed', p.missed);
+    chatAttach({ kind: 'pulse', label: pulseLabel(p) + ', minute ' + p.minutesIn, text: parts.join('\\n\\n') });
+  }
+
+  function chatSend(textOverride, attachmentsOverride) {
+    var key = chatLoadedFor;
+    if (!key) return;
+    var fromInput = typeof textOverride !== 'string';
+    var text = fromInput ? chatInputEl.value.trim() : textOverride;
+    var atts = attachmentsOverride || chatPending.slice();
+    if (!text && !atts.length) { chatInputEl.focus(); return; }
+    if (fromInput) {
+      chatInputEl.value = '';
+      chatPending = [];
+      chatRenderChips();
+      chatAutosize();
+    }
+    var asked = false;
+    fetch('/present/chat?session=' + encodeURIComponent(key), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text, attachments: atts }),
+    }).then(function(resp) {
+      if (!resp.ok || !resp.body) {
+        return resp.json().catch(function() { return {}; }).then(function(d) { throw new Error(d.error || ('HTTP ' + resp.status)); });
+      }
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = '';
+      var evt = '';
+      function pump() {
+        return reader.read().then(function(r) {
+          if (r.done) return;
+          buffer += decoder.decode(r.value, { stream: true });
+          var lines = buffer.split('\\n');
+          buffer = lines.pop() || '';
+          for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (line.indexOf('event: ') === 0) { evt = line.slice(7).trim(); continue; }
+            if (line.indexOf('data: ') !== 0 || !evt) continue;
+            var data;
+            try { data = JSON.parse(line.slice(6)); } catch (e) { evt = ''; continue; }
+            // The page moved to another meeting mid-answer: it is saved there.
+            if (chatLoadedFor === key) {
+              if (evt === 'message') { asked = true; chatReceive(data); }
+              else if (evt === 'delta') chatApplyDelta(data);
+            }
+            evt = '';
+          }
+          return pump();
+        });
+      }
+      return pump();
+    }).catch(function(err) {
+      // Nothing was asked: give the question back rather than lose it.
+      if (!asked && fromInput && chatLoadedFor === key) {
+        if (!chatInputEl.value) chatInputEl.value = text;
+        chatPending = atts.concat(chatPending).slice(0, CHAT_MAX_ATTACH);
+        chatRenderChips();
+        chatAutosize();
+      }
+      showToast('The chat could not ask: ' + ((err && err.message) || err), { error: true });
+    }).then(chatSyncSend);
+  }
+
+  function chatStop() {
+    if (!chatLoadedFor) return;
+    fetch('/present/chat/cancel?session=' + encodeURIComponent(chatLoadedFor), { method: 'POST' }).catch(function() {});
+  }
+
+  function chatCopy(id) {
+    var m = chatById[id];
+    if (!m || !navigator.clipboard) return;
+    navigator.clipboard.writeText(m.content || '').then(function() { showToast('Copied to clipboard'); }).catch(function() {});
+  }
+
+  // Ask the question behind a failed or stopped answer again.
+  function chatRetry(id) {
+    var at = -1;
+    for (var i = 0; i < chatMessages.length; i++) if (chatMessages[i].id === id) at = i;
+    for (var j = at - 1; j >= 0; j--) {
+      if (chatMessages[j].role === 'user') {
+        chatSend(chatMessages[j].content || '', (chatMessages[j].attachments || []).slice());
+        return;
+      }
+    }
+  }
+
+  // Text selected in the pulse, the coach or the agenda: the transcript and
+  // the cards have their own captures above.
+  var CHAT_SELECT_AREAS = [['#pulseSlot', 'Meeting pulse'], ['#coachDock', 'Coach'], ['#coachHistory', 'Coach'], ['#agendaPanel', 'Agenda'], ['#evView', 'Evidence']];
+  function chatCaptureOtherSelection() {
+    var s = window.getSelection();
+    if (!s || s.isCollapsed || s.rangeCount === 0) return null;
+    var text = s.toString().replace(/\\s+/g, ' ').trim();
+    if (!text) return null;
+    var range = s.getRangeAt(0);
+    var node = range.commonAncestorContainer;
+    if (node && node.nodeType === 3) node = node.parentElement;
+    if (!node || !node.closest) return null;
+    for (var i = 0; i < CHAT_SELECT_AREAS.length; i++) {
+      var area = node.closest(CHAT_SELECT_AREAS[i][0]);
+      if (!area) continue;
+      var block = node.closest('.pulse-card') || area;
+      return { text: text.slice(0, 1500), context: (block.innerText || '').slice(0, 2000), label: CHAT_SELECT_AREAS[i][1], rect: range.getBoundingClientRect() };
+    }
+    return null;
+  }
+
+  // An html evidence snapshot reports its selection from inside its sandbox
+  // (withSelectionBridge in present/evidence.ts). Only this page's own frame
+  // is believed.
+  window.addEventListener('message', function(e) {
+    var d = e.data;
+    if (!d || d.mcEvidenceSelection !== 1) return;
+    var frame = document.querySelector('#evView iframe.ev-frame');
+    if (!frame || e.source !== frame.contentWindow) return;
+    var t = evActive === 'meeting' ? null : evTabs[evActive];
+    if (!d.text || !t) {
+      if (chatFrameSel) hideSelBar();
+      return;
+    }
+    var fr = frame.getBoundingClientRect();
+    var r = d.rect || { left: 0, top: 0, width: 0, height: 0, bottom: 0 };
+    showSelBarFor({
+      text: String(d.text).slice(0, 1500),
+      context: (t.title + (t.note ? '\\n' + t.note : '')).slice(0, 2000),
+      label: t.title,
+      rect: { left: fr.left + r.left, top: fr.top + r.top, width: r.width, height: r.height, bottom: fr.top + r.bottom, right: fr.left + r.left + r.width },
+    });
+    chatFrameSel = true;
+  });
+
+  document.addEventListener('click', function(e) {
+    var el = e.target && e.target.closest ? e.target.closest('[data-chat-act]') : null;
+    if (!el) return;
+    e.preventDefault();
+    var act = el.getAttribute('data-chat-act');
+    if (act === 'toggle') { if (chatIsOpen()) chatClose(); else chatOpen(true); }
+    else if (act === 'close') chatClose();
+    else if (act === 'send') chatSend();
+    else if (act === 'stop') chatStop();
+    else if (act === 'unattach') {
+      chatPending.splice(Number(el.getAttribute('data-chat-i')), 1);
+      chatRenderChips();
+      chatInputEl.focus();
+    }
+    else if (act === 'example') { chatInputEl.value = el.getAttribute('data-chat-text') || ''; chatSend(); }
+    else if (act === 'copy') chatCopy(el.getAttribute('data-chat-id'));
+    else if (act === 'retry') chatRetry(el.getAttribute('data-chat-id'));
+    else if (act === 'pulse') chatAttachPulse();
+  });
+
+  if (chatInputEl) {
+    chatInputEl.addEventListener('input', chatAutosize);
+    // Typing here must not drive the page's other keys (⌘1-9, arrows).
+    chatInputEl.addEventListener('keydown', function(e) {
+      e.stopPropagation();
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); chatSend(); }
+      else if (e.key === 'Escape') { e.preventDefault(); chatClose(); }
+      else if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'j' || e.key === 'J')) { e.preventDefault(); chatClose(); }
+    });
+  }
+
+  // ⌘J opens and closes it; Escape closes it from inside.
+  document.addEventListener('keydown', function(e) {
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && (e.key === 'j' || e.key === 'J')) {
+      e.preventDefault();
+      if (chatIsOpen()) chatClose(); else chatOpen(true);
+    } else if (e.key === 'Escape' && chatIsOpen() && chatDrawerEl.contains(document.activeElement)) {
+      chatClose();
+    }
+  });
+
+  chatSync();
 
   // Focus handling for modal overlays: focus the close button on open, keep
   // Tab inside the card, hand focus back where it was on close.
@@ -8902,6 +9653,8 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       // enough for the vault's theme to have moved. Cheap when nothing changed.
       if (window.refreshVaultLook) window.refreshVaultLook();
       mcPubLoad();
+      // Anything asked while the socket was down.
+      if (chatLoadedFor) chatLoad(chatLoadedFor);
       // Enable start button if on idle screen (respects agenda extraction state)
       refreshStartButton();
       var connMsg = idleOverlay.querySelector('p[style*="red"]');
@@ -8952,6 +9705,10 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       switch (msg.type) {
         case 'capture.health':
           capShowHealth(msg);
+          break;
+        case 'chat.message':
+        case 'chat.delta':
+          chatOnSocket(msg);
           break;
         case 'session.state':
           if (msg.state !== 'live' && msg.state !== 'degraded') capShowHealth({ mic: 'ok', meeting: 'ok' });

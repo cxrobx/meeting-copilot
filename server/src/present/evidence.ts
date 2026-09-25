@@ -116,3 +116,38 @@ export function buildEvidencePage(tab: StagedTab, fileUrl: string | null, kind: 
     toc: [],
   });
 }
+
+/**
+ * The script an html snapshot gets when the dashboard shows it in a frame
+ * (`/file?frame=1`): it tells the dashboard what is selected inside, so the
+ * selection toolbar (Fact check, Explain, Add to chat) works on evidence too.
+ * The frame is sandboxed without allow-same-origin, so this can only post a
+ * message up; the dashboard checks it came from its own frame.
+ */
+export const SELECTION_BRIDGE_SCRIPT = String.raw`(function () {
+  var timer = null;
+  function send() {
+    var s = window.getSelection();
+    var text = s && !s.isCollapsed ? String(s).replace(/\s+/g, ' ').trim().slice(0, 1500) : '';
+    var rect = null;
+    if (text && s.rangeCount) {
+      var b = s.getRangeAt(0).getBoundingClientRect();
+      rect = { left: b.left, top: b.top, width: b.width, height: b.height, bottom: b.bottom };
+    }
+    try { parent.postMessage({ mcEvidenceSelection: 1, text: text, rect: rect }, '*'); } catch (e) {}
+  }
+  document.addEventListener('mouseup', function () { setTimeout(send, 10); });
+  document.addEventListener('keyup', function (e) { if (e.shiftKey) send(); });
+  document.addEventListener('selectionchange', function () {
+    clearTimeout(timer);
+    timer = setTimeout(function () { var s = window.getSelection(); if (!s || s.isCollapsed) send(); }, 150);
+  });
+  window.addEventListener('scroll', function () { var s = window.getSelection(); if (s && !s.isCollapsed) send(); }, { passive: true });
+})();`;
+
+/** An html snapshot with the selection bridge added at its end. */
+export function withSelectionBridge(html: string): string {
+  const tag = `<script>${SELECTION_BRIDGE_SCRIPT}</script>`;
+  const at = html.search(/<\/body\s*>/i);
+  return at < 0 ? html + tag : html.slice(0, at) + tag + html.slice(at);
+}

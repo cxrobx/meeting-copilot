@@ -66,6 +66,11 @@ final class SessionManager {
     var meetingAttendees: String = ""
     /// The meeting pulse's latest read of THIS session (menu bar mirror).
     var latestPulse: MeetingPulse? = nil
+    /// The menu bar's Ask: its last question, and the meeting chat's answer
+    /// (nil until the answer starts). The thread itself is the dashboard's.
+    var menubarChat = MenubarChat()
+    var menubarQuestion: String? { menubarChat.question }
+    var menubarAnswer: ChatReply? { menubarChat.answer }
     /// The capture watchdog's latest warning (a track gone silent), shown in
     /// the menu bar's live card until the session ends.
     var captureWarning: String? = nil
@@ -499,6 +504,7 @@ final class SessionManager {
         meetingAgenda = ""
         meetingAttendees = ""
         latestPulse = nil
+        menubarChat = MenubarChat()
         setMicDead(app: false, server: false)
         captureWarning = nil
         currentSession = nil
@@ -541,14 +547,17 @@ final class SessionManager {
         runDashboardJS?(js)
     }
 
-    /// The menu bar's Ask box: the same Research path (fast, then deep) as the dashboard's Quick
-    /// Actions (a manual trigger runs without an approval step — the typed
-    /// question is the approval). Returns false when the socket is down.
+    /// The menu bar's Ask box: a question for the meeting chat, answered with
+    /// the whole meeting as context (the typed question is the approval). The
+    /// answer comes back as chat.message, shows in the popover, and the
+    /// dashboard's Chat drawer keeps the thread. Returns false when the socket
+    /// is down.
     func askCopilot(_ question: String) async -> Bool {
         let prompt = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, state == .live || state == .degraded else { return false }
         do {
-            try await webSocketClient.send(.actionTrigger(actionType: "fast-research", prompt: prompt))
+            try await webSocketClient.send(.chatSend(text: prompt))
+            menubarChat.asked(prompt)
             return true
         } catch {
             appLog("[Session] Ask send failed: \(error)")
@@ -765,6 +774,13 @@ final class SessionManager {
         case .captureRestartMic:
             guard state == .live || state == .degraded else { break }
             audioCaptureManager.restartMicrophone()
+
+        case .chatMessage(let reply):
+            guard let reply = menubarChat.receive(reply) else { break }
+            let question = menubarChat.question ?? "Chat"
+            NotificationManager.shared.postAskNotification(reply.state == "done"
+                ? AskState(kind: "chat", phase: "done", title: question, body: String(reply.plainContent.prefix(300)), empty: false)
+                : AskState(kind: "chat", phase: "failed", title: "The chat didn't answer", body: reply.error ?? "Stopped", empty: false))
 
         case .pulseUpdate(let pulse):
             // On connect the server replays the last pulse it has, which is
