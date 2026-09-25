@@ -2940,21 +2940,17 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     border-radius: 7px; color: rgb(var(--text-secondary));
     font-size: 12px; font-weight: 500; cursor: default;
     user-select: none; -webkit-user-select: none;
-    transition: background-color .12s, color .12s, width .18s cubic-bezier(.2,.8,.2,1), margin .18s cubic-bezier(.2,.8,.2,1);
+    transition: background-color .12s, color .12s, width .18s cubic-bezier(.2,.8,.2,1);
   }
   /* A truncated title, hovered: the pill widens toward its full title (up to
-     360px) OVER its neighbours, as Obsidian's do: a negative margin cancels
-     the growth, so nothing else moves (in a centred bar, a pill that pushed
-     its neighbours slid out from under the pointer and re-triggered). If the
-     title is still cut, it rolls to its end and back on the compositor
-     (transform, not text-indent, which re-laid out the text every frame). */
-  /* The id outranks .ev-tab:hover, whose translucent ground let the pill
-     underneath show through. */
-  #evTabStrip .ev-tab.ev-wide {
-    flex-shrink: 0; position: relative; z-index: 2;
-    background: rgb(var(--bg-elevated)); color: rgb(var(--text-primary));
-    box-shadow: 0 4px 14px rgb(0 0 0 / .22), 0 1px 2px rgb(0 0 0 / .1);
-  }
+     360px) and its neighbours give way, as Obsidian's tabs do. The strip's
+     width is held while the pointer is on it (evStripHold), so the centred
+     bar never slides: the hovered pill only grows, both edges outward, and
+     cannot slip from under the pointer (the re-trigger behind the stutter).
+     If the title is still cut, it rolls to its end and back on the
+     compositor (transform, not text-indent, which re-laid out every frame). */
+  .ev-tab.ev-wide { flex-shrink: 0; }
+  .ev-tab.ev-tab-meeting { flex-shrink: 0; }
   .ev-tab-title.ev-rolling { text-overflow: clip; }
   .ev-tab-title.ev-rolling .ev-tab-text {
     display: inline-block; will-change: transform;
@@ -6108,45 +6104,72 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     if (evActive !== 'meeting' && (!evTabs[evActive] || evClosed[evActive])) evActive = 'meeting';
     if (evActive === 'meeting') evMeetingNew = false;
     bar.hidden = !evTabs.length;
+    evStripHold(false); // a held width from before would leave a gap or clip
     strip.innerHTML = evTabs.length ? evStripKeys().map(evPillHtml).join('') : '';
     Array.prototype.forEach.call(strip.querySelectorAll('.ev-tab'), function(pill) {
-      pill.addEventListener('mouseenter', function() { evTabHover(pill, true); });
-      pill.addEventListener('mouseleave', function() { evTabHover(pill, false); });
+      pill.addEventListener('mouseenter', function() { evTabEnter(pill); });
     });
     evRenderView();
     evFitTabs();
   }
 
-  // Hovering a truncated pill: widen it over its neighbours to fit its title
-  // (max 360px), rightward, or leftward when that would leave the strip; once
-  // the width settles, roll whatever is still cut off into view and back.
+  // Hovering a truncated pill: once the pointer settles on it (EV_TAB_DWELL),
+  // widen it to fit its title (max 360px) while the other evidence pills
+  // shrink (to their 88px floor) inside the strip's held width, then roll
+  // whatever is still cut off into view and back.
+  //
+  // Why it is shaped this way (2026-09-24): pushing a centred strip wider
+  // slid the hovered pill from under the pointer and re-triggered it (the
+  // strip's width is held while the pointer is on it); a pill that snapped
+  // back the moment the pointer left shifted its neighbours and landed the
+  // pointer one pill further on (a wide pill stays until the next one
+  // settles, and the two swap in one step, so the new one only grows
+  // outward and keeps the pointer); and a sweep across the strip set off a
+  // chain of widenings (the dwell, as the Obsidian tab-expand themes have).
   var EV_TAB_MAX = 360;
-  function evTabHover(pill, on) {
+  var EV_TAB_MIN = 88;
+  var EV_TAB_BASE = 180;
+  var EV_TAB_DWELL = 300;
+  var evDwellTimer = null;
+  function evStripHold(on) {
+    var strip = document.getElementById('evTabStrip');
+    if (!strip) return;
+    if (on && !strip.style.width) { strip.style.width = strip.offsetWidth + 'px'; strip.style.flex = 'none'; }
+    if (!on) { strip.style.width = ''; strip.style.flex = ''; }
+  }
+  function evTabCollapse(pill) {
+    clearTimeout(pill._evRollTimer);
+    var title = pill.querySelector('.ev-tab-title');
+    if (title) title.classList.remove('ev-rolling');
+    pill.classList.remove('ev-wide');
+    pill.style.width = '';
+  }
+  function evTabEnter(pill) {
+    evStripHold(true);
+    clearTimeout(evDwellTimer);
+    evDwellTimer = setTimeout(function() { evTabSettle(pill); }, EV_TAB_DWELL);
+  }
+  function evTabSettle(pill) {
+    if (!pill.isConnected || !pill.matches(':hover') || pill.classList.contains('ev-wide')) return;
+    var strip = pill.parentNode;
+    Array.prototype.forEach.call(strip.querySelectorAll('.ev-tab.ev-wide'), evTabCollapse);
     var title = pill.querySelector('.ev-tab-title');
     var text = pill.querySelector('.ev-tab-text');
-    if (!title || !text) return;
-    clearTimeout(pill._evRollTimer);
-    if (!on) {
-      title.classList.remove('ev-rolling');
-      pill.classList.remove('ev-wide');
-      pill.style.width = '';
-      pill.style.marginLeft = '';
-      pill.style.marginRight = '';
-      return;
-    }
-    if (pill.classList.contains('ev-wide')) return;
-    if (title.scrollWidth <= title.clientWidth + 1) return;
-    var strip = pill.parentNode;
-    var base = pill.offsetWidth;
-    var target = Math.min(EV_TAB_MAX, strip.clientWidth - 4, title.scrollWidth + (base - title.clientWidth) + 2);
-    var extra = Math.max(0, target - base);
-    if (!extra) return;
-    var room = strip.clientWidth - (pill.offsetLeft - strip.offsetLeft) - base - 2;
-    var right = Math.min(extra, Math.max(0, room));
+    if (!title || !text) return; // the Meeting pill never widens
+    // Sizes from the layout the swap is heading to, not the one mid-transition.
+    var chrome = pill.offsetWidth - title.clientWidth;
+    var natural = text.offsetWidth + chrome + 2;
+    if (natural <= EV_TAB_BASE) return;
+    var others = strip.querySelectorAll('.ev-tab:not([hidden])');
+    var room = strip.clientWidth - 4 - 2 * (others.length - 1);
+    Array.prototype.forEach.call(others, function(o) {
+      if (o === pill) return;
+      room -= o.classList.contains('ev-tab-meeting') ? o.offsetWidth : EV_TAB_MIN;
+    });
+    var target = Math.min(EV_TAB_MAX, natural, room);
+    if (target <= Math.min(EV_TAB_BASE, pill.offsetWidth) + 1) return;
     pill.classList.add('ev-wide');
     pill.style.width = target + 'px';
-    pill.style.marginRight = (-right) + 'px';
-    pill.style.marginLeft = (-(extra - right)) + 'px';
     pill._evRollTimer = setTimeout(function() {
       var over = text.offsetWidth - title.clientWidth;
       if (over <= 1) return;
@@ -6155,6 +6178,16 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       title.classList.add('ev-rolling');
     }, 220);
   }
+  (function() {
+    var strip = document.getElementById('evTabStrip');
+    if (!strip) return;
+    // Leaving the strip resets it at once; moving between pills does not.
+    strip.addEventListener('mouseleave', function() {
+      clearTimeout(evDwellTimer);
+      Array.prototype.forEach.call(strip.querySelectorAll('.ev-tab.ev-wide'), evTabCollapse);
+      evStripHold(false);
+    });
+  })();
 
   function evSelect(key, focus) {
     evActive = key;
@@ -6325,7 +6358,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     }
   });
 
-  window.addEventListener('resize', function() { evCloseMenu(); if (evTabs.length) evFitTabs(); });
+  window.addEventListener('resize', function() { evCloseMenu(); evStripHold(false); if (evTabs.length) evFitTabs(); });
   // Fixed to the viewport, the menu would float free of its button on scroll.
   (function() {
     var main = document.getElementById('mainCol');
