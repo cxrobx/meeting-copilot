@@ -23,6 +23,7 @@
 | [api.md](./api.md) | WebSocket & REST API reference |
 | [setup.md](./setup.md) | Environment & deployment |
 | [e2e-reliability-latency-plan.md](./e2e-reliability-latency-plan.md) | End-to-end performance, reliability, privacy, and model upgrade plan |
+| [quality-plan.md](./quality-plan.md) | Dashboard out of the TypeScript string, a ship-gating end-to-end test, and measuring what the live meeting asks of your attention |
 
 ## Contributing
 
