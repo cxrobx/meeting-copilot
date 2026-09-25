@@ -2922,7 +2922,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
      as it always was; each other tab shows one piece of evidence in its place. */
   #evTabBar {
     position: sticky; top: -24px; z-index: 6;
-    display: flex; align-items: center; gap: 2px;
+    display: flex; align-items: center; justify-content: center; gap: 2px;
     height: 40px; margin: -24px -32px 16px; padding: 0 32px;
     background: var(--gb-base);
     border-bottom: 1px solid rgb(var(--border-subtle));
