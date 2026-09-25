@@ -2940,7 +2940,17 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     border-radius: 7px; color: rgb(var(--text-secondary));
     font-size: 12px; font-weight: 500; cursor: default;
     user-select: none; -webkit-user-select: none;
-    transition: background-color .12s, color .12s;
+    transition: background-color .12s, color .12s, width .18s cubic-bezier(.2,.8,.2,1);
+  }
+  /* A truncated title, hovered: the pill widens toward its full title (up to
+     360px, width set by evTabHover), and if that still cuts it, the title
+     rolls to its end and back, as Obsidian's tabs let a long name be read. */
+  .ev-tab.ev-wide { flex-shrink: 0; }
+  .ev-tab-title.ev-rolling { text-overflow: clip; animation: ev-roll var(--ev-roll-dur, 4s) ease-in-out infinite alternate; }
+  @keyframes ev-roll { 0%, 18% { text-indent: 0; } 82%, 100% { text-indent: var(--ev-roll, 0); } }
+  @media (prefers-reduced-motion: reduce) {
+    .ev-tab { transition: background-color .12s, color .12s; }
+    .ev-tab-title.ev-rolling { animation: none; text-overflow: ellipsis; }
   }
   .ev-tab.ev-tab-meeting { width: auto; min-width: 0; padding-right: 10px; }
   .ev-tab:hover { background: rgb(var(--text-primary) / .05); color: rgb(var(--text-primary)); }
@@ -6019,7 +6029,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     var t = evTabs[key];
     var label = evAttr(t.title);
     return '<div class="ev-tab" role="tab" id="evTab-' + key + '" data-ev-act="select" data-ev-tab="' + key + '" aria-selected="' + on +
-      '" tabindex="' + (on ? 0 : -1) + '" title="' + label + '"><span class="ev-tab-title">' + escapeHtml(t.title) + '</span>' +
+      '" tabindex="' + (on ? 0 : -1) + '" aria-label="' + label + '"><span class="ev-tab-title">' + escapeHtml(t.title) + '</span>' +
       '<button class="ev-tab-x" type="button" tabindex="-1" data-ev-act="close" data-ev-tab="' + key + '" title="Close tab" aria-label="Close ' + label + '">' + EV_X_ICON + '</button></div>';
   }
 
@@ -6085,8 +6095,38 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     if (evActive === 'meeting') evMeetingNew = false;
     bar.hidden = !evTabs.length;
     strip.innerHTML = evTabs.length ? evStripKeys().map(evPillHtml).join('') : '';
+    Array.prototype.forEach.call(strip.querySelectorAll('.ev-tab'), function(pill) {
+      pill.addEventListener('mouseenter', function() { evTabHover(pill, true); });
+      pill.addEventListener('mouseleave', function() { evTabHover(pill, false); });
+    });
     evRenderView();
     evFitTabs();
+  }
+
+  // Hovering a truncated pill: widen it to its title (max 360px); once the
+  // width has settled, roll whatever is still cut off into view and back.
+  var EV_TAB_MAX = 360;
+  function evTabHover(pill, on) {
+    var title = pill.querySelector('.ev-tab-title');
+    if (!title) return;
+    clearTimeout(pill._evRollTimer);
+    if (!on) {
+      title.classList.remove('ev-rolling');
+      pill.classList.remove('ev-wide');
+      pill.style.width = '';
+      return;
+    }
+    if (title.scrollWidth <= title.clientWidth + 1) return;
+    var chrome = pill.offsetWidth - title.clientWidth;
+    pill.classList.add('ev-wide');
+    pill.style.width = Math.min(EV_TAB_MAX, title.scrollWidth + chrome + 2) + 'px';
+    pill._evRollTimer = setTimeout(function() {
+      var over = title.scrollWidth - title.clientWidth;
+      if (over <= 1) return;
+      title.style.setProperty('--ev-roll', (-over - 4) + 'px');
+      title.style.setProperty('--ev-roll-dur', Math.max(2.5, over / 35 + 1.5).toFixed(1) + 's');
+      title.classList.add('ev-rolling');
+    }, 220);
   }
 
   function evSelect(key, focus) {
