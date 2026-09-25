@@ -2940,17 +2940,31 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     border-radius: 7px; color: rgb(var(--text-secondary));
     font-size: 12px; font-weight: 500; cursor: default;
     user-select: none; -webkit-user-select: none;
-    transition: background-color .12s, color .12s, width .18s cubic-bezier(.2,.8,.2,1);
+    transition: background-color .12s, color .12s, width .18s cubic-bezier(.2,.8,.2,1), margin .18s cubic-bezier(.2,.8,.2,1);
   }
   /* A truncated title, hovered: the pill widens toward its full title (up to
-     360px, width set by evTabHover), and if that still cuts it, the title
-     rolls to its end and back, as Obsidian's tabs let a long name be read. */
-  .ev-tab.ev-wide { flex-shrink: 0; }
-  .ev-tab-title.ev-rolling { text-overflow: clip; animation: ev-roll var(--ev-roll-dur, 4s) ease-in-out infinite alternate; }
-  @keyframes ev-roll { 0%, 18% { text-indent: 0; } 82%, 100% { text-indent: var(--ev-roll, 0); } }
+     360px) OVER its neighbours, as Obsidian's do: a negative margin cancels
+     the growth, so nothing else moves (in a centred bar, a pill that pushed
+     its neighbours slid out from under the pointer and re-triggered). If the
+     title is still cut, it rolls to its end and back on the compositor
+     (transform, not text-indent, which re-laid out the text every frame). */
+  /* The id outranks .ev-tab:hover, whose translucent ground let the pill
+     underneath show through. */
+  #evTabStrip .ev-tab.ev-wide {
+    flex-shrink: 0; position: relative; z-index: 2;
+    background: rgb(var(--bg-elevated)); color: rgb(var(--text-primary));
+    box-shadow: 0 4px 14px rgb(0 0 0 / .22), 0 1px 2px rgb(0 0 0 / .1);
+  }
+  .ev-tab-title.ev-rolling { text-overflow: clip; }
+  .ev-tab-title.ev-rolling .ev-tab-text {
+    display: inline-block; will-change: transform;
+    animation: ev-roll var(--ev-roll-dur, 4s) ease-in-out infinite alternate;
+  }
+  @keyframes ev-roll { 0%, 18% { transform: translateX(0); } 82%, 100% { transform: translateX(var(--ev-roll, 0)); } }
   @media (prefers-reduced-motion: reduce) {
     .ev-tab { transition: background-color .12s, color .12s; }
-    .ev-tab-title.ev-rolling { animation: none; text-overflow: ellipsis; }
+    .ev-tab-title.ev-rolling { text-overflow: ellipsis; }
+    .ev-tab-title.ev-rolling .ev-tab-text { display: inline; animation: none; }
   }
   .ev-tab.ev-tab-meeting { width: auto; min-width: 0; padding-right: 10px; }
   .ev-tab:hover { background: rgb(var(--text-primary) / .05); color: rgb(var(--text-primary)); }
@@ -6029,7 +6043,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     var t = evTabs[key];
     var label = evAttr(t.title);
     return '<div class="ev-tab" role="tab" id="evTab-' + key + '" data-ev-act="select" data-ev-tab="' + key + '" aria-selected="' + on +
-      '" tabindex="' + (on ? 0 : -1) + '" aria-label="' + label + '"><span class="ev-tab-title">' + escapeHtml(t.title) + '</span>' +
+      '" tabindex="' + (on ? 0 : -1) + '" aria-label="' + label + '"><span class="ev-tab-title"><span class="ev-tab-text">' + escapeHtml(t.title) + '</span></span>' +
       '<button class="ev-tab-x" type="button" tabindex="-1" data-ev-act="close" data-ev-tab="' + key + '" title="Close tab" aria-label="Close ' + label + '">' + EV_X_ICON + '</button></div>';
   }
 
@@ -6103,28 +6117,41 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     evFitTabs();
   }
 
-  // Hovering a truncated pill: widen it to its title (max 360px); once the
-  // width has settled, roll whatever is still cut off into view and back.
+  // Hovering a truncated pill: widen it over its neighbours to fit its title
+  // (max 360px), rightward, or leftward when that would leave the strip; once
+  // the width settles, roll whatever is still cut off into view and back.
   var EV_TAB_MAX = 360;
   function evTabHover(pill, on) {
     var title = pill.querySelector('.ev-tab-title');
-    if (!title) return;
+    var text = pill.querySelector('.ev-tab-text');
+    if (!title || !text) return;
     clearTimeout(pill._evRollTimer);
     if (!on) {
       title.classList.remove('ev-rolling');
       pill.classList.remove('ev-wide');
       pill.style.width = '';
+      pill.style.marginLeft = '';
+      pill.style.marginRight = '';
       return;
     }
+    if (pill.classList.contains('ev-wide')) return;
     if (title.scrollWidth <= title.clientWidth + 1) return;
-    var chrome = pill.offsetWidth - title.clientWidth;
+    var strip = pill.parentNode;
+    var base = pill.offsetWidth;
+    var target = Math.min(EV_TAB_MAX, strip.clientWidth - 4, title.scrollWidth + (base - title.clientWidth) + 2);
+    var extra = Math.max(0, target - base);
+    if (!extra) return;
+    var room = strip.clientWidth - (pill.offsetLeft - strip.offsetLeft) - base - 2;
+    var right = Math.min(extra, Math.max(0, room));
     pill.classList.add('ev-wide');
-    pill.style.width = Math.min(EV_TAB_MAX, title.scrollWidth + chrome + 2) + 'px';
+    pill.style.width = target + 'px';
+    pill.style.marginRight = (-right) + 'px';
+    pill.style.marginLeft = (-(extra - right)) + 'px';
     pill._evRollTimer = setTimeout(function() {
-      var over = title.scrollWidth - title.clientWidth;
+      var over = text.offsetWidth - title.clientWidth;
       if (over <= 1) return;
       title.style.setProperty('--ev-roll', (-over - 4) + 'px');
-      title.style.setProperty('--ev-roll-dur', Math.max(2.5, over / 35 + 1.5).toFixed(1) + 's');
+      title.style.setProperty('--ev-roll-dur', Math.max(2.5, over / 30 + 1.5).toFixed(1) + 's');
       title.classList.add('ev-rolling');
     }, 220);
   }
