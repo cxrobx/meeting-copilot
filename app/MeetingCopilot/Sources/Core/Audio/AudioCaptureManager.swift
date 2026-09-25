@@ -50,6 +50,9 @@ final class AudioCaptureManager: NSObject {
     var isCapturing: Bool = false
     var currentOutputDevice: String = "Unknown"
     var currentInputDevice: String = "Unknown"
+    /// The device the mic engine was pinned to (`MicDevicePicker`), or nil
+    /// when it follows the system default input.
+    private var pinnedMic: MicDevicePicker.InputDevice?
     var audioLevel: Float = 0.0
     /// Per-track peaks for the menu bar's level bars (see `LevelMeter`).
     let levelMeter = LevelMeter()
@@ -179,9 +182,19 @@ final class AudioCaptureManager: NSObject {
     /// dead as one that never started.
     private var micLastSeenBuffers: Int = 0
     private var micLastProgressAt: Date?
+    /// Same, for buffers carrying any non-zero sample. A working mic never
+    /// reads exact zero (its noise floor alone is non-zero); a hijacked,
+    /// denied or wedged one delivers valid-sized buffers of zeros.
+    private var micLastSignalSeen: Int = 0
+    private var micLastSignalAt: Date?
     private var warnedMicDead = false
     private var warnedMeetingSilent = false
     private var onCaptureWarning: ((String) -> Void)?
+    /// The mic is dead after its restart ladder (message for the user), and
+    /// its recovery. Separate from `onCaptureWarning` so the app can mark the
+    /// mic specifically and clear the alarm when audio returns.
+    var onMicDead: ((String) -> Void)?
+    var onMicRecovered: (() -> Void)?
 
     /// How long to wait for the mic tap's FIRST buffer before treating the
     /// engine as dead. AVAudioEngine legitimately takes a beat to spin up
@@ -195,9 +208,14 @@ final class AudioCaptureManager: NSObject {
     /// it counts as stalled. A 4096-frame tap fires every ~0.1-0.2 s whatever
     /// the level, so 5 s of nothing is never a quiet room.
     private static let micStallGraceSec: TimeInterval = 5.0
+    /// How long a delivering mic may carry nothing but exact zeros.
+    private static let micZeroGraceSec: TimeInterval = 15.0
     /// Sustained delivery after a restart that earns the restart budget back,
     /// so a stall late in a long meeting still gets its own restarts.
     private static let micRestartBudgetResetSec: TimeInterval = 30.0
+    /// After the restart ladder is spent, keep trying this often. A dead mic is
+    /// never acceptable to leave alone for the rest of a meeting.
+    private static let micPersistentRetrySec: TimeInterval = 30.0
     /// How long the meeting track may stay digitally silent before warning.
     /// Long enough to survive a genuinely quiet opening, short enough to still
     /// be actionable while the meeting is running.
@@ -623,6 +641,7 @@ final class AudioCaptureManager: NSObject {
     private func startMicrophoneCapture() throws {
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
+        pinMicrophone(inputNode)
 
         let desiredFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -888,6 +907,8 @@ final class AudioCaptureManager: NSObject {
         micLastRestartAt = nil
         micLastSeenBuffers = 0
         micLastProgressAt = now
+        micLastSignalSeen = 0
+        micLastSignalAt = now
         warnedMicDead = false
         warnedMeetingSilent = false
         captureHealth.resetAll()
@@ -918,14 +939,25 @@ final class AudioCaptureManager: NSObject {
             micLastProgressAt = now
         }
         let sinceLastBuffer = now.timeIntervalSince(micLastProgressAt ?? now)
+        if stats.micNonZero != micLastSignalSeen {
+            micLastSignalSeen = stats.micNonZero
+            micLastSignalAt = now
+        }
+        let sinceLastSignal = now.timeIntervalSince(micLastSignalAt ?? now)
         if let armedAt = micWatchdogArmedAt {
             switch Self.micVerdict(
                 buffers: stats.micBuffers,
                 elapsed: now.timeIntervalSince(armedAt),
                 restartsUsed: micWatchdogRestarts,
-                sinceLastBuffer: sinceLastBuffer
+                sinceLastBuffer: sinceLastBuffer,
+                sinceLastSignal: sinceLastSignal
             ) {
             case .healthy:
+                if warnedMicDead {
+                    warnedMicDead = false
+                    appLog("[AudioCapture] WATCHDOG mic recovered — \"\(currentInputDevice)\" delivering audio again")
+                    onMicRecovered?()
+                }
                 if micWatchdogRestarts > 0, let last = micLastRestartAt,
                    now.timeIntervalSince(last) >= Self.micRestartBudgetResetSec {
                     micWatchdogRestarts = 0
@@ -936,7 +968,9 @@ final class AudioCaptureManager: NSObject {
             case .restart:
                 micWatchdogRestarts += 1
                 micLastRestartAt = now
-                if stats.micBuffers > 0 {
+                if stats.micBuffers > 0 && sinceLastBuffer < Self.micStallGraceSec {
+                    appLog("[AudioCapture] WATCHDOG mic delivering only digital silence for \(Int(sinceLastSignal))s — restarting engine (attempt \(micWatchdogRestarts)/\(Self.micWatchdogMaxRestarts))")
+                } else if stats.micBuffers > 0 {
                     appLog("[AudioCapture] WATCHDOG mic stalled — no buffers for \(Int(sinceLastBuffer))s after \(stats.micBuffers) — restarting engine (attempt \(micWatchdogRestarts)/\(Self.micWatchdogMaxRestarts))")
                 } else {
                     appLog("[AudioCapture] WATCHDOG mic delivered 0 buffers in \(Int(Self.micFirstBufferGraceSec))s — restarting engine (attempt \(micWatchdogRestarts)/\(Self.micWatchdogMaxRestarts))")
@@ -947,20 +981,36 @@ final class AudioCaptureManager: NSObject {
                 captureHealth.resetMic()
                 micLastSeenBuffers = 0
                 micLastProgressAt = now
+                micLastSignalSeen = 0
+                micLastSignalAt = now
                 restartMicrophoneCapture(
                     retriesLeft: Self.micRestartMaxRetries,
                     backoffMs: Self.micRestartInitialBackoffMs
                 )
             case .giveUp:
-                guard !warnedMicDead else { break }
-                warnedMicDead = true
-                // Stop re-checking — the restart ladder is exhausted and
-                // repeating the toast would just nag.
-                micWatchdogArmedAt = nil
-                appLog("[AudioCapture] WATCHDOG mic dead after \(Self.micWatchdogMaxRestarts) restarts — giving up (input=\"\(currentInputDevice)\")")
-                onCaptureWarning?(
-                    "Microphone \"\(currentInputDevice)\" is not delivering audio — your side of the meeting is not being transcribed. Try switching the input device in System Settings → Sound."
-                )
+                if !warnedMicDead {
+                    // Warn once; the .healthy branch clears it on recovery.
+                    warnedMicDead = true
+                    appLog("[AudioCapture] WATCHDOG mic dead after \(Self.micWatchdogMaxRestarts) restarts (input=\"\(currentInputDevice)\") — warning, retrying every \(Int(Self.micPersistentRetrySec))s")
+                    onMicDead?(
+                        "Your microphone (\"\(currentInputDevice)\") is not delivering audio, so your side of the meeting is not being heard. It may be muted or disconnected. Meeting Copilot keeps retrying; switching the input in System Settings → Sound also restarts it."
+                    )
+                }
+                // Never stop trying: one restart every micPersistentRetrySec.
+                if let last = micLastRestartAt, now.timeIntervalSince(last) >= Self.micPersistentRetrySec {
+                    micLastRestartAt = now
+                    micWatchdogArmedAt = now
+                    captureHealth.resetMic()
+                    micLastSeenBuffers = 0
+                    micLastProgressAt = now
+                    micLastSignalSeen = 0
+                    micLastSignalAt = now
+                    appLog("[AudioCapture] WATCHDOG mic still dead — retrying restart")
+                    restartMicrophoneCapture(
+                        retriesLeft: Self.micRestartMaxRetries,
+                        backoffMs: Self.micRestartInitialBackoffMs
+                    )
+                }
             }
         }
 
@@ -999,7 +1049,9 @@ final class AudioCaptureManager: NSObject {
     /// that would be wrong. Only a total absence of callbacks means dead.
     ///
     /// A tap that delivered and then stopped (`sinceLastBuffer` past
-    /// `stallGrace`) is judged like one that never started. Before 2026-09-25
+    /// `stallGrace`) is judged like one that never started, and so is one
+    /// delivering nothing but exact zeros for `zeroGrace` (a quiet room is
+    /// never exact zero; see `micLastSignalAt`). Before 2026-09-25
     /// one buffer made the mic healthy for the rest of the meeting.
     ///
     /// Pure so it can be tested without timers or a real device.
@@ -1008,12 +1060,14 @@ final class AudioCaptureManager: NSObject {
         elapsed: TimeInterval,
         restartsUsed: Int,
         sinceLastBuffer: TimeInterval = 0,
+        sinceLastSignal: TimeInterval = 0,
         grace: TimeInterval = micFirstBufferGraceSec,
         stallGrace: TimeInterval = micStallGraceSec,
+        zeroGrace: TimeInterval = micZeroGraceSec,
         maxRestarts: Int = micWatchdogMaxRestarts
     ) -> MicVerdict {
         if buffers > 0 {
-            if sinceLastBuffer < stallGrace { return .healthy }
+            if sinceLastBuffer < stallGrace && sinceLastSignal < zeroGrace { return .healthy }
         } else if elapsed < grace {
             return .wait
         }
@@ -1103,6 +1157,29 @@ final class AudioCaptureManager: NSObject {
         // Skip restart if we're not actively capturing — the next startCapture
         // will pick up the current device on its own.
         guard isCapturing else { return }
+        // A pinned mic doesn't move with the default input (AirPods
+        // connecting), so restarting it would only risk the engine. If the
+        // pinned device itself went away, the engine stops and the
+        // configuration-change observer or the stall watchdog restarts it.
+        if let pinned = pinnedMic, MicDevicePicker.inputDevices().contains(where: { $0.id == pinned.id }) {
+            appLog("[AudioCapture] mic stays on pinned \"\(pinned.name)\"")
+            return
+        }
+        scheduleMicRestart()
+    }
+
+    /// A restart asked for by the user (the dashboard's Restart mic button).
+    /// Gives the watchdog a fresh restart budget.
+    func restartMicrophone() {
+        guard isCapturing else { return }
+        appLog("[AudioCapture] mic restart requested by the user")
+        micWatchdogRestarts = 0
+        micWatchdogArmedAt = Date()
+        captureHealth.resetMic()
+        micLastSeenBuffers = 0
+        micLastProgressAt = Date()
+        micLastSignalSeen = 0
+        micLastSignalAt = Date()
         scheduleMicRestart()
     }
 
@@ -1163,6 +1240,40 @@ final class AudioCaptureManager: NSObject {
         }
     }
 
+    /// Point the engine's input at the preferred mic (built-in by default)
+    /// before anything reads its format. A failure leaves the system default.
+    private func pinMicrophone(_ inputNode: AVAudioInputNode) {
+        let preference = AppSettings.micDevice
+        guard let device = MicDevicePicker.choose(preference, from: MicDevicePicker.inputDevices()) else {
+            pinnedMic = nil
+            appLog("[AudioCapture] mic follows the system default input (preference=\(preference))")
+            updateDeviceNames()
+            return
+        }
+        guard let unit = inputNode.audioUnit else {
+            pinnedMic = nil
+            appLog("[AudioCapture] mic pin skipped — input node has no audio unit")
+            return
+        }
+        var id = device.id
+        let status = AudioUnitSetProperty(
+            unit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &id,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        if status == noErr {
+            pinnedMic = device
+            appLog("[AudioCapture] mic pinned to \"\(device.name)\" (system default input: \"\(getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultInputDevice))\")")
+        } else {
+            pinnedMic = nil
+            appLog("[AudioCapture] mic pin to \"\(device.name)\" failed (status \(status)) — using the system default input")
+        }
+        updateDeviceNames()
+    }
+
     private func removeEngineConfigObserver() {
         if let observer = engineConfigObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -1172,7 +1283,7 @@ final class AudioCaptureManager: NSObject {
 
     private func updateDeviceNames() {
         currentOutputDevice = getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultOutputDevice)
-        currentInputDevice = getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultInputDevice)
+        currentInputDevice = pinnedMic?.name ?? getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultInputDevice)
     }
 
     private func getDefaultDeviceName(selector: AudioObjectPropertySelector) -> String {

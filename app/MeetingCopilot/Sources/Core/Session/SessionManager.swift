@@ -69,6 +69,30 @@ final class SessionManager {
     /// The capture watchdog's latest warning (a track gone silent), shown in
     /// the menu bar's live card until the session ends.
     var captureWarning: String? = nil
+    /// Your side is not being heard right now, by either watchdog: the app's
+    /// own (AudioCaptureManager) or the server's, on the frames it actually
+    /// receives. Drives the menu bar's NO MIC label and the notification;
+    /// clears when both say the mic is back.
+    var micDead: Bool { micDeadByApp || micDeadByServer }
+    private(set) var micDeadByApp = false
+    private(set) var micDeadByServer = false
+
+    private func setMicDead(app: Bool? = nil, server: Bool? = nil, message: String? = nil) {
+        let was = micDead
+        if let app { micDeadByApp = app }
+        if let server { micDeadByServer = server }
+        if micDead && !was {
+            let body = message ?? "Your microphone is not reaching Meeting Copilot, so your side of the meeting is not being heard. Meeting Copilot keeps retrying; switching the input in System Settings → Sound also restarts it."
+            appLog("[Session] Mic dead (app=\(micDeadByApp), server=\(micDeadByServer))")
+            captureWarning = body
+            surfaceError(body)
+            NotificationManager.shared.postMicDeadNotification(body: body)
+        } else if !micDead && was {
+            appLog("[Session] Mic recovered")
+            captureWarning = nil
+            NotificationManager.shared.clearMicDeadNotification()
+        }
+    }
 
     // MARK: - Dependencies
 
@@ -235,6 +259,12 @@ final class SessionManager {
         // Start audio capture
         appLog("[Session] Starting audio capture...")
         let frameContinuation = startFrameSender()
+        audioCaptureManager.onMicDead = { [weak self] message in
+            Task { @MainActor in self?.setMicDead(app: true, message: message) }
+        }
+        audioCaptureManager.onMicRecovered = { [weak self] in
+            Task { @MainActor in self?.setMicDead(app: false) }
+        }
         do {
             try await audioCaptureManager.startCapture(
                 onChunk: { [weak self] wavData, source, meta in
@@ -469,6 +499,7 @@ final class SessionManager {
         meetingAgenda = ""
         meetingAttendees = ""
         latestPulse = nil
+        setMicDead(app: false, server: false)
         captureWarning = nil
         currentSession = nil
         _ = handleStateTransition(to: .idle)
@@ -719,6 +750,21 @@ final class SessionManager {
 
         case .askState(let ask):
             NotificationManager.shared.postAskNotification(ask)
+
+        case .captureHealth(let mic, _):
+            guard state == .live || state == .degraded else { break }
+            let dead = mic == "stalled" || mic == "silent"
+            if dead && !micDeadByServer {
+                appLog("[Session] Server watchdog: mic \(mic)")
+                // The server saw it first: restart now rather than wait for
+                // the app's own watchdog to agree.
+                audioCaptureManager.restartMicrophone()
+            }
+            setMicDead(server: dead)
+
+        case .captureRestartMic:
+            guard state == .live || state == .degraded else { break }
+            audioCaptureManager.restartMicrophone()
 
         case .pulseUpdate(let pulse):
             // On connect the server replays the last pulse it has, which is

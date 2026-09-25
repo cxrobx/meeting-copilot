@@ -3457,6 +3457,21 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   @media (prefers-reduced-motion: reduce) {
     .stage-wave i, .stage-live .w, .stage-toast, .stage-rec { animation: none; }
   }
+/* Capture health banner (capture/track-watch.ts): your side is not being heard. */
+.cap-banner {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 16px;
+  background: rgb(var(--error));
+  color: #fff;
+  font-weight: 600; font-size: 13px;
+}
+.cap-banner[hidden] { display: none; }
+.cap-banner .cap-text { flex: 1; }
+.cap-banner button {
+  border: 1px solid rgba(255,255,255,0.7); background: transparent; color: #fff;
+  border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer;
+}
+.cap-banner button:hover { background: rgba(255,255,255,0.15); }
 </style>
 </head>
 <body>
@@ -3483,6 +3498,11 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     <button class="btn btn-ghost btn-sm" id="stageBtn" onclick="toggleStage()" aria-label="Stage view" title="Stage view (declutters to transcript + prompts)">Stage</button>
     <button class="btn btn-ghost btn-sm" id="settingsBtn" onclick="openSettings()" aria-label="Settings" title="Settings">&#9881;</button>
   </div>
+</div>
+
+<div class="cap-banner" id="capBanner" role="alert" hidden>
+  <span class="cap-text" id="capBannerText"></span>
+  <button type="button" data-cap-act="restart-mic">Restart mic</button>
 </div>
 
 <!-- ─── Stage View (full-screen presentation mode) ──────────── -->
@@ -8807,6 +8827,32 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     });
   };
 
+  // ─── Capture health banner ────────────────────────────────
+  // The server's own watchdog (capture/track-watch.ts) says a track is not
+  // arriving. Only the mic gets a banner: it is the side nothing else reports.
+  function capShowHealth(h) {
+    var banner = document.getElementById('capBanner');
+    var text = document.getElementById('capBannerText');
+    if (!banner || !text) return;
+    var mic = h && h.mic;
+    if (mic === 'stalled' || mic === 'silent') {
+      text.textContent = mic === 'stalled'
+        ? 'Your mic is not reaching Meeting Copilot. Your side of the meeting is not being heard.'
+        : 'Your mic is sending pure silence (muted or wedged). Your side of the meeting is not being heard.';
+      banner.hidden = false;
+    } else {
+      banner.hidden = true;
+    }
+  }
+  document.addEventListener('click', function(e) {
+    var btn = e.target && e.target.closest ? e.target.closest('[data-cap-act="restart-mic"]') : null;
+    if (!btn) return;
+    if (wsSend({ type: 'capture.restartMic' })) {
+      btn.textContent = 'Restarting…';
+      setTimeout(function() { btn.textContent = 'Restart mic'; }, 4000);
+    }
+  });
+
   // ─── WebSocket ────────────────────────────────────────────
   var wsRetries = 0;
   var maxRetries = 20;
@@ -8904,7 +8950,11 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       try { msg = JSON.parse(evt.data); } catch { return; }
 
       switch (msg.type) {
+        case 'capture.health':
+          capShowHealth(msg);
+          break;
         case 'session.state':
+          if (msg.state !== 'live' && msg.state !== 'degraded') capShowHealth({ mic: 'ok', meeting: 'ok' });
           // Back from the post-meeting summary: the server still says archived
           // for the meeting just reviewed. Treat it as idle so the setup form
           // shows (and a later reconnect can't wipe a half-filled form).

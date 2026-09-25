@@ -16,6 +16,23 @@ final class ServerMessageTests: XCTestCase {
         XCTAssertEqual(body, "Ask who owns the pilot readout · Propose a follow-up")
     }
 
+    func testCaptureHealthDecodesBothTracks() throws {
+        // server/src/index.ts: broadcast({ type: 'capture.health', ...trackWatch.snapshot() })
+        let message = try decode(#"{"type":"capture.health","mic":"stalled","meeting":"ok"}"#)
+        guard case .captureHealth(let mic, let meeting) = message else {
+            return XCTFail("expected .captureHealth, got \(message)")
+        }
+        XCTAssertEqual(mic, "stalled")
+        XCTAssertEqual(meeting, "ok")
+    }
+
+    func testCaptureRestartMicDecodes() throws {
+        let message = try decode(#"{"type":"capture.restartMic"}"#)
+        guard case .captureRestartMic = message else {
+            return XCTFail("expected .captureRestartMic, got \(message)")
+        }
+    }
+
     func testMessagesTheAppDoesNotHandleStillDecode() throws {
         // The dashboard's own messages (coach.history, factcheck.flag, …) reach
         // the app's socket too; an unknown type must never fail the decode.

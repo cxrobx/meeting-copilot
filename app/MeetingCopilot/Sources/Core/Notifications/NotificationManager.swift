@@ -102,6 +102,24 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         center.add(request)
     }
 
+    /// Your mic has stopped reaching the meeting. Deliberately NOT gated on
+    /// the panel being in front, and with sound: a live meeting without your
+    /// side is the failure this app exists to prevent (2026-09-25). Cleared
+    /// when the mic recovers.
+    func postMicDeadNotification(body: String) {
+        guard hasPermission else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "Your mic isn't being heard"
+        content.body = body
+        content.sound = .default
+        content.threadIdentifier = "capture"
+        center.add(UNNotificationRequest(identifier: "mic-dead", content: content, trigger: nil))
+    }
+
+    func clearMicDeadNotification() {
+        center.removeDeliveredNotifications(withIdentifiers: ["mic-dead"])
+    }
+
     /// One of the coach's questions, asked from a button or a ⌃⌥ hotkey. One
     /// banner per question: the answer replaces the "Reading the meeting…"
     /// banner. Silent, unlike the close-out: the meeting track taps system

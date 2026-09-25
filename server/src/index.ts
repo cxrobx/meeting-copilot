@@ -60,6 +60,7 @@ import { getSettings } from './settings.js';
 import { attachPrepToSession, prepBriefDoc } from './prep/staged.js';
 import { evidenceView, openLiveTabs, type EvidenceTabView } from './present/evidence.js';
 import { LLM_CONFIG, MODEL_CONFIG } from './model-config.js';
+import { TrackWatch, type Track, type TrackState } from './capture/track-watch.js';
 
 // Load environment — prefer ~/.meeting-copilot/.env so a packaged .app
 // user has a stable, user-writable location for API keys that survives
@@ -140,10 +141,16 @@ type InboundMessage =
   // No kind is the Wrap-up button (the only kind before 2026-09-22).
   | { type: 'pulse.request'; kind?: 'closeout' | 'checkin' | 'missed' }
   // "Suggest": one coach card now, optionally about the prompt box's text.
-  | { type: 'coach.ask'; focus?: string };
+  | { type: 'coach.ask'; focus?: string }
+  // The dashboard's "Restart mic" button: relayed to the app.
+  | { type: 'capture.restartMic' };
 
 // Messages TO Swift app
 type OutboundMessage =
+  // Server-side track health (capture/track-watch.ts). The dashboard shows a
+  // banner while the mic is not ok; the app raises NO MIC from it too.
+  | { type: 'capture.health'; mic: TrackState; meeting: TrackState }
+  | { type: 'capture.restartMic' }
   | {
       type: 'transcript.update';
       segment: {
@@ -307,6 +314,32 @@ const transcription = new TranscriptionService(transcriptionPlan.provider);
 const streaming = transcriptionPlan.streaming;
 if (streaming) transcription.streamingInfo = streaming.info;
 const transcriptDedup = new TranscriptDedup();
+// Second opinion on audio health, from the frames that actually arrive.
+const trackWatch = new TrackWatch();
+let trackWatchTimer: ReturnType<typeof setInterval> | null = null;
+
+function startTrackWatch(): void {
+  trackWatch.start();
+  if (trackWatchTimer) clearInterval(trackWatchTimer);
+  trackWatchTimer = setInterval(() => {
+    const changes = trackWatch.check();
+    if (changes.length === 0) return;
+    for (const c of changes) {
+      debugLog(`[TrackWatch] ${c.track} -> ${c.state}${c.sinceMs ? ` (${Math.round(c.sinceMs / 1000)}s)` : ''}`);
+      eventLogger?.log('capture.health', { track: c.track, state: c.state, sinceMs: c.sinceMs });
+    }
+    broadcast({ type: 'capture.health', ...trackWatch.snapshot() });
+  }, 1_000);
+  if (typeof trackWatchTimer.unref === 'function') trackWatchTimer.unref();
+}
+
+function stopTrackWatch(): void {
+  if (trackWatchTimer) clearInterval(trackWatchTimer);
+  trackWatchTimer = null;
+  const wasBad = trackWatch.active && (trackWatch.state('mic') !== 'ok' || trackWatch.state('meeting') !== 'ok');
+  trackWatch.stop();
+  if (wasBad) broadcast({ type: 'capture.health', mic: 'ok', meeting: 'ok' });
+}
 const transcriptStitcher = new TranscriptStitcher();
 const intelligence = new IntelligenceEngine();
 const agendaTracker = new AgendaTracker();
@@ -665,6 +698,14 @@ function handleWsConnection(ws: WebSocket, label: string): void {
   };
   ws.send(JSON.stringify(stateMsg));
 
+  // A late-joining dashboard must see a dead mic at once, not at the next change.
+  if (sessionActive && trackWatch.active) {
+    const health = trackWatch.snapshot();
+    if (health.mic !== 'ok' || health.meeting !== 'ok') {
+      ws.send(JSON.stringify({ type: 'capture.health', ...health }));
+    }
+  }
+
   // Replay the latest agenda status so late-joining clients (e.g., browser reload)
   // see the current coverage without waiting for the next 30s evaluation.
   if (sessionActive && lastAgendaStatus && lastAgendaStatus.items.length > 0) {
@@ -697,7 +738,12 @@ function handleWsConnection(ws: WebSocket, label: string): void {
     // Binary audio frame: [0x01 mic | 0x02 meeting] + 100 ms of 16 kHz PCM16.
     // JSON messages always start with '{', so the first byte tells them apart.
     if (Buffer.isBuffer(raw) && (raw[0] === AUDIO_FRAME_MIC || raw[0] === AUDIO_FRAME_MEETING)) {
-      if (sessionActive) streaming?.pushFrame(raw[0] === AUDIO_FRAME_MIC ? 'mic' : 'meeting', raw.subarray(1));
+      if (sessionActive) {
+        const track: Track = raw[0] === AUDIO_FRAME_MIC ? 'mic' : 'meeting';
+        const pcm = raw.subarray(1);
+        trackWatch.frame(track, pcm);
+        streaming?.pushFrame(track, pcm);
+      }
       return;
     }
     try {
@@ -939,6 +985,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       // Start intelligence engine
       intelligence.start();
       sessionActive = true;
+      startTrackWatch();
 
       // Per-session starting state comes from persisted settings. Recovery
       // coach defaults on for new installs; fact-check remains off by default.
@@ -1095,6 +1142,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
 
       postSessionState = 'ending';
       lastSessionId = sessionStore.id;
+      stopTrackWatch();
 
       eventLogger?.log('session.stop', {
         sessionId: sessionStore.id,
@@ -1389,6 +1437,12 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       break;
     }
 
+    case 'capture.restartMic': {
+      // The app owns the mic; the dashboard can only ask it.
+      debugLog('[TrackWatch] Restart mic requested from the dashboard');
+      broadcast({ type: 'capture.restartMic' });
+      break;
+    }
     case 'coach.ask': {
       if (!sessionActive || !sessionStore) {
         broadcast({ type: 'ask.state', kind: 'suggest', phase: 'failed', title: "Suggest didn't run", body: 'No meeting is live' });

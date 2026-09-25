@@ -109,10 +109,15 @@ enum ServerMessage: Decodable {
     /// One of the coach's questions (a dashboard button or a hotkey) was
     /// taken, answered, or failed. The app turns it into a notification.
     case askState(AskState)
+    /// The server's own watchdog on the frames it receives
+    /// (server/src/capture/track-watch.ts): "ok" | "stalled" | "silent".
+    case captureHealth(mic: String, meeting: String)
+    /// The dashboard's Restart mic button, relayed by the server.
+    case captureRestartMic
 
     private enum CodingKeys: String, CodingKey {
         case type, segment, action, actionId, state, result, sessionId, data, body, pulse,
-             kind, phase, title, empty
+             kind, phase, title, empty, mic, meeting
     }
 
     init(from decoder: Decoder) throws {
@@ -161,6 +166,13 @@ enum ServerMessage: Decodable {
                 body: try container.decodeIfPresent(String.self, forKey: .body),
                 empty: (try container.decodeIfPresent(Bool.self, forKey: .empty)) ?? false
             ))
+        case "capture.health":
+            self = .captureHealth(
+                mic: (try container.decodeIfPresent(String.self, forKey: .mic)) ?? "ok",
+                meeting: (try container.decodeIfPresent(String.self, forKey: .meeting)) ?? "ok"
+            )
+        case "capture.restartMic":
+            self = .captureRestartMic
         default:
             // Ignore unknown message types gracefully
             self = .metrics(DebugMetrics(transcriptLatencyMs: nil, activeWorkers: nil, audioBufferSizeBytes: nil, serverUptime: nil))

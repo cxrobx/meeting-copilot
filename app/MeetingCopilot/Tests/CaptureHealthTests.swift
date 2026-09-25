@@ -81,6 +81,25 @@ final class CaptureHealthTests: XCTestCase {
         )
     }
 
+    func testMicDeliveringOnlyExactZerosIsCaught() {
+        // Buffers still arrive, but not one non-zero sample for 15 s: a
+        // denied, hijacked or wedged mic. A quiet room is never exact zero.
+        XCTAssertEqual(
+            AudioCaptureManager.micVerdict(
+                buffers: 900, elapsed: 120, restartsUsed: 0,
+                sinceLastBuffer: 0.1, sinceLastSignal: 15, zeroGrace: 15
+            ),
+            .restart
+        )
+        XCTAssertEqual(
+            AudioCaptureManager.micVerdict(
+                buffers: 900, elapsed: 120, restartsUsed: 0,
+                sinceLastBuffer: 0.1, sinceLastSignal: 14.9, zeroGrace: 15
+            ),
+            .healthy
+        )
+    }
+
     func testMicStallGivesUpAfterRestartLadderExhausted() {
         XCTAssertEqual(
             AudioCaptureManager.micVerdict(

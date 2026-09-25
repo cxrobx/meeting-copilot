@@ -33,6 +33,16 @@ struct MenuBarLabel: View {
     var body: some View {
         Group {
             switch sessionManager.state {
+            case .live where sessionManager.micDead, .degraded where sessionManager.micDead:
+                // Your side isn't being heard: this has to be impossible to
+                // miss, so it replaces the REC timer until the mic recovers.
+                HStack(spacing: 4) {
+                    menuBarGhost
+                    Image(systemName: "mic.slash.fill")
+                    Text("NO MIC")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                }
+                .foregroundStyle(.yellow)
             case .live:
                 // The persistent recording cue (privacy requirement): the old
                 // 6px dot was easy to miss and the panel is not always-on-top.

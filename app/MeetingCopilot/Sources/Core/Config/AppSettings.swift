@@ -17,6 +17,7 @@ enum AppSettings {
         static let vadMinSilenceMs = "vadMinSilenceMs"
         static let vadMaxUtteranceSec = "vadMaxUtteranceSec"
         static let meetingAudioSource = "meetingAudioSource"
+        static let micDevice = "micDevice"
     }
 
     /// Where the meeting (other-side) track comes from.
@@ -44,6 +45,19 @@ enum AppSettings {
             return source
         }
         return .processTap
+    }
+
+    /// Which microphone the mic track records from: `builtin` (default),
+    /// `default` (follow macOS's default input, the pre-2026-09-25 behaviour),
+    /// or a device's exact name. See `MicDevicePicker` for why the built-in mic
+    /// is the default.
+    /// `defaults write com.christopherrobinson.meeting-copilot micDevice default`
+    /// (or launch with `MC_MIC_DEVICE=default`). Read each time the mic starts.
+    static var micDevice: MicDevicePicker.Preference {
+        if let env = ProcessInfo.processInfo.environment["MC_MIC_DEVICE"] {
+            return MicDevicePicker.Preference(setting: env)
+        }
+        return MicDevicePicker.Preference(setting: UserDefaults.standard.string(forKey: Key.micDevice))
     }
 
     /// Whether the VAD-driven chunk emitter is active. When false, falls
