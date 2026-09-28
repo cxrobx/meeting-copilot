@@ -49,16 +49,16 @@ describe('central model and provider configuration', () => {
   // retune the app (it had live suggestions on Sonnet 5.5 at xhigh).
   it('passes an explicit effort to every claude CLI spawn that can take one', () => {
     expect(EFFORT_CONFIG).toEqual({
-      suggestion: 'low',
-      worker: 'low',
-      prep: 'medium',
+      suggestion: 'xhigh',
+      worker: 'medium',
+      prep: 'high',
       deepResearch: 'medium',
       pulse: 'medium',
       review: 'xhigh',
     });
     expect(cliEffortArgs('claude-opus-5-5', EFFORT_CONFIG.review)).toEqual(['--effort', 'xhigh']);
     expect(cliEffortArgs('claude-opus-5-5')).toEqual(['--effort', 'medium']);
-    expect(cliEffortArgs('claude-sonnet-5-5')).toEqual(['--effort', 'low']);
+    expect(cliEffortArgs('claude-sonnet-5-5')).toEqual(['--effort', 'medium']);
     // Haiku 4.5 has no effort control; with no model the CLI's own default is unknown.
     expect(cliEffortArgs('claude-haiku-4-5-20251001')).toEqual([]);
     expect(cliEffortArgs(undefined)).toEqual([]);

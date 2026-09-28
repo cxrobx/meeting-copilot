@@ -48,12 +48,19 @@ export type CliEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 // Effort for each role that runs on the `claude` CLI. Every spawn passes
 // --effort, because without it the CLI inherits the effort in
 // ~/.claude/settings.json: tuning the terminal silently retuned the app, and
-// live suggestions ran on Sonnet 5.5 at xhigh. Chris's call 2026-09-28:
-// low for realtime, medium for background, xhigh for the self-review.
+// live suggestions ran on Sonnet 5.5 at xhigh. Chris's calls 2026-09-28:
+// no Claude call below medium, prep at high (the best prep, still bounded),
+// xhigh for the post-meeting self-review.
+// Live suggestions stay at xhigh, the level they already ran at: replaying 18
+// real trigger moments from 6 meetings, a blind Opus judge preferred xhigh
+// over high 13-5, over medium 14-4 and over low 17-1. The lower levels lost on
+// grounding (tasks for the wrong person, figures taken at face value, the
+// asked-for format missed), not only on length. p50: xhigh 12.0 s, high
+// 9.1 s, medium 7.6 s.
 export const EFFORT_CONFIG = {
-  suggestion: 'low',
-  worker: 'low',
-  prep: 'medium',
+  suggestion: 'xhigh',
+  worker: 'medium',
+  prep: 'high',
   deepResearch: 'medium',
   pulse: 'medium',
   review: 'xhigh',
@@ -61,12 +68,12 @@ export const EFFORT_CONFIG = {
 
 /**
  * The --effort args for a `claude` spawn. A caller that names no effort gets
- * `medium` on Opus and `low` otherwise. Haiku 4.5 has no effort control, and
+ * `medium`. Haiku 4.5 has no effort control, and
  * with no model the CLI's own default model is unknown, so neither gets one.
  */
 export function cliEffortArgs(model: string | undefined, effort?: CliEffort): string[] {
   if (!model || model.includes('haiku')) return [];
-  return ['--effort', effort ?? (model.includes('opus') ? 'medium' : 'low')];
+  return ['--effort', effort ?? 'medium'];
 }
 
 export type LlmTransportMode = 'api' | 'cli' | 'auto';

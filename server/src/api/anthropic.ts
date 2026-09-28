@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { paidApiDisabled } from './killswitch.js';
 import { log } from '../logging.js';
-import { MODEL_CONFIG } from '../model-config.js';
+import { MODEL_CONFIG, EFFORT_CONFIG } from '../model-config.js';
 import { beginLlmRequest, recordLlmUsage } from './budget.js';
 
 const HAIKU_MODEL = MODEL_CONFIG.haiku;
@@ -184,12 +184,10 @@ export async function anthropicSuggestStream(params: {
       model: SONNET_MODEL,
       // Thinking counts toward max_tokens, so leave room beyond the reply.
       max_tokens: params.maxTokens ?? 8192,
-      // Sonnet 5.5 rejects `thinking: { type: 'disabled' }` with a 400. Live
-      // suggestions are short and latency-sensitive, so keep adaptive thinking
-      // (the default) at `low` effort, where the model skips thinking on most
-      // simple requests. If TTFT regresses, `thinking: { type: 'between_tools' }`
-      // is the model's thinking-off setting.
-      output_config: { effort: 'low' },
+      // Sonnet 5.5 rejects `thinking: { type: 'disabled' }` with a 400, so
+      // this keeps adaptive thinking at the suggestion effort, the same level
+      // the subscription CLI path runs at.
+      output_config: { effort: EFFORT_CONFIG.suggestion },
       system: [
         {
           type: 'text',

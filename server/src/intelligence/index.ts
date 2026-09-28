@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { claudeChat, claudeTriage, claudeSuggest } from '../claude-cli.js';
 import { isOpenAiApiAvailable, openaiTriageJson } from '../api/openai.js';
 import { isAnthropicApiAvailable, anthropicSuggestStream } from '../api/anthropic.js';
-import { LLM_CONFIG, MODEL_CONFIG } from '../model-config.js';
+import { LLM_CONFIG, MODEL_CONFIG, EFFORT_CONFIG } from '../model-config.js';
 import { parseFirstJsonObject } from './first-json.js';
 import { summarizeOldContext } from './compression.js';
 import { LlmBudgetExceededError, resetLlmBudget } from '../api/budget.js';
@@ -536,7 +536,7 @@ export class IntelligenceEngine extends EventEmitter {
           SONNET_SUGGEST_SYSTEM,
           signal,
           undefined,
-          { onDelta },
+          { onDelta, model: MODEL_CONFIG.suggestion, effort: EFFORT_CONFIG.suggestion },
         );
       }
     } else {
@@ -550,7 +550,7 @@ export class IntelligenceEngine extends EventEmitter {
         SONNET_SUGGEST_SYSTEM,
         signal,
         undefined,
-        { onDelta },
+        { onDelta, model: MODEL_CONFIG.suggestion, effort: EFFORT_CONFIG.suggestion },
       );
     }
 

@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { claudeChat } from '../claude-cli.js';
-import { MODEL_CONFIG } from '../model-config.js';
+import { MODEL_CONFIG, EFFORT_CONFIG, type CliEffort } from '../model-config.js';
 import { runLiveJson } from './live-json.js';
 import { parseFirstJsonObject } from './first-json.js';
 
@@ -1038,7 +1038,7 @@ function normalizeState(s: string): AgendaItemState {
 
 type ChatFn = (
   prompt: string,
-  options: { systemPrompt?: string; model?: string; signal?: AbortSignal },
+  options: { systemPrompt?: string; model?: string; effort?: CliEffort; signal?: AbortSignal },
 ) => Promise<string>;
 
 export interface ExtractAgendaDeps {
@@ -1098,6 +1098,7 @@ export async function extractAgendaItemsFromNotes(
     response = await chat(firstPrompt, {
       systemPrompt: AGENDA_EXTRACT_SYSTEM,
       model: MODEL_CONFIG.suggestion,
+      effort: EFFORT_CONFIG.suggestion,
       signal,
     });
   } catch (err) {
@@ -1118,6 +1119,7 @@ Your previous reply was not valid JSON matching the required shape. Return JSON 
       const retry = await chat(retryPrompt, {
         systemPrompt: AGENDA_EXTRACT_SYSTEM,
         model: MODEL_CONFIG.suggestion,
+        effort: EFFORT_CONFIG.suggestion,
         signal,
       });
       parsed = parseExtractResponse(retry);
