@@ -50,7 +50,7 @@ describe('central model and provider configuration', () => {
   it('passes an explicit effort to every claude CLI spawn that can take one', () => {
     expect(EFFORT_CONFIG).toEqual({
       suggestion: 'xhigh',
-      worker: 'medium',
+      worker: 'xhigh',
       prep: 'high',
       deepResearch: 'medium',
       pulse: 'medium',

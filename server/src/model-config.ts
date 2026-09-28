@@ -59,7 +59,9 @@ export type CliEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 // 9.1 s, medium 7.6 s.
 export const EFFORT_CONFIG = {
   suggestion: 'xhigh',
-  worker: 'medium',
+  // xhigh, the level it inherited before: the suggestion replay showed
+  // grounding drops below it, and none of these calls hold up a live meeting.
+  worker: 'xhigh',
   prep: 'high',
   deepResearch: 'medium',
   pulse: 'medium',
