@@ -1,5 +1,5 @@
 import { claudeSuggest } from '../claude-cli.js';
-import { MODEL_CONFIG } from '../model-config.js';
+import { MODEL_CONFIG, EFFORT_CONFIG } from '../model-config.js';
 import type { Worker, WorkerCapabilities, WorkerResult } from './types.js';
 import { checkAttributions, citationFooter, extractUrlSources, stripSourceList } from './citations.js';
 
@@ -52,6 +52,7 @@ If context from the meeting is provided, use it to tailor your research to what 
       const raw = await claudeSuggest(userContent, systemPrompt, signal, ['WebSearch', 'WebFetch'], {
         onDelta,
         model: MODEL_CONFIG.deepResearch,
+        effort: EFFORT_CONFIG.deepResearch,
       });
       // Same output shape and attribution check as Fast research (see
       // citations.ts). The prompt is deliberately untouched: there is no eval

@@ -10,7 +10,7 @@
 // agenda: the button must never come back empty-handed when there is context.
 
 import { claudeSuggest } from '../claude-cli.js';
-import { MODEL_CONFIG } from '../model-config.js';
+import { MODEL_CONFIG, EFFORT_CONFIG } from '../model-config.js';
 import { normalizeExtractedItems } from '../intelligence/agenda.js';
 import { formatPrepContext, gatherPrepContext, type PrepContext, type PrepRequest } from './gather.js';
 
@@ -143,6 +143,7 @@ export async function runMeetingPrep(request: PrepRequest, deps: RunPrepDeps = {
     progress(ctx.people.length ? `Researching ${ctx.people.map((p) => p.name).join(', ')}…` : 'Researching the meeting…');
     const raw = await suggest(prompt, webSystemPrompt(now), ctl.signal, ['WebSearch', 'WebFetch'], {
       model: MODEL_CONFIG.prep,
+      effort: EFFORT_CONFIG.prep,
       maxTurns: 14,
       onToolUse: (name, input) => {
         const line = describeToolUse(name, input);
@@ -164,7 +165,7 @@ export async function runMeetingPrep(request: PrepRequest, deps: RunPrepDeps = {
 
   // ── Local-only fallback ──
   if (deps.signal?.aborted) throw new Error('Aborted');
-  const raw = await suggest(prompt, localSystemPrompt(now), deps.signal, undefined, { model: MODEL_CONFIG.prep });
+  const raw = await suggest(prompt, localSystemPrompt(now), deps.signal, undefined, { model: MODEL_CONFIG.prep, effort: EFFORT_CONFIG.prep });
   const parsed = parsePrepResponse(raw);
   if (!parsed) throw new Error('Prep came back unreadable — try again');
   return { ...parsed, sources: [], mode: 'local', stats };

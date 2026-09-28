@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { claudeSuggest } from '../claude-cli.js';
-import { MODEL_CONFIG } from '../model-config.js';
+import { MODEL_CONFIG, EFFORT_CONFIG } from '../model-config.js';
 import { parseFirstJsonObject } from './first-json.js';
 import { inCliLane } from './cli-lane.js';
 
@@ -277,7 +277,7 @@ export class MeetingPulse extends EventEmitter {
   constructor(deps: MeetingPulseDeps = {}) {
     super();
     this.ask = deps.ask ?? ((prompt, system, signal, { asked }) => {
-      const call = () => claudeSuggest(prompt, system, signal, undefined, { model: MODEL_CONFIG.pulse, cold: true });
+      const call = () => claudeSuggest(prompt, system, signal, undefined, { model: MODEL_CONFIG.pulse, effort: EFFORT_CONFIG.pulse, cold: true });
       return asked ? call() : inCliLane(call);
     });
     this.now = deps.now ?? Date.now;

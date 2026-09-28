@@ -43,6 +43,32 @@ export const MODEL_CONFIG = {
   pulse: process.env.COPILOT_PULSE_MODEL || 'claude-opus-5-5',
 } as const;
 
+export type CliEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+// Effort for each role that runs on the `claude` CLI. Every spawn passes
+// --effort, because without it the CLI inherits the effort in
+// ~/.claude/settings.json: tuning the terminal silently retuned the app, and
+// live suggestions ran on Sonnet 5.5 at xhigh. Chris's call 2026-09-28:
+// low for realtime, medium for background, xhigh for the self-review.
+export const EFFORT_CONFIG = {
+  suggestion: 'low',
+  worker: 'low',
+  prep: 'medium',
+  deepResearch: 'medium',
+  pulse: 'medium',
+  review: 'xhigh',
+} as const satisfies Record<string, CliEffort>;
+
+/**
+ * The --effort args for a `claude` spawn. A caller that names no effort gets
+ * `medium` on Opus and `low` otherwise. Haiku 4.5 has no effort control, and
+ * with no model the CLI's own default model is unknown, so neither gets one.
+ */
+export function cliEffortArgs(model: string | undefined, effort?: CliEffort): string[] {
+  if (!model || model.includes('haiku')) return [];
+  return ['--effort', effort ?? (model.includes('opus') ? 'medium' : 'low')];
+}
+
 export type LlmTransportMode = 'api' | 'cli' | 'auto';
 
 function transportMode(value: string | undefined): LlmTransportMode {

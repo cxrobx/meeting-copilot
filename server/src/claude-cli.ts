@@ -2,7 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createInterface } from 'node:readline';
 import { runWarm } from './persistent-claude.js';
-import { MODEL_CONFIG } from './model-config.js';
+import { MODEL_CONFIG, cliEffortArgs, type CliEffort } from './model-config.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -17,6 +17,7 @@ export async function claudeChat(
   options: {
     systemPrompt?: string;
     model?: string;
+    effort?: CliEffort;
     maxTokens?: number;
     signal?: AbortSignal;
     allowedTools?: string[];
@@ -30,6 +31,7 @@ export async function claudeChat(
       const text = await runWarm(prompt, {
         model: options.model,
         system: options.systemPrompt ?? '',
+        effort: options.effort,
         signal: options.signal,
       });
       if (text && text.trim().length > 0) return text;
@@ -52,6 +54,7 @@ export async function claudeChat(
   if (options.model) {
     args.push('--model', options.model);
   }
+  args.push(...cliEffortArgs(options.model, options.effort));
   // Note: Claude CLI has no --max-tokens flag; token limit is controlled by the model.
   // Use --max-budget-usd for cost control if needed.
   if (options.allowedTools?.length) {
@@ -166,6 +169,7 @@ export async function claudeSuggest(
     /** Each tool call the agent makes (e.g. WebSearch + its query), as it makes it. */
     onToolUse?: (name: string, input: Record<string, unknown>) => void;
     model?: string;
+    effort?: CliEffort;
     /** Tool-using calls default to 8 turns. */
     maxTurns?: number;
     /**
@@ -187,6 +191,7 @@ export async function claudeSuggest(
       const text = await runWarm(prompt, {
         model,
         system: systemPrompt,
+        effort: options?.effort,
         signal,
         onDelta: options?.onDelta,
       });
@@ -208,6 +213,7 @@ export async function claudeSuggest(
     '--no-session-persistence',
     '--max-turns', maxTurns,
     '--model', model,
+    ...cliEffortArgs(model, options?.effort),
     '--system-prompt', systemPrompt,
   ];
   if (allowedTools?.length) {

@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface, type Interface } from 'node:readline';
 import { createHash } from 'node:crypto';
+import { cliEffortArgs, type CliEffort } from './model-config.js';
 
 /**
  * Persistent (warm) `claude` sessions for the hot, frequent, *stateless*
@@ -38,6 +39,7 @@ const warmDisabled = process.env.COPILOT_DISABLE_WARM_SESSIONS === 'true';
 export interface WarmRunOptions {
   model: string;
   system: string;
+  effort?: CliEffort;
   signal?: AbortSignal;
   onDelta?: (text: string) => void;
 }
@@ -69,6 +71,7 @@ class WarmSession {
   constructor(
     private readonly model: string,
     private readonly system: string,
+    private readonly effort?: CliEffort,
   ) {}
 
   run(prompt: string, opts: { signal?: AbortSignal; onDelta?: (text: string) => void }): Promise<string> {
@@ -137,6 +140,7 @@ class WarmSession {
       '--strict-mcp-config',        // skip the user's MCP fleet (the cold-start killer)
       '--no-session-persistence',
       '--model', this.model,
+      ...cliEffortArgs(this.model, this.effort),
     ];
     if (this.system) {
       args.push('--system-prompt', this.system);
@@ -304,8 +308,8 @@ class WarmSession {
 
 const pool = new Map<string, WarmSession>();
 
-function keyOf(model: string, system: string): string {
-  return createHash('sha1').update(`${model} ${system}`).digest('hex');
+function keyOf(model: string, system: string, effort?: CliEffort): string {
+  return createHash('sha1').update(`${model} ${effort ?? ''} ${system}`).digest('hex');
 }
 
 /**
@@ -318,7 +322,7 @@ function keyOf(model: string, system: string): string {
 export function runWarm(prompt: string, opts: WarmRunOptions): Promise<string> {
   if (warmDisabled) return Promise.reject(new Error('warm sessions disabled'));
 
-  const key = keyOf(opts.model, opts.system);
+  const key = keyOf(opts.model, opts.system, opts.effort);
   let session = pool.get(key);
   if (!session) {
     if (pool.size >= MAX_SESSIONS) {
@@ -326,7 +330,7 @@ export function runWarm(prompt: string, opts: WarmRunOptions): Promise<string> {
       // rather than churning sessions.
       return Promise.reject(new Error('warm pool at capacity'));
     }
-    session = new WarmSession(opts.model, opts.system);
+    session = new WarmSession(opts.model, opts.system, opts.effort);
     pool.set(key, session);
   }
   return session.run(prompt, { signal: opts.signal, onDelta: opts.onDelta });

@@ -13,7 +13,7 @@ const SCORES_MARKER = '<!--SCORES-->';
 // The self-review is the highest-value, lowest-frequency intelligence call, so it
 // runs on the most capable model (Opus) rather than the realtime Sonnet default.
 // Override via COPILOT_REVIEW_MODEL if a different id is needed.
-import { MODEL_CONFIG } from '../model-config.js';
+import { MODEL_CONFIG, EFFORT_CONFIG } from '../model-config.js';
 
 const REVIEW_MODEL = MODEL_CONFIG.review;
 
@@ -132,7 +132,7 @@ export class ReviewWorker implements Worker {
     try {
       // CLI-only (subscription, no paid API): Opus via claudeSuggest — the review
       // is rare and high-value, so it gets the strongest model (see REVIEW_MODEL).
-      const raw = await claudeSuggest(userContent, REVIEW_SYSTEM, signal, undefined, { model: REVIEW_MODEL });
+      const raw = await claudeSuggest(userContent, REVIEW_SYSTEM, signal, undefined, { model: REVIEW_MODEL, effort: EFFORT_CONFIG.review });
 
       if (signal.aborted) {
         return { success: false, data: null, summary: 'Review cancelled during execution', error: 'Aborted' };
