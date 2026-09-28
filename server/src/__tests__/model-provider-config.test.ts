@@ -17,9 +17,9 @@ describe('central model and provider configuration', () => {
     expect(MODEL_CONFIG.suggestion).toBe(
       process.env.COPILOT_SUGGEST_MODEL
         || process.env.COPILOT_SUGGESTION_MODEL
-        || 'claude-sonnet-5',
+        || 'claude-sonnet-5-5',
     );
-    expect(MODEL_CONFIG.review).toBe(process.env.COPILOT_REVIEW_MODEL || 'claude-opus-5');
+    expect(MODEL_CONFIG.review).toBe(process.env.COPILOT_REVIEW_MODEL || 'claude-opus-5-5');
     // The meeting pulse runs on Opus 5.5 over the subscription CLI (2026-09-22).
     expect(MODEL_CONFIG.pulse).toBe(process.env.COPILOT_PULSE_MODEL || 'claude-opus-5-5');
   });

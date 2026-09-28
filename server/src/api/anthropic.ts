@@ -62,8 +62,8 @@ export async function anthropicTriageJson(
   recordLlmUsage({
     inputTokens: u?.input_tokens ?? 0,
     outputTokens: u?.output_tokens ?? 0,
-    inputDollarsPerMillion: Number(process.env.COPILOT_ANTHROPIC_INPUT_PER_MILLION || 3),
-    outputDollarsPerMillion: Number(process.env.COPILOT_ANTHROPIC_OUTPUT_PER_MILLION || 15),
+    inputDollarsPerMillion: Number(process.env.COPILOT_ANTHROPIC_INPUT_PER_MILLION || 2),
+    outputDollarsPerMillion: Number(process.env.COPILOT_ANTHROPIC_OUTPUT_PER_MILLION || 10),
   });
   log('api/anthropic', `${tag} model=${HAIKU_MODEL} latencyMs=${elapsed} in=${u?.input_tokens ?? 0} out=${u?.output_tokens ?? 0} cacheRead=${u?.cache_read_input_tokens ?? 0} cacheWrite=${u?.cache_creation_input_tokens ?? 0}`);
 
@@ -182,11 +182,14 @@ export async function anthropicSuggestStream(params: {
   const stream = client.messages.stream(
     {
       model: SONNET_MODEL,
-      max_tokens: params.maxTokens ?? 2048,
-      // Sonnet 5 enables adaptive thinking by default. Live suggestions are
-      // short, scoped, and latency-sensitive, so explicitly preserve the old
-      // no-thinking behavior.
-      thinking: { type: 'disabled' },
+      // Thinking counts toward max_tokens, so leave room beyond the reply.
+      max_tokens: params.maxTokens ?? 8192,
+      // Sonnet 5.5 rejects `thinking: { type: 'disabled' }` with a 400. Live
+      // suggestions are short and latency-sensitive, so keep adaptive thinking
+      // (the default) at `low` effort, where the model skips thinking on most
+      // simple requests. If TTFT regresses, `thinking: { type: 'between_tools' }`
+      // is the model's thinking-off setting.
+      output_config: { effort: 'low' },
       system: [
         {
           type: 'text',
@@ -216,8 +219,8 @@ export async function anthropicSuggestStream(params: {
   recordLlmUsage({
     inputTokens: u?.input_tokens ?? 0,
     outputTokens: u?.output_tokens ?? 0,
-    inputDollarsPerMillion: Number(process.env.COPILOT_ANTHROPIC_INPUT_PER_MILLION || 3),
-    outputDollarsPerMillion: Number(process.env.COPILOT_ANTHROPIC_OUTPUT_PER_MILLION || 15),
+    inputDollarsPerMillion: Number(process.env.COPILOT_ANTHROPIC_INPUT_PER_MILLION || 2),
+    outputDollarsPerMillion: Number(process.env.COPILOT_ANTHROPIC_OUTPUT_PER_MILLION || 10),
   });
   log('api/anthropic', `${tag} model=${SONNET_MODEL} ttftMs=${ttft} totalMs=${elapsed} in=${u?.input_tokens ?? 0} out=${u?.output_tokens ?? 0} cacheRead=${u?.cache_read_input_tokens ?? 0} cacheWrite=${u?.cache_creation_input_tokens ?? 0}`);
   return { text: accumulated, usage: finalMessage.usage ?? null };
