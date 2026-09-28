@@ -49,8 +49,8 @@ export type CliEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 // --effort, because without it the CLI inherits the effort in
 // ~/.claude/settings.json: tuning the terminal silently retuned the app, and
 // live suggestions ran on Sonnet 5.5 at xhigh. Chris's calls 2026-09-28:
-// no Claude call below medium, prep at high (the best prep, still bounded),
-// xhigh for the post-meeting self-review.
+// no Claude call below medium, xhigh for prep and the post-meeting
+// self-review (prep's web pass is still cut off at 2 minutes, WEB_TIMEOUT_MS).
 // Live suggestions stay at xhigh, the level they already ran at: replaying 18
 // real trigger moments from 6 meetings, a blind Opus judge preferred xhigh
 // over high 13-5, over medium 14-4 and over low 17-1. The lower levels lost on
@@ -62,7 +62,7 @@ export const EFFORT_CONFIG = {
   // xhigh, the level it inherited before: the suggestion replay showed
   // grounding drops below it, and none of these calls hold up a live meeting.
   worker: 'xhigh',
-  prep: 'high',
+  prep: 'xhigh',
   deepResearch: 'medium',
   pulse: 'medium',
   review: 'xhigh',

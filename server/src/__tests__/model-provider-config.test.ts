@@ -51,7 +51,7 @@ describe('central model and provider configuration', () => {
     expect(EFFORT_CONFIG).toEqual({
       suggestion: 'xhigh',
       worker: 'xhigh',
-      prep: 'high',
+      prep: 'xhigh',
       deepResearch: 'medium',
       pulse: 'medium',
       review: 'xhigh',
