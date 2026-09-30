@@ -40,13 +40,11 @@ export interface RunPrepDeps {
   now?: Date;
 }
 
-/** Used when settings.json has no `aboutMe`. */
-export const DEFAULT_ABOUT_ME = `Chris Robinson — founder of CX Ventures (cxventures.io), an AI holding company and consulting practice.
-- Consulting: AI strategy and custom AI builds for small and mid-sized businesses — e.g. an AI lead-response agent for a home-services contractor, a partner-network CRM with AI matching for an investment-advisor network, an AI training-video platform, SEO / AI-search (AEO) advisory.
-- Products: PocketBuddy (AI personal finance), Artist Advisory (AI career intelligence for musicians), BuildersBuddy (deal analysis for property builders and investors).
-- Background: Harvard 2018 (biomedical engineering + computer science); ~8 years in enterprise data & AI strategy consulting.
-- Also a recording artist and producer (Chris X).
-- Looking for: partners, referral channels and clients for the practice; ways to productize repeatable engagements.`;
+/**
+ * Used when settings.json has no `aboutMe`. Deliberately says nothing about
+ * any real person: who the user is lives in their own settings, not the repo.
+ */
+export const DEFAULT_ABOUT_ME = `No profile has been set (Settings → About me). Research the attendees and their companies on their own terms, and do not guess at the user's background, business or goals.`;
 
 const WEB_TIMEOUT_MS = 120_000;
 const MAX_AGENDA_ITEMS = 10;
