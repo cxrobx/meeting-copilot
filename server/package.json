@@ -2,7 +2,7 @@
   "name": "meeting-copilot-server",
   "version": "0.1.0",
   "private": true,
-  "license": "MIT",
+  "license": "BUSL-1.1",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",

@@ -85,4 +85,9 @@ cd server && npm test                  # unit tests
 
 ## License
 
-[MIT](LICENSE) © 2026 Christopher Robinson
+[Business Source License 1.1](LICENSE), © 2026 CX Ventures LLC. The source is
+available and you may use it personally or inside your own organisation.
+Selling it, hosting it for others or bundling it into a commercial product
+needs a commercial licence. Each version becomes Apache-2.0 on 2030-09-30 or
+four years after its release, whichever comes first.
+Versions published before 2026-09-30 were released under the MIT licence.
