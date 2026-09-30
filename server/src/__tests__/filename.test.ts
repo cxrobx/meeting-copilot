@@ -6,6 +6,20 @@ import {
   topicFromTitle,
   FILENAME_LIMIT,
 } from '../workers/filename.js';
+import { _setVaultProfileForTests } from '../workers/vaultProfile.js';
+
+// An invented profile: codes and own names come from vault-profile.json, not
+// the module.
+_setVaultProfileForTests({
+  selfNames: ['chris', 'chris robinson', 'christopher', 'christopher robinson', 'robinson', 'cxuser'],
+  categoryByContent: [
+    { code: 'AIQ', keywords: ['atlas iq', 'atlasiq', 'aiq'] },
+    { code: 'TH', keywords: ['teacherhero', 'teacher hero', 'teacher helper'] },
+    { code: 'Globex', keywords: ['globex', 'globex partners'] },
+    { code: 'BD', keywords: ['business development', 'biz dev', 'bizdev'] },
+    { code: 'CXV', keywords: ['cxv', 'cx ventures', 'cxventures'] },
+  ],
+});
 
 describe('formatMeetingDate', () => {
   it('uses LOCAL time, not UTC', () => {
@@ -147,6 +161,29 @@ describe('buildMeetingFilename', () => {
   it('matches the vault convention regex', () => {
     for (const title of ['Globex Portal Sync', 'e2e', 'Accepted: Kickoff', '', 'Untitled']) {
       expect(buildMeetingFilename({ title, attendees: 'Chris, Marcus', startedAt })).toMatch(CONVENTION);
+    }
+  });
+});
+
+describe('with no vault profile', () => {
+  it('names a note with no category and drops only "me"', async () => {
+    const { buildMeetingFilename: build } = await import('../workers/filename.js');
+    _setVaultProfileForTests({});
+    try {
+      const startedAt = new Date(2026, 3, 28, 10, 0);
+      expect(build({ title: 'Globex Sync', attendees: 'Me, Marcus', startedAt })).toBe('Marcus 04.28.26.md');
+      expect(build({ title: 'Planning', attendees: 'Chris, Marcus', startedAt })).toBe('Chris, Marcus 04.28.26.md');
+    } finally {
+      _setVaultProfileForTests({
+        selfNames: ['chris', 'chris robinson', 'christopher', 'christopher robinson', 'robinson', 'cxuser'],
+        categoryByContent: [
+          { code: 'AIQ', keywords: ['atlas iq', 'atlasiq', 'aiq'] },
+          { code: 'TH', keywords: ['teacherhero', 'teacher hero', 'teacher helper'] },
+          { code: 'Globex', keywords: ['globex', 'globex partners'] },
+          { code: 'BD', keywords: ['business development', 'biz dev', 'bizdev'] },
+          { code: 'CXV', keywords: ['cxv', 'cx ventures', 'cxventures'] },
+        ],
+      });
     }
   });
 });

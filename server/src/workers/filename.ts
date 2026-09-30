@@ -3,34 +3,23 @@
  *
  *   <CATEGORY> <Who|Topic> <MM.DD.YY>.md
  *
- * The convention is documented in ~/Documents/CX/CLAUDE.md and mirrored in
- * cxnotes/services/summariser.js (`buildObsidianFilename`) — keep the two in
- * step. The date is ALWAYS last and ALWAYS local time — see formatMeetingDate.
+ * The date is ALWAYS last and ALWAYS local time — see formatMeetingDate.
  */
 
-/**
+import { getVaultProfile } from './vaultProfile.js';
+
+/*
  * Meeting Copilot writes to the vault's `Meetings/` catch-all, a folder with no
  * code of its own, so the category is whatever the CONTENT earns: whole-token
- * match over title + attendees, first hit wins, specific codes above CXV. No
- * hit → NO prefix. CXV used to be the default here and in cxnotes, which
- * stamped it on interviews and seminars; cxnotes dropped it 2026-09-08 and this
- * mirror follows. Same table as cxnotes' CATEGORY_BY_CONTENT.
+ * match over title + attendees, first hit wins. No hit → NO prefix; there is
+ * deliberately no default code, because a default stamps itself on everything
+ * that matched nothing. The codes and the words that earn them, and the user's
+ * own names, are one person's vault, so they come from the vault profile
+ * (./vaultProfile.ts), never from this file.
  */
-const CATEGORY_BY_CONTENT: Array<[string, string[]]> = [
-  ['AIQ', ['atlas iq', 'atlasiq', 'aiq']],
-  ['TH', ['teacherhero', 'teacher hero', 'teacher helper']],
-  ['Globex', ['globex', 'globex partners']],
-  ['BD', ['business development', 'biz dev', 'bizdev']],
-  ['CXV', ['cxv', 'cx ventures', 'cxventures']],
-];
 
 /** Target ceiling for the whole basename, `.md` included. */
 export const FILENAME_LIMIT = 40;
-
-const SELF_NAMES = new Set([
-  'chris', 'chris robinson', 'christopher', 'christopher robinson', 'robinson',
-  'me', 'self',
-]);
 
 /** Roles the transcriber emits that are not people. */
 const NON_PEOPLE = new Set([
@@ -98,18 +87,19 @@ function firstName(name: string): string {
 
 /**
  * Counterpart first names from the session's free-text attendees field.
- * Chris is dropped — he attends everything. Returns [] when the list is
+ * The user is dropped — they attend everything. Returns [] when the list is
  * mostly raw usernames (a Meet/Zoom roster of handles names nobody).
  */
 export function parseAttendees(attendees?: string | null): string[] {
   if (!attendees?.trim()) return [];
 
+  const selfNames = getVaultProfile().selfNames;
   const named = attendees
     .split(/[,;/\n]|\band\b/i)
     .map((p) => p.replace(/\(.*?\)/g, '').trim())
     .filter(Boolean)
     .filter((p) => p.split(/\s+/).length <= 4 && p.length <= 40)
-    .filter((p) => !SELF_NAMES.has(p.toLowerCase()) && !NON_PEOPLE.has(p.toLowerCase()));
+    .filter((p) => !selfNames.has(p.toLowerCase()) && !NON_PEOPLE.has(p.toLowerCase()));
 
   if (!named.length) return [];
   const usernames = named.filter(isRawUsername);
@@ -132,7 +122,7 @@ export function categoryForContent(title?: string, attendees?: string | null): {
   const haystack = ` ${[title, attendees].filter(Boolean).join(' ')} `
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ');
-  for (const [code, keywords] of CATEGORY_BY_CONTENT) {
+  for (const [code, keywords] of getVaultProfile().categoryByContent) {
     const hits = keywords.filter((kw) => haystack.includes(` ${kw} `));
     if (hits.length) return { code, words: hits.flatMap((kw) => kw.split(' ')) };
   }
@@ -147,7 +137,7 @@ export function categoryForContent(title?: string, attendees?: string | null): {
 export function topicFromTitle(title: string | undefined, people: string[], categoryWords: string[] = []): string {
   const drop = new Set([
     ...TITLE_STOPWORDS,
-    ...SELF_NAMES,
+    ...getVaultProfile().selfNames,
     ...people.map((p) => p.toLowerCase()),
     ...categoryWords,
   ]);
@@ -197,8 +187,8 @@ export function buildMeetingFilename(opts: {
   // The compression ladder: `et al` → drop the second attendee → the topic →
   // truncate. The literal `Meeting` is NOT a rung: it always fits, so when it
   // sat ahead of truncation every topic over budget became the word "Meeting"
-  // (two one-off calls were filed as `<CODE> Meeting <date>.md`). It is
-  // only for a middle that is genuinely empty.
+  // (two one-off calls were filed as `<CODE> Meeting <date>.md`). It is only
+  // for a middle that is genuinely empty.
   const candidates = [middle];
   if (people.length === 2) candidates.push(`${people[0]} et al`, people[0]);
   if (topic) candidates.push(topic);
