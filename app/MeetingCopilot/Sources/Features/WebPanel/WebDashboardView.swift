@@ -80,6 +80,25 @@ private struct WebViewWrapper: NSViewRepresentable {
                   });
                 });
               };
+              var pendingMics = {};
+              var micCounter = 0;
+              function micRequest(action, extra) {
+                var id = 'mic_' + (++micCounter) + '_' + Date.now();
+                return new Promise(function(resolve) {
+                  pendingMics[id] = resolve;
+                  window.webkit.messageHandlers.\(bridgeMessageName).postMessage(
+                    Object.assign({ action: action, requestId: id }, extra || {})
+                  );
+                });
+              }
+              window.__copilotNativeBridge.listMics = function() { return micRequest('listMics'); };
+              window.__copilotNativeBridge.setMic = function(preference) {
+                return micRequest('setMic', { preference: String(preference || '') });
+              };
+              window.__copilotMicsResult = function(id, mics) {
+                var resolver = pendingMics[id];
+                if (resolver) { delete pendingMics[id]; resolver(mics); }
+              };
               window.__copilotCopyImageResult = function(id, ok) {
                 var resolver = pendingCopies[id];
                 if (resolver) { delete pendingCopies[id]; resolver(!!ok); }
@@ -239,6 +258,22 @@ private struct WebViewWrapper: NSViewRepresentable {
             }
         }
 
+        /// Settings' microphone list (`MicDevicePicker.choices`), back to the page.
+        func deliverMics(requestId: String) {
+            let capture = sessionManager.audioCaptureManager
+            let mics = MicDevicePicker.choices(
+                devices: MicDevicePicker.inputDevices(),
+                setting: AppSettings.micDeviceSetting,
+                current: capture.isCapturing ? capture.currentInputDevice : nil
+            )
+            let data = (try? JSONSerialization.data(withJSONObject: [requestId, mics])) ?? Data()
+            guard let raw = String(data: data, encoding: .utf8) else { return }
+            let js = "window.__copilotMicsResult && window.__copilotMicsResult(\(raw.dropFirst().dropLast()));"
+            DispatchQueue.main.async {
+                self.webView?.evaluateJavaScript(js, completionHandler: nil)
+            }
+        }
+
         func pushError(_ message: String) {
             // JSON-escape by serializing an array, then strip the brackets
             let data = (try? JSONSerialization.data(withJSONObject: [message])) ?? Data()
@@ -315,6 +350,15 @@ private struct WebViewWrapper: NSViewRepresentable {
                             self.deliverCopyResult(requestId: requestId, ok: ok)
                         }
                     }.resume()
+                case "listMics":
+                    self.deliverMics(requestId: (body["requestId"] as? String) ?? "")
+                case "setMic":
+                    let preference = (body["preference"] as? String) ?? "builtin"
+                    AppSettings.setMicDevice(preference)
+                    appLog("[Bridge] mic set to \"\(AppSettings.micDeviceSetting)\" from Settings")
+                    // Live: switch now. Idle: the next Start reads it.
+                    self.sessionManager.audioCaptureManager.restartMicrophone()
+                    self.deliverMics(requestId: (body["requestId"] as? String) ?? "")
                 default:
                     appLog("[Bridge] Unknown action: \(action)")
                 }

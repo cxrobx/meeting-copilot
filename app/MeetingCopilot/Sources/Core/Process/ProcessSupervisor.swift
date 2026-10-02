@@ -75,6 +75,42 @@ final class ProcessSupervisor {
         return pipe
     }
 
+    /// The server's stderr, appended to `~/.meeting-copilot/server.stderr.log`.
+    /// The server logs to server.log itself, but a native abort (2026-10-02:
+    /// better-sqlite3 under Node 24, gotcha #33) writes only to stderr, and
+    /// `print()` from a Finder-launched app goes nowhere (gotcha #15), so the
+    /// crash that restarted the server mid-Start left no trace at all.
+    static let serverStderrLog: URL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".meeting-copilot/server.stderr.log")
+    private static let serverStderrMaxBytes: UInt64 = 2 * 1024 * 1024
+
+    private func makeStderrLogPipe() -> Pipe {
+        let pipe = Pipe()
+        let url = Self.serverStderrLog
+        if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? UInt64,
+           size > Self.serverStderrMaxBytes {
+            try? FileManager.default.removeItem(at: url.appendingPathExtension("1"))
+            try? FileManager.default.moveItem(at: url, to: url.appendingPathExtension("1"))
+        }
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        let file = try? FileHandle(forWritingTo: url)
+        file?.seekToEndOfFile()
+        file?.write(Data("[\(ISO8601DateFormatter().string(from: Date()))] [ProcessSupervisor] server starting\n".utf8))
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                try? handle.close()
+                try? file?.close()
+                return
+            }
+            file?.write(data)
+        }
+        return pipe
+    }
+
     private func closeOutputPipe(for process: Process) {
         guard let pipe = process.standardOutput as? Pipe else { return }
         pipe.fileHandleForReading.readabilityHandler = nil
@@ -388,7 +424,7 @@ final class ProcessSupervisor {
     private func onHealthFailure(reason: String) {
         serverHealthy = false
         consecutiveHealthFailures += 1
-        print("[ProcessSupervisor] Health probe failed (\(consecutiveHealthFailures)/\(healthFailThreshold)): \(reason)")
+        appLog("[ProcessSupervisor] Health probe failed (\(consecutiveHealthFailures)/\(healthFailThreshold)): \(reason)")
 
         guard consecutiveHealthFailures >= healthFailThreshold else { return }
 
@@ -396,11 +432,11 @@ final class ProcessSupervisor {
         // Force-kill it so the exit monitor relaunches it.
         consecutiveHealthFailures = 0
         if let proc = serverProcess, proc.isRunning {
-            print("[ProcessSupervisor] Health probe threshold reached — killing hung server (PID: \(proc.processIdentifier))")
+            appLog("[ProcessSupervisor] Health probe threshold reached — killing hung server (PID: \(proc.processIdentifier))")
             kill(proc.processIdentifier, SIGKILL)
         } else {
             // Process already gone but we never caught the exit — relaunch directly.
-            print("[ProcessSupervisor] Server process missing — relaunching")
+            appLog("[ProcessSupervisor] Server process missing — relaunching")
             launchServer()
         }
     }
@@ -480,15 +516,14 @@ final class ProcessSupervisor {
         process.environment = env
 
         // Pipe output for logging
-        let pipe = makeOutputPipe(prefix: "Server")
-        process.standardOutput = pipe
-        process.standardError = pipe
+        process.standardOutput = makeOutputPipe(prefix: "Server")
+        process.standardError = makeStderrLogPipe()
 
         do {
             try process.run()
             self.serverProcess = process
             self.serverRunning = true
-            print("[ProcessSupervisor] Server started (PID: \(process.processIdentifier))")
+            appLog("[ProcessSupervisor] Server started (PID: \(process.processIdentifier))")
 
             // Monitor for unexpected termination
             let task = Task.detached { [self] in
@@ -499,7 +534,7 @@ final class ProcessSupervisor {
                     self.serverProcess = nil
                     self.serverRunning = false
                     self.serverHealthy = false
-                    print("[ProcessSupervisor] Server exited (code: \(process.terminationStatus))")
+                    appLog("[ProcessSupervisor] Server exited (\(process.terminationReason == .uncaughtSignal ? "signal" : "code") \(process.terminationStatus)) — its stderr is in ~/.meeting-copilot/server.stderr.log")
 
                     // Auto-restart on any unexpected exit. Code 0 usually means we
                     // called stopAll() intentionally; anything else (including
@@ -513,7 +548,7 @@ final class ProcessSupervisor {
                     self.serverRestartCount += 1
                     let idx = min(self.serverRestartCount - 1, self.restartBackoffSeconds.count - 1)
                     let delay = self.restartBackoffSeconds[idx]
-                    print("[ProcessSupervisor] Restarting server in \(delay)s (attempt \(self.serverRestartCount)/\(self.maxRestartAttempts))…")
+                    appLog("[ProcessSupervisor] Restarting server in \(delay)s (attempt \(self.serverRestartCount)/\(self.maxRestartAttempts))…")
                     let restartTask = Task { [weak self] in
                         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                         guard let self = self, !Task.isCancelled, !self.isStopping,
@@ -525,7 +560,7 @@ final class ProcessSupervisor {
             }
             monitorTasks.append(task)
         } catch {
-            print("[ProcessSupervisor] Failed to start server: \(error)")
+            appLog("[ProcessSupervisor] Failed to start server: \(error)")
             serverRunning = false
         }
     }

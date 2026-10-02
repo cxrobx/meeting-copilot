@@ -28,6 +28,25 @@ final class MicDevicePickerTests: XCTestCase {
         XCTAssertEqual(MicDevicePicker.choose(pref, from: [builtIn]), builtIn)
     }
 
+    func testAPinnedMicThatWillNotStartFallsBackToTheSystemDefault() {
+        // 2026-10-02: the built-in mic failed with -10868 while AirPods were
+        // in a call, and with no second attempt the session never started.
+        XCTAssertEqual(MicDevicePicker.attempts(.builtIn, from: [airPods, builtIn]), [builtIn, nil])
+        XCTAssertEqual(MicDevicePicker.attempts(.systemDefault, from: [airPods, builtIn]), [nil])
+        XCTAssertEqual(MicDevicePicker.attempts(.builtIn, from: [airPods]), [nil])
+    }
+
+    func testSettingsGetEveryInputAndTheCurrentChoice() {
+        // The dashboard's Settings field (settingsMicFill) reads exactly these keys.
+        let mics = MicDevicePicker.choices(devices: [builtIn, airPods], setting: "default", current: "Chris’s AirPods Pro")
+        let devices = mics["devices"] as? [[String: Any]]
+        XCTAssertEqual(devices?.compactMap { $0["name"] as? String }, ["MacBook Pro Microphone", "Chris’s AirPods Pro"])
+        XCTAssertEqual(devices?.compactMap { $0["builtIn"] as? Bool }, [true, false])
+        XCTAssertEqual(mics["preference"] as? String, "default")
+        XCTAssertEqual(mics["current"] as? String, "Chris’s AirPods Pro")
+        XCTAssertTrue(JSONSerialization.isValidJSONObject(MicDevicePicker.choices(devices: [], setting: "builtin", current: nil)))
+    }
+
     func testThisMacReportsItsInputDevices() {
         // Hardware smoke check: the real enumeration runs without crashing.
         let devices = MicDevicePicker.inputDevices()

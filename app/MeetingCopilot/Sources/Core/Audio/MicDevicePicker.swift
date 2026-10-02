@@ -47,6 +47,26 @@ enum MicDevicePicker {
         }
     }
 
+    /// The devices to try in order: the chosen one, then the system default
+    /// (nil). On 2026-10-02 the built-in mic would not start (`-10868`) while
+    /// AirPods were in a call, and with no second attempt the session never
+    /// began; the AirPods mic, the system default, started at once.
+    static func attempts(_ preference: Preference, from devices: [InputDevice]) -> [InputDevice?] {
+        guard let device = choose(preference, from: devices) else { return [nil] }
+        return [device, nil]
+    }
+
+    /// What the dashboard's Settings shows (`settingsMicFill` in
+    /// server/src/present/index.ts). Pure so it can be tested.
+    static func choices(devices: [InputDevice], setting: String, current: String?) -> [String: Any] {
+        var out: [String: Any] = [
+            "devices": devices.map { ["name": $0.name, "builtIn": $0.isBuiltIn] as [String: Any] },
+            "preference": setting,
+        ]
+        out["current"] = current ?? NSNull()
+        return out
+    }
+
     // MARK: - Core Audio
 
     /// Every device that has input streams.

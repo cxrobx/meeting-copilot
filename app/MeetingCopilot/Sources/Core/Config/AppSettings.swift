@@ -60,6 +60,22 @@ enum AppSettings {
         return MicDevicePicker.Preference(setting: UserDefaults.standard.string(forKey: Key.micDevice))
     }
 
+    /// The stored `micDevice` as the dashboard shows it: "builtin", "default",
+    /// or a device name.
+    static var micDeviceSetting: String {
+        switch micDevice {
+        case .builtIn: return "builtin"
+        case .systemDefault: return "default"
+        case .named(let name): return name
+        }
+    }
+
+    /// Settings' microphone choice. Read at the next mic start.
+    static func setMicDevice(_ setting: String) {
+        let trimmed = String(setting.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
+        UserDefaults.standard.set(trimmed.isEmpty ? "builtin" : trimmed, forKey: Key.micDevice)
+    }
+
     /// Whether the VAD-driven chunk emitter is active. When false, falls
     /// back to the 3-second fixed timer path in AudioCaptureManager.
     ///

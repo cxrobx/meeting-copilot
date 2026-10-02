@@ -2093,7 +2093,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     color: var(--gb-subtext0);
     margin-bottom: 4px;
   }
-  .settings-field input[type="number"] {
+  .settings-field input[type="number"], .settings-field select {
     width: 110px;
     font-family: var(--font-sans);
     font-size: 12px;
@@ -2104,6 +2104,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     color: var(--gb-text);
     outline: none;
   }
+  .settings-field select { width: 100%; }
   .settings-field .settings-hint { font-size: 10px; color: var(--gb-overlay1); margin-top: 3px; }
   .settings-check { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--gb-text); cursor: pointer; }
   .settings-check input { accent-color: var(--gb-green); }
@@ -9542,6 +9543,33 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   }
 
   // ─── Settings ──────────────────────────────────────────────
+  function settingsMicBridge() {
+    return !!(window.__copilotNativeBridge && window.__copilotNativeBridge.listMics);
+  }
+
+  // mics: { devices: [{name, builtIn}], preference: 'builtin'|'default'|name,
+  // current: name|null } from the app (MicDevicePicker.choices). Returns the
+  // value the select started on, so Save only sends a real change.
+  function settingsMicFill(mics) {
+    var select = document.getElementById('setMic');
+    if (!select || !mics) return null;
+    var builtIn = (mics.devices || []).filter(function(d) { return d.builtIn; })[0];
+    var opts = [
+      ['builtin', builtIn ? 'Built-in: ' + builtIn.name + ' (recommended)' : 'Built-in microphone (none on this Mac)'],
+      ['default', 'System default input (follows macOS)'],
+    ];
+    (mics.devices || []).forEach(function(d) { if (!d.builtIn) opts.push([d.name, d.name]); });
+    var pref = mics.preference || 'builtin';
+    if (!opts.some(function(o) { return o[0] === pref; })) opts.push([pref, pref + ' (not connected)']);
+    select.innerHTML = opts.map(function(o) {
+      return '<option value="' + escapeAttr(o[0]) + '"' + (o[0] === pref ? ' selected' : '') + '>' + escapeHtml(o[1]) + '</option>';
+    }).join('');
+    select.disabled = false;
+    var hint = document.getElementById('setMicHint');
+    if (hint && mics.current) hint.textContent = 'Recording from ' + mics.current + ' now. ' + hint.textContent;
+    return pref;
+  }
+
   // Gear in the header → modal backed by GET/POST /settings. The server
   // persists to ~/.meeting-copilot/settings.json and applies changes live
   // (eval cadence, suggestion TTL, retention, monitor defaults, summary
@@ -9573,6 +9601,11 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       var body = document.getElementById('settingsBody');
       if (!body) return;
       body.innerHTML =
+        // Microphone: the app owns the device, so only its panel shows this
+        // (a browser tab has no bridge). Filled by settingsMicFill below.
+        (settingsMicBridge() ? '<div class="settings-field"><label>Microphone</label>' +
+          '<select id="setMic" disabled><option>Loading\u2026</option></select>' +
+          '<div class="settings-hint" id="setMicHint">Built-in is the steadiest: an AirPods mic can drop when the call changes. If the chosen mic will not start, the system default is used. During a meeting, Save switches it at once.</div></div>' : '') +
         '<div class="settings-field"><label>Suggestion cadence (seconds)</label>' +
           '<input type="number" id="setCadence" min="10" max="60" step="5" value="' + Math.round((s.evalCadenceMs || 15000) / 1000) + '">' +
           '<div class="settings-hint">How often the transcript is evaluated for suggestions (10\\u201360s). Backoff doubles this when nothing is actionable.</div></div>' +
@@ -9593,7 +9626,17 @@ export const PRESENT_HTML = `<!DOCTYPE html>
         '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">' +
           '<button class="btn btn-green" id="settingsSave">Save</button>' +
         '</div>';
+      var micStart = null;
+      if (settingsMicBridge()) {
+        window.__copilotNativeBridge.listMics().then(function(mics) {
+          micStart = settingsMicFill(mics);
+        });
+      }
       document.getElementById('settingsSave').onclick = function() {
+        var micSelect = document.getElementById('setMic');
+        if (micSelect && micStart !== null && micSelect.value !== micStart) {
+          window.__copilotNativeBridge.setMic(micSelect.value);
+        }
         var payload = {
           evalCadenceMs: (parseInt(document.getElementById('setCadence').value, 10) || 15) * 1000,
           suggestionTtlMs: (parseInt(document.getElementById('setTtl').value, 10) || 60) * 1000,

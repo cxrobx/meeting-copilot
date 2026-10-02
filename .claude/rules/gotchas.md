@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 32 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 34 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -38,6 +38,8 @@ Organized by category. 32 items + recovery playbook, condensed format. Original 
 | 30 | Playwright newer than 1.61 cannot drive WebKit on macOS 14 — the ship gate breaks | Environment |
 | 31 | A process tap delivers nothing while no process makes sound | Environment |
 | 32 | A newly signed whisper build compiles its Metal shaders once (~10 s) before the first capture | Deployment |
+| 33 | better-sqlite3 below 13 aborts Node 24.19+ when GC frees a statement — the server dies silently | Deployment |
+| 34 | Releasing an AVAudioEngine can deadlock inside Core Audio — never touch the mic engine on the main thread | Environment |
 | — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
@@ -223,6 +225,21 @@ this default.
 **Cause**: The VAD (libwhisper + ggml) compiles ggml's embedded Metal library the first time a newly signed copy loads it (`ggml_metal_library_init: loaded in 10.430 sec`). Capture starts only after the VAD loads. The compiled result is cached per copy, so the second run is instant. Since T230, `build-app.sh` re-signs the whisper dylibs with the hardened runtime, so the first install of that signature pays it once.
 **Solution**: `ship.sh` runs the capture self-test on the installed copy right after install, which pays it then, not at the next meeting's start. A Sparkle update whose whisper libraries are unchanged did not pay it (measured on 0.1.91 to 0.1.92). One that upgrades whisper-cpp will, on the first meeting after the update.
 **Pattern**: `scripts/ship.sh` (post-install self-test), `AudioCaptureManager.startCapture` (VAD before capture).
+
+### 33. better-sqlite3 Below 13 Aborts Node 24.19+ When GC Frees a Statement — the Server Dies Silently
+**Symptom**: The server restarts with no error in server.log (a meeting's Start showed "Lost connection to server", 2026-10-02 10:33). A crash report `~/Library/Logs/DiagnosticReports/node-*.ips` shows SIGABRT in `node::Assert` ← `node::RemoveEnvironmentCleanupHook` ← `better_sqlite3.node Statement::~Statement()` (or `Database::~Database()`) ← `Heap::CollectGarbage`.
+**Cause**: from Node 24.19 `node::ObjectWrap`'s destructor calls `RemoveEnvironmentCleanupHook`, which needs an entered context; better-sqlite3 11.x and 12.x destroy statements inside V8 GC callbacks, where there is none (nodejs/node#65446). T230 pinned Node 24.21 that morning. Nothing reproduces it on demand: a GC soak passed on 11.10.0.
+**Solution** (applied 2026-10-02): better-sqlite3 `^13.0.3` (Node-API, prebuilds in the package, no install script). `build-app.sh` keeps only the `darwin-arm64` prebuild. The server's stderr now goes to `~/.meeting-copilot/server.stderr.log`, and the supervisor's exits and restarts to app.log with signal or code, so the next native abort shows up in one grep (it went to `print()`, gotcha #15).
+**Check**: `__tests__/native-sqlite.test.ts` fails when the pinned Node (`scripts/fetch-node.sh`) is 24+ and better-sqlite3 is below 13.
+**Pattern**: `server/package.json`, `app/MeetingCopilot/Sources/Core/Process/ProcessSupervisor.swift` (`makeStderrLogPipe`).
+
+### 34. Releasing an AVAudioEngine Can Deadlock Inside Core Audio — Never Touch the Mic Engine on the Main Thread
+**Symptom**: The whole app freezes (dashboard, menu bar, Stop) right after a mic restart, typically when AirPods leave call mode as a call ends. app.log stops at `mic restarted successfully` except for per-second `meeting peak=` lines; the server stays healthy.
+**Cause**: Seen 2026-10-02 (`sample` of the hung app): the main thread, in a watchdog restart, was in `-[AVAudioEngine dealloc]` → `AudioComponentInstanceDispose`, spinning in Core Audio's object table, while the HAL listener thread was in `AudioConverterDispose` for the AirPods' format change (24 → 48 kHz), blocked on that table's mutex. Each waited on the other. Apple's lock; no app-side ordering avoids it.
+**Solution** (applied 2026-10-02): every engine build, start, stop and release runs on `micQueue` (`AudioCaptureManager.openMic` / `closeMic` / `tearDown`), and results are applied on main by generation number. An open that has not answered in `micOpTimeoutSec` (8 s) fails with `.microphoneStuck`, its queue is abandoned for a fresh one (at most 4), and its late engine is torn down, never applied. The watchdog's restart ladder carries on as before.
+**Check**: `Tests/MicEngineQueueTests.swift` hangs a fake engine factory forever and requires the main thread to keep running, the next open to succeed on a fresh queue, and the late engine to be discarded.
+**Also**: a pinned mic that will not start now falls back to the system default (`MicDevicePicker.attempts`): the built-in mic refused to start (`-10868`, `InitializeActiveNodesInInputChain`) while AirPods were in a call at 24 kHz, and with no second attempt the session never began. The mic choice is in the dashboard's Settings (the app's bridge: `listMics` / `setMic`).
+**Pattern**: `app/MeetingCopilot/Sources/Core/Audio/AudioCaptureManager.swift` (`openMic`), `Audio/MicDevicePicker.swift` (`attempts`, `choices`).
 
 ### 11. WKWebView Needs Health Polling Before Loading Localhost
 **Symptom**: Blank white panel on app launch

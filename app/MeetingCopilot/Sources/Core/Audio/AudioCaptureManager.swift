@@ -133,6 +133,33 @@ final class AudioCaptureManager: NSObject {
     // event, and the rest of Chris's side was lost. Registered per engine.
     private var engineConfigObserver: NSObjectProtocol?
 
+    // Every AVAudioEngine is built, started, stopped and released on
+    // `micQueue`, never on the main thread. On 2026-10-02 the main thread
+    // released the old engine during a watchdog restart while Core Audio's
+    // HAL listener thread was disposing a converter for the AirPods' call-end
+    // format change; each waited on the other inside Core Audio and the whole
+    // app froze (dashboard, menu bar, Stop) until it was force-quit. Now a
+    // stuck Core Audio call parks one thread, and after `micOpTimeoutSec` the
+    // queue is abandoned for a fresh one. The main thread never waits on it.
+    @ObservationIgnored private var micQueue = AudioCaptureManager.makeMicQueue()
+    /// Bumped by every mic open and by close; a result for an older number is
+    /// torn down instead of applied. Main thread only, like `micOpInFlight`.
+    @ObservationIgnored private var micOpGeneration = 0
+    @ObservationIgnored private var micOpInFlight = false
+    @ObservationIgnored private var abandonedMicQueues = 0
+    static let micOpTimeoutSec: TimeInterval = 8.0
+    /// Each abandoned queue may hold a thread forever, so the count is capped.
+    private static let maxAbandonedMicQueues = 4
+    /// Tests swap the real engine for a fake (a hung Core Audio call). Runs on
+    /// `micQueue`.
+    @ObservationIgnored var micEngineFactory: ((MicDevicePicker.Preference) throws -> MicEngineStart)?
+
+    var micEngineForTesting: AVAudioEngine? { audioEngine }
+
+    private static func makeMicQueue() -> DispatchQueue {
+        DispatchQueue(label: "com.meetingcopilot.mic-engine", qos: .userInitiated)
+    }
+
     /// Resolve the bundled / user-installed Silero VAD model path. Same
     /// resolution order as `ProcessSupervisor.vadModelPath`: bundle →
     /// user. Returns nil if neither exists or both are too small to be
@@ -305,8 +332,12 @@ final class AudioCaptureManager: NSObject {
             // Start meeting (other-side) audio: process tap, or ScreenCaptureKit
             try await startMeetingAudioCapture()
 
-            // Start microphone capture via AVAudioEngine
-            try startMicrophoneCapture()
+            // Start microphone capture via AVAudioEngine, on `micQueue`
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                DispatchQueue.main.async {
+                    self.openMic { cont.resume(with: $0) }
+                }
+            }
 
             // Set up audio device change monitoring
             routeObserver = AudioRouteObserver(
@@ -407,16 +438,8 @@ final class AudioCaptureManager: NSObject {
         // path below already wraps these; the user-initiated stop path
         // MUST guard them too or it'll abort the process on stop. See
         // gotcha #18 and ObjCExceptionBridge usage elsewhere in this file.
-        removeEngineConfigObserver()
-        if let engine = audioEngine {
-            try? ObjCExceptionBridge.catching {
-                engine.inputNode.removeTap(onBus: 0)
-            }
-            try? ObjCExceptionBridge.catching {
-                engine.stop()
-            }
-            audioEngine = nil
-        }
+        // Off the main thread like every other engine teardown (see `micQueue`).
+        await MainActor.run { self.closeMic() }
         audioConverter = nil
 
         // Clean up observer
@@ -643,10 +666,141 @@ final class AudioCaptureManager: NSObject {
 
     // MARK: - Microphone (AVAudioEngine)
 
-    private func startMicrophoneCapture() throws {
+    /// A started mic engine and the device it records from.
+    struct MicEngineStart {
+        let engine: AVAudioEngine
+        /// The pinned device, or nil when it follows the system default input.
+        let pinned: MicDevicePicker.InputDevice?
+        let hardwareFormat: AVAudioFormat
+    }
+
+    /// Open (or reopen) the mic on `micQueue`: release the old engine there,
+    /// start a new one, then apply it here on the main thread. Must be called
+    /// on the main thread; `completion` runs there. Fails with
+    /// `.microphoneStuck` after `timeout` if Core Audio never answers.
+    func openMic(timeout: TimeInterval = AudioCaptureManager.micOpTimeoutSec,
+                 completion: @escaping (Result<Void, Error>) -> Void) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        micOpGeneration += 1
+        let generation = micOpGeneration
+        micOpInFlight = true
+        removeEngineConfigObserver()
+        let old = audioEngine
+        audioEngine = nil
+        let preference = AppSettings.micDevice
+        let queue = micQueue
+        let factory = micEngineFactory
+        queue.async { [weak self] in
+            if let old { Self.tearDown(old) }
+            let result: Result<MicEngineStart, Error>
+            if let factory {
+                result = Result { try factory(preference) }
+            } else if let self {
+                result = Result { try self.startMicEngine(preference) }
+            } else {
+                return
+            }
+            DispatchQueue.main.async {
+                guard let self, generation == self.micOpGeneration else {
+                    // Superseded, closed or timed out: never apply a late engine.
+                    if case .success(let start) = result { queue.async { Self.tearDown(start.engine) } }
+                    return
+                }
+                self.micOpInFlight = false
+                switch result {
+                case .success(let start):
+                    self.apply(start)
+                    completion(.success(()))
+                case .failure(let error):
+                    completion(.failure(error))
+                }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            guard let self, generation == self.micOpGeneration, self.micOpInFlight else { return }
+            self.micOpGeneration += 1
+            self.micOpInFlight = false
+            if self.abandonedMicQueues < Self.maxAbandonedMicQueues {
+                self.abandonedMicQueues += 1
+                self.micQueue = Self.makeMicQueue()
+                appLog("[AudioCapture] mic engine stuck in Core Audio for \(Int(timeout))s — abandoned its thread (\(self.abandonedMicQueues)/\(Self.maxAbandonedMicQueues)), the next start uses a fresh one")
+            } else {
+                appLog("[AudioCapture] mic engine stuck in Core Audio for \(Int(timeout))s — thread cap reached, the next start queues behind it")
+            }
+            completion(.failure(AudioCaptureError.microphoneStuck))
+        }
+    }
+
+    /// Release the mic on `micQueue`. Main thread only.
+    private func closeMic() {
+        micOpGeneration += 1
+        micOpInFlight = false
+        removeEngineConfigObserver()
+        if let engine = audioEngine {
+            audioEngine = nil
+            micQueue.async { Self.tearDown(engine) }
+        }
+    }
+
+    /// Stop an engine and drop it. Runs on `micQueue`: both calls, and the
+    /// release itself, can wait on Core Audio (the 2026-10-02 freeze was in
+    /// `-[AVAudioEngine dealloc]`). Either can also raise an NSException when
+    /// the engine is wedged (gotcha #18).
+    private static func tearDown(_ engine: AVAudioEngine) {
+        try? ObjCExceptionBridge.catching { engine.inputNode.removeTap(onBus: 0) }
+        try? ObjCExceptionBridge.catching { engine.stop() }
+    }
+
+    /// The engine attempts, in order, for a preference: the pinned device,
+    /// then the system default. Runs on `micQueue`.
+    private func startMicEngine(_ preference: MicDevicePicker.Preference) throws -> MicEngineStart {
+        let attempts = MicDevicePicker.attempts(preference, from: MicDevicePicker.inputDevices())
+        var lastError: Error = AudioCaptureError.microphoneUnavailable
+        for (index, device) in attempts.enumerated() {
+            do {
+                return try buildMicEngine(pinTo: device)
+            } catch {
+                lastError = error
+                if let device, index + 1 < attempts.count {
+                    appLog("[AudioCapture] mic on \"\(device.name)\" would not start — falling back to the system default input")
+                }
+            }
+        }
+        throw lastError
+    }
+
+    /// Main thread: take ownership of a started engine.
+    private func apply(_ start: MicEngineStart) {
+        audioEngine = start.engine
+        audioConverter = nil  // Per-format converter lives in the tap closure.
+        pinnedMic = start.pinned
+        updateDeviceNames()
+        removeEngineConfigObserver()
+        engineConfigObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: start.engine,
+            queue: .main
+        ) { [weak self, weak engine = start.engine] _ in
+            // A running engine rode the change out; restarting it would only
+            // risk a loop (a fresh engine can post this on start). A stopped
+            // one is the silent death. The stall watchdog backs this up.
+            guard let engine, !engine.isRunning else {
+                appLog("[AudioCapture] mic engine configuration changed; engine still running")
+                return
+            }
+            appLog("[AudioCapture] mic engine configuration changed and engine stopped — restarting")
+            self?.scheduleMicRestart()
+        }
+        let source = start.pinned.map { "pinned \"\($0.name)\"" } ?? "system default \"\(getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultInputDevice))\""
+        appLog("[AudioCapture] mic started on \(source), hardwareFormat=\(start.hardwareFormat.sampleRate)Hz/\(start.hardwareFormat.channelCount)ch")
+    }
+
+    /// Build and start one engine. Runs on `micQueue`; touches no published
+    /// state (the tap closure runs on the audio thread as before).
+    private func buildMicEngine(pinTo device: MicDevicePicker.InputDevice?) throws -> MicEngineStart {
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
-        pinMicrophone(inputNode)
+        let pinned = device.flatMap { pin(inputNode, to: $0) ? $0 : nil }
 
         let desiredFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -797,25 +951,7 @@ final class AudioCaptureManager: NSObject {
             throw AudioCaptureError.microphoneUnavailable
         }
 
-        self.audioEngine = engine
-        self.audioConverter = nil  // Per-format converter now lives in the tap closure.
-        removeEngineConfigObserver()
-        engineConfigObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: .main
-        ) { [weak self, weak engine] _ in
-            // A running engine rode the change out; restarting it would only
-            // risk a loop (a fresh engine can post this on start). A stopped
-            // one is the silent death. The stall watchdog backs this up.
-            guard let engine, !engine.isRunning else {
-                appLog("[AudioCapture] mic engine configuration changed; engine still running")
-                return
-            }
-            appLog("[AudioCapture] mic engine configuration changed and engine stopped — restarting")
-            self?.scheduleMicRestart()
-        }
-        appLog("[AudioCapture] mic started, hardwareFormat=\(hardwareFormat.sampleRate)Hz/\(hardwareFormat.channelCount)ch")
+        return MicEngineStart(engine: engine, pinned: pinned, hardwareFormat: hardwareFormat)
     }
 
     // MARK: - Chunk Timer
@@ -1216,49 +1352,37 @@ final class AudioCaptureManager: NSObject {
     /// going — ScreenCaptureKit / meeting audio is independent.
     private func restartMicrophoneCapture(retriesLeft: Int, backoffMs: Int) {
         guard isCapturing else { return }
-
-        removeEngineConfigObserver()
-        if let engine = audioEngine {
-            // removeTap can raise NSException if the engine is in a wedged
-            // state — catch defensively so a stale engine doesn't take down
-            // the process during recovery.
-            try? ObjCExceptionBridge.catching { engine.inputNode.removeTap(onBus: 0) }
-            engine.stop()
-            audioEngine = nil
+        // One open at a time; a stuck one ends itself at `micOpTimeoutSec`.
+        guard !micOpInFlight else {
+            appLog("[AudioCapture] mic restart skipped — the previous open is still running")
+            return
         }
-        audioConverter = nil
-
-        do {
-            try startMicrophoneCapture()
-            appLog("[AudioCapture] mic restarted successfully after device change")
-        } catch {
-            if retriesLeft > 0 {
-                let nextBackoff = min(backoffMs * 2, 1500)
-                appLog("[AudioCapture] mic restart failed (retriesLeft=\(retriesLeft), backoff=\(backoffMs)ms): \(error.localizedDescription)")
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(backoffMs)) { [weak self] in
-                    self?.restartMicrophoneCapture(retriesLeft: retriesLeft - 1, backoffMs: nextBackoff)
+        openMic { [weak self] result in
+            guard let self, self.isCapturing else { return }
+            switch result {
+            case .success:
+                appLog("[AudioCapture] mic restarted successfully after device change")
+            case .failure(let error):
+                if retriesLeft > 0 {
+                    let nextBackoff = min(backoffMs * 2, 1500)
+                    appLog("[AudioCapture] mic restart failed (retriesLeft=\(retriesLeft), backoff=\(backoffMs)ms): \(error.localizedDescription)")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(backoffMs)) { [weak self] in
+                        self?.restartMicrophoneCapture(retriesLeft: retriesLeft - 1, backoffMs: nextBackoff)
+                    }
+                } else {
+                    appLog("[AudioCapture] mic restart gave up after \(Self.micRestartMaxRetries) retries: \(error.localizedDescription)")
+                    self.onDeviceChangeError?()
                 }
-            } else {
-                appLog("[AudioCapture] mic restart gave up after \(Self.micRestartMaxRetries) retries: \(error.localizedDescription)")
-                onDeviceChangeError?()
             }
         }
     }
 
-    /// Point the engine's input at the preferred mic (built-in by default)
-    /// before anything reads its format. A failure leaves the system default.
-    private func pinMicrophone(_ inputNode: AVAudioInputNode) {
-        let preference = AppSettings.micDevice
-        guard let device = MicDevicePicker.choose(preference, from: MicDevicePicker.inputDevices()) else {
-            pinnedMic = nil
-            appLog("[AudioCapture] mic follows the system default input (preference=\(preference))")
-            updateDeviceNames()
-            return
-        }
+    /// Point the engine's input at `device` before anything reads its
+    /// format. Runs on `micQueue`. False leaves the system default.
+    private func pin(_ inputNode: AVAudioInputNode, to device: MicDevicePicker.InputDevice) -> Bool {
         guard let unit = inputNode.audioUnit else {
-            pinnedMic = nil
             appLog("[AudioCapture] mic pin skipped — input node has no audio unit")
-            return
+            return false
         }
         var id = device.id
         let status = AudioUnitSetProperty(
@@ -1270,13 +1394,11 @@ final class AudioCaptureManager: NSObject {
             UInt32(MemoryLayout<AudioDeviceID>.size)
         )
         if status == noErr {
-            pinnedMic = device
             appLog("[AudioCapture] mic pinned to \"\(device.name)\" (system default input: \"\(getDefaultDeviceName(selector: kAudioHardwarePropertyDefaultInputDevice))\")")
-        } else {
-            pinnedMic = nil
-            appLog("[AudioCapture] mic pin to \"\(device.name)\" failed (status \(status)) — using the system default input")
+            return true
         }
-        updateDeviceNames()
+        appLog("[AudioCapture] mic pin to \"\(device.name)\" failed (status \(status)) — using the system default input")
+        return false
     }
 
     private func removeEngineConfigObserver() {
@@ -1537,6 +1659,7 @@ private class AudioRouteObserver {
 enum AudioCaptureError: Error, LocalizedError {
     case noDisplayFound
     case microphoneUnavailable
+    case microphoneStuck
     case screenCapturePermissionDenied
     case screenRecordingPermissionRequired
 
@@ -1544,6 +1667,8 @@ enum AudioCaptureError: Error, LocalizedError {
         switch self {
         case .noDisplayFound: return "No display found for screen capture"
         case .microphoneUnavailable: return "Microphone is not available"
+        case .microphoneStuck:
+            return "The microphone did not start: Core Audio stopped answering. Press Start again, or switch the input in System Settings → Sound."
         case .screenCapturePermissionDenied: return "Screen recording permission not granted"
         case .screenRecordingPermissionRequired:
             return "Screen Recording permission is required. After enabling Meeting Copilot in System Settings → Privacy & Security → Screen Recording, quit and relaunch the app."

@@ -334,6 +334,12 @@ fi
 # server never loads. Unsignable or unsigned Mach-O the notary would reject.
 SQLITE_RELEASE="$APP_BUNDLE/Contents/Resources/server/node_modules/better-sqlite3/build/Release"
 rm -rf "$SQLITE_RELEASE/obj.target" "$SQLITE_RELEASE/.deps" "$SQLITE_RELEASE/test_extension.node"
+# better-sqlite3 13 ships prebuilds for every platform; the app is arm64 only,
+# and an x64 Mach-O would only be one more thing to sign and notarize.
+SQLITE_PREBUILDS="$APP_BUNDLE/Contents/Resources/server/node_modules/better-sqlite3/prebuilds"
+if [ -d "$SQLITE_PREBUILDS" ]; then
+  find "$SQLITE_PREBUILDS" -type f ! -name 'darwin-arm64.node' -delete
+fi
 
 # ── Step 4: Code sign ────────────────────────────────────────────────────
 #
