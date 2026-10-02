@@ -238,4 +238,27 @@ describe('ICS helpers', () => {
     ).toBe(Date.parse('2026-07-17T14:30:00Z'));
     expect(resolveEventTime('not a date', null, 'DTSTART')).toBeNull();
   });
+
+  it('resolveEventTime reads the VEVENT TZID, not the VTIMEZONE rule DTSTART before it', () => {
+    // Google's shape: VTIMEZONE comes first with a zone-less DTSTART. Read
+    // as machine-local, a 9:30 Chicago meeting showed at 9:30 ET (2026-10-02).
+    const ics = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VTIMEZONE',
+      'TZID:America/Chicago',
+      'BEGIN:DAYLIGHT',
+      'TZOFFSETFROM:-0600',
+      'TZOFFSETTO:-0500',
+      'DTSTART:19700308T020000',
+      'END:DAYLIGHT',
+      'END:VTIMEZONE',
+      'BEGIN:VEVENT',
+      'DTSTART;TZID=America/Chicago:20261002T093000',
+      'DTEND;TZID=America/Chicago:20261002T100000',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    expect(resolveEventTime('2026-10-02T09:30:00', ics, 'DTSTART')).toBe(Date.parse('2026-10-02T14:30:00Z'));
+    expect(resolveEventTime('2026-10-02T10:00:00', ics, 'DTEND')).toBe(Date.parse('2026-10-02T15:00:00Z'));
+  });
 });

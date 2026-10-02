@@ -227,7 +227,11 @@ export function resolveEventTime(
 }
 
 function extractTzid(unfoldedIcs: string, prop: 'DTSTART' | 'DTEND'): string | null {
-  const line = unfoldedIcs.match(new RegExp(`^${prop}([^:]*):`, 'm'));
+  // Look inside VEVENT only: Google invites put a VTIMEZONE block first, whose
+  // own zone-less DTSTART (the DST rule, 19700308T020000) would match first
+  // and make the event fall back to machine-local time.
+  const veventAt = unfoldedIcs.search(/^BEGIN:VEVENT/m);
+  const line = (veventAt >= 0 ? unfoldedIcs.slice(veventAt) : unfoldedIcs).match(new RegExp(`^${prop}([^:]*):`, 'm'));
   if (!line) return null;
   const tz = line[1].match(/TZID=([^;:]+)/);
   return tz ? tz[1].trim() : null;
