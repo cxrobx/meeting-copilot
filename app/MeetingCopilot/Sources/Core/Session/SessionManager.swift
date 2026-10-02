@@ -164,7 +164,13 @@ final class SessionManager {
             let (data, _) = try await URLSession.shared.data(from: url)
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                let checks = json["checks"] as? [[String: Any]] {
-                let failures = checks.filter { ($0["ok"] as? Bool) == false }
+                var failures = checks.filter { ($0["ok"] as? Bool) == false }
+                // A Parakeet sidecar that is still starting (on a first run,
+                // still downloading) is not a failure: the menu bar's setup
+                // card says what it is doing (ProcessSupervisor.transcriptionSetup).
+                if processSupervisor.parakeetRunning {
+                    failures.removeAll { ($0["name"] as? String) == "transcription" }
+                }
                 if !failures.isEmpty {
                     let details = failures.compactMap { $0["detail"] as? String }.joined(separator: ". ")
                     surfaceError("Preflight: \(details)")

@@ -154,14 +154,30 @@ fi
 # Runtime configuration belongs in ~/.meeting-copilot/.env. Never copy a
 # repository-local .env into a distributable app bundle.
 
-# Bundle the Parakeet sidecar script — the DEFAULT transcription backend.
-# ProcessSupervisor runs it via `uv run` at launch; uv resolves the script's
-# PEP-723 deps + the Parakeet model from the user's caches on first start.
-# (whisper-server is still bundled below as the automatic fallback.)
-if [ -f "$PROJECT_DIR/scripts/parakeet-server.py" ]; then
-  cp "$PROJECT_DIR/scripts/parakeet-server.py" "$APP_BUNDLE/Contents/Resources/parakeet-server.py"
-  echo "  Bundled parakeet-server.py (default transcription backend)"
+# Bundle the Parakeet sidecar — the DEFAULT transcription backend — with the
+# pinned uv that runs it and the lock it runs from. ProcessSupervisor runs
+# `uv run --frozen --script` at launch; on a Mac that never ran it, uv fetches
+# Python 3.12, the locked dependencies and the Parakeet model into the user's
+# own caches on first start. (whisper-server is still bundled below as the
+# automatic fallback.)
+PARAKEET_SCRIPT="$PROJECT_DIR/scripts/parakeet-server.py"
+UV_BIN="$("$SCRIPT_DIR/fetch-uv.sh")" || {
+  echo "ERROR: Couldn't get the pinned uv (scripts/fetch-uv.sh)."
+  exit 1
+}
+# A stale lock would ship versions the script no longer asks for; --frozen at
+# runtime never notices, so refuse it here.
+if ! "$UV_BIN" lock --script "$PARAKEET_SCRIPT" --check >/dev/null 2>&1; then
+  echo "ERROR: scripts/parakeet-server.py.lock is out of date with the script's dependencies."
+  echo "       Run: uv lock --script scripts/parakeet-server.py   (then the transcription eval)"
+  exit 1
 fi
+cp "$PARAKEET_SCRIPT" "$APP_BUNDLE/Contents/Resources/parakeet-server.py"
+cp "$PARAKEET_SCRIPT.lock" "$APP_BUNDLE/Contents/Resources/parakeet-server.py.lock"
+mkdir -p "$APP_BUNDLE/Contents/Resources/uv/bin"
+cp "$UV_BIN" "$APP_BUNDLE/Contents/Resources/uv/bin/uv"
+cp "$SCRIPT_DIR/licenses/uv-LICENSE-MIT" "$APP_BUNDLE/Contents/Resources/uv/LICENSE"
+echo "  Bundled parakeet-server.py + its lock, and $("$UV_BIN" --version)"
 
 # Bundle whisper-server + its dylib dependencies.
 # The homebrew binary is linked with rpath `@loader_path/../lib`, so we preserve
@@ -190,13 +206,10 @@ else
   echo "  WARNING: whisper-cpp not found via Homebrew — bundle will not include whisper-server"
 fi
 
-# Bundle whisper model if available
-WHISPER_MODEL="$HOME/.meeting-copilot/models/ggml-base.en.bin"
-if [ -f "$WHISPER_MODEL" ]; then
-  mkdir -p "$APP_BUNDLE/Contents/Resources/models"
-  cp "$WHISPER_MODEL" "$APP_BUNDLE/Contents/Resources/models/"
-  echo "  Bundled whisper model ($(du -h "$WHISPER_MODEL" | cut -f1))"
-fi
+# The whisper model (ggml-base.en, 148 MB) is not bundled: whisper is the
+# fallback a Mac with Parakeet never runs, and shipping it would put it in
+# every update. ProcessSupervisor downloads it (pinned, sha256-checked) into
+# ~/.meeting-copilot/models the first time whisper mode needs it.
 
 # Bundle Silero VAD model if available. Without it, ProcessSupervisor falls
 # back to a non-VAD launch (silence hallucinations pass through). Run

@@ -57,12 +57,13 @@ required_files=(
   "Contents/MacOS/MeetingCopilot"
   "Contents/Resources/AppIcon.icns"
   "Contents/Resources/parakeet-server.py"
+  "Contents/Resources/parakeet-server.py.lock"
+  "Contents/Resources/uv/bin/uv"
   "Contents/Resources/server/dist/index.js"
   "Contents/Resources/server/package.json"
   "Contents/Resources/server/vendor/js/marked.min.js"
   "Contents/Resources/server/node_modules/better-sqlite3/package.json"
   "Contents/Resources/whisper/bin/whisper-server"
-  "Contents/Resources/models/ggml-base.en.bin"
   "Contents/Resources/models/ggml-silero-v5.1.2.bin"
 )
 
@@ -100,13 +101,16 @@ if otool -L "$main_binary" | grep -q '/opt/homebrew/.*whisper'; then
   fail "Main binary still contains an absolute Homebrew whisper dependency"
 fi
 
-whisper_model_bytes="$(stat -f%z "$APP_BUNDLE/Contents/Resources/models/ggml-base.en.bin")"
-[ "$whisper_model_bytes" -ge 100000000 ] \
-  || fail "Bundled Whisper model looks truncated ($whisper_model_bytes bytes)"
-
 vad_model_bytes="$(stat -f%z "$APP_BUNDLE/Contents/Resources/models/ggml-silero-v5.1.2.bin")"
 [ "$vad_model_bytes" -ge 500000 ] \
   || fail "Bundled VAD model looks truncated ($vad_model_bytes bytes)"
+
+# Parakeet runs on the bundled uv, from the bundled lock (--frozen), so the two
+# must agree with the script beside them. --offline: verification never fetches.
+bundled_uv="$APP_BUNDLE/Contents/Resources/uv/bin/uv"
+"$bundled_uv" --version >/dev/null 2>&1 || fail "The bundled uv does not run"
+"$bundled_uv" lock --offline --script "$APP_BUNDLE/Contents/Resources/parakeet-server.py" --check >/dev/null 2>&1 \
+  || fail "The bundled parakeet-server.py.lock does not match the bundled script"
 
 # The app runs the server on its own Node, never the system's (gotcha #14).
 BUNDLED_NODE="$APP_BUNDLE/Contents/Resources/node/bin/node"

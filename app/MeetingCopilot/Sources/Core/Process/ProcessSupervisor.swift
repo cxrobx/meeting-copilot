@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // MARK: - Process Supervisor
@@ -39,6 +40,15 @@ final class ProcessSupervisor {
     private var parakeetProcess: Process?
     private var parakeetRestartCount = 0
     private var parakeetGeneration = 0
+
+    /// What the menu bar shows while local transcription is not ready yet on a
+    /// fresh Mac: uv fetching Python, Parakeet's locked dependencies and its
+    /// 2.5 GB model on first start, or whisper fetching its model. nil when
+    /// there is nothing to say, which on a Mac that has run it before is
+    /// always (the sidecar is up within the grace period).
+    var transcriptionSetup: String?
+    private var parakeetSetupTask: Task<Void, Never>?
+    private var whisperModelTask: Task<Void, Never>?
 
     private var monitorTasks: [Task<Void, Never>] = []
     private var healthProbeTask: Task<Void, Never>?
@@ -118,8 +128,17 @@ final class ProcessSupervisor {
     /// PARAKEET_PORT default and ./scripts/start.sh.
     private let parakeetPort = "8077"
 
-    /// Resolve the `uv` binary (Astral installer drops it in ~/.local/bin).
+    /// Resolve the `uv` binary. A packaged app runs the uv it ships
+    /// (Contents/Resources/uv, pinned by scripts/fetch-uv.sh), so Parakeet
+    /// works on a Mac that never installed uv; a dev build uses the user's
+    /// (the Astral installer drops it in ~/.local/bin). Either way it shares
+    /// the user's uv and Hugging Face caches, so nothing already fetched is
+    /// fetched again.
     private var uvPath: String? {
+        if isPackaged, let res = Bundle.main.resourcePath {
+            let bundled = "\(res)/uv/bin/uv"
+            if FileManager.default.isExecutableFile(atPath: bundled) { return bundled }
+        }
         let candidates = [
             NSString("~/.local/bin/uv").expandingTildeInPath,
             "/opt/homebrew/bin/uv",
@@ -556,7 +575,9 @@ final class ProcessSupervisor {
         } else if let bPath = bundleModelPath, FileManager.default.fileExists(atPath: bPath) {
             modelPath = bPath
         } else {
-            modelPath = userModelPath // Will fail, but gives a clear error
+            // Not shipped in the app any more: fetch it once, then launch.
+            fetchWhisperModel(to: userModelPath)
+            return
         }
         var args: [String] = [
             "--model", modelPath,
@@ -655,10 +676,12 @@ final class ProcessSupervisor {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: uv)
-        // `uv run` resolves the script's inline (PEP 723) deps + the Parakeet
-        // model on first launch (setup.sh pre-pulls them), then serves
-        // /inference on parakeetPort — the same contract whisper-server exposes.
-        process.arguments = ["run", script, "--port", parakeetPort]
+        // `uv run` installs the script's dependencies at the versions locked in
+        // parakeet-server.py.lock beside it (--frozen: use the lock as shipped,
+        // never rewrite it inside the signed bundle) and fetches the Parakeet
+        // model on first launch, then serves /inference on parakeetPort — the
+        // same contract whisper-server exposes.
+        process.arguments = ["run", "--frozen", "--script", script, "--port", parakeetPort]
         process.environment = processEnvironment()
 
         let pipe = makeOutputPipe(prefix: "Parakeet")
@@ -670,6 +693,7 @@ final class ProcessSupervisor {
             self.parakeetProcess = process
             self.parakeetRunning = true
             appLog("[ProcessSupervisor] Parakeet sidecar started (PID: \(process.processIdentifier)) via \(uv)")
+            watchParakeetSetup(process)
 
             let task = Task.detached { [self] in
                 process.waitUntilExit()
@@ -680,6 +704,12 @@ final class ProcessSupervisor {
                     self.parakeetRunning = false
                     print("[ProcessSupervisor] Parakeet exited (code: \(process.terminationStatus))")
 
+                    if !self.isStopping && process.terminationStatus != 0 && self.parakeetRestartCount >= self.maxRestartAttempts {
+                        // Said, not left as a setup line that never finishes.
+                        self.parakeetSetupTask?.cancel()
+                        self.transcriptionSetup = "Local speech recognition couldn't start. Check the internet connection (the first start downloads it), then quit and reopen Meeting Copilot. Details: ~/.meeting-copilot/app.log"
+                        appLog("[ProcessSupervisor] Parakeet gave up after \(self.parakeetRestartCount) restarts")
+                    }
                     if !self.isStopping && process.terminationStatus != 0 && self.parakeetRestartCount < self.maxRestartAttempts {
                         self.parakeetRestartCount += 1
                         let idx = min(self.parakeetRestartCount - 1, self.restartBackoffSeconds.count - 1)
@@ -702,6 +732,150 @@ final class ProcessSupervisor {
         }
     }
 
+    // MARK: - First-run setup
+
+    /// Parakeet's sidecar loads its model before it opens its port, so the port
+    /// answering means it is ready. Until it does, and past a grace period a
+    /// warm start fits inside, say what the first start is doing.
+    private func watchParakeetSetup(_ process: Process) {
+        parakeetSetupTask?.cancel()
+        let port = parakeetPort
+        let cacheDir = Self.parakeetModelCacheDir(environment: ProcessInfo.processInfo.environment)
+        parakeetSetupTask = Task { [weak self] in
+            let started = Date()
+            while !Task.isCancelled {
+                if await Self.answers(port: port) {
+                    if let self, self.parakeetProcess === process { self.transcriptionSetup = nil }
+                    return
+                }
+                guard let self, self.parakeetProcess === process else { return }
+                if Date().timeIntervalSince(started) >= 12 {
+                    let status = Self.parakeetSetupStatus(cacheDir: cacheDir)
+                    if self.transcriptionSetup != status {
+                        if self.transcriptionSetup == nil { appLog("[ProcessSupervisor] Parakeet not up after 12s: \(status)") }
+                        self.transcriptionSetup = status
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    nonisolated private static func answers(port: String) async -> Bool {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/") else { return false }
+        let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 1.5)
+        guard let (_, response) = try? await URLSession.shared.data(for: request) else { return false }
+        return (response as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    /// Where Parakeet's model lands: huggingface_hub's own order — HF_HUB_CACHE,
+    /// then HF_HOME/hub, then ~/.cache/huggingface/hub.
+    nonisolated static func parakeetModelCacheDir(environment: [String: String]) -> String {
+        let hub: String
+        if let cache = environment["HF_HUB_CACHE"], !cache.isEmpty {
+            hub = cache
+        } else if let home = environment["HF_HOME"], !home.isEmpty {
+            hub = "\(home)/hub"
+        } else {
+            hub = NSString("~/.cache/huggingface/hub").expandingTildeInPath
+        }
+        return "\(hub)/models--mlx-community--parakeet-tdt-0.6b-v3"
+    }
+
+    /// parakeet-tdt-0.6b-v3 is one safetensors file of this size; the blobs
+    /// directory (partial `.incomplete` files included) measures the download.
+    nonisolated static let parakeetModelBytes: Int64 = 2_508_288_736
+
+    nonisolated static func parakeetSetupStatus(cacheDir: String) -> String {
+        let blobs = "\(cacheDir)/blobs"
+        var bytes: Int64 = 0
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: blobs)) ?? [] {
+            let attributes = try? FileManager.default.attributesOfItem(atPath: "\(blobs)/\(name)")
+            bytes += (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+        }
+        if bytes == 0 {
+            return "Setting up speech recognition. The first start downloads Python and the Parakeet model (about 2.5 GB); transcription starts when it's ready."
+        }
+        if bytes >= parakeetModelBytes {
+            return "Loading the speech model…"
+        }
+        let percent = Int(Double(bytes) / Double(parakeetModelBytes) * 100)
+        return "Downloading the speech model: \(percent)% of 2.5 GB. First start only; transcription starts when it's ready."
+    }
+
+    /// whisper.cpp's base.en model, pinned to a commit and checked by sha256.
+    /// The app no longer ships it (148 MB in every update, for a fallback a Mac
+    /// with Parakeet never runs): whisper mode downloads it on first use.
+    nonisolated static let whisperModelURL = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.en.bin")!
+    nonisolated static let whisperModelSHA256 = "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"
+
+    private func fetchWhisperModel(to destination: String) {
+        guard whisperModelTask == nil else { return }
+        transcriptionSetup = "Downloading the whisper speech model (148 MB). First use only; transcription starts when it's ready."
+        appLog("[ProcessSupervisor] whisper model missing — downloading \(Self.whisperModelURL.absoluteString)")
+        whisperModelTask = Task { [weak self] in
+            let result = await Self.downloadVerified(from: Self.whisperModelURL, sha256: Self.whisperModelSHA256, to: destination)
+            guard let self else { return }
+            self.whisperModelTask = nil
+            switch result {
+            case .success:
+                self.transcriptionSetup = nil
+                appLog("[ProcessSupervisor] whisper model downloaded and verified")
+                if !self.isStopping { self.launchWhisper() }
+            case .failure(let error):
+                guard !self.isStopping else { return }
+                self.transcriptionSetup = "The whisper speech model couldn't be downloaded (\(error.localizedDescription)). Check the internet connection, then quit and reopen Meeting Copilot."
+                appLog("[ProcessSupervisor] whisper model download failed: \(error)")
+            }
+        }
+    }
+
+    enum ModelDownloadError: LocalizedError {
+        case http(Int)
+        case checksum(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .http(let status): return "HTTP \(status)"
+            case .checksum(let got): return "checksum mismatch, got \(got.prefix(12))…"
+            }
+        }
+    }
+
+    /// Download to a temporary file, check the sha256, and only then move it
+    /// into place: a partial or altered file never lands where it would be used.
+    nonisolated static func downloadVerified(from url: URL, sha256: String, to destination: String) async -> Result<Void, Error> {
+        do {
+            let (temporary, response) = try await URLSession.shared.download(from: url)
+            defer { try? FileManager.default.removeItem(at: temporary) }
+            if let status = (response as? HTTPURLResponse)?.statusCode, status != 200 {
+                throw ModelDownloadError.http(status)
+            }
+            let digest = try sha256Hex(of: temporary)
+            guard digest == sha256 else { throw ModelDownloadError.checksum(digest) }
+            let target = URL(fileURLWithPath: destination)
+            try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: destination) {
+                _ = try FileManager.default.replaceItemAt(target, withItemAt: temporary)
+            } else {
+                try FileManager.default.moveItem(at: temporary, to: target)
+            }
+            return .success(())
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    nonisolated static func sha256Hex(of file: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 4 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     // MARK: - Stop All
 
     func stopAll() async {
@@ -717,6 +891,10 @@ final class ProcessSupervisor {
         healthProbeTask?.cancel()
         healthProbeTask = nil
         serverHealthy = false
+        parakeetSetupTask?.cancel()
+        parakeetSetupTask = nil
+        whisperModelTask?.cancel()
+        whisperModelTask = nil
 
         // Graceful shutdown: SIGTERM, wait, then SIGKILL if needed
         await stopProcess(serverProcess, name: "Server")

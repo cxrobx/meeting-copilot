@@ -1,12 +1,15 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.10"
+# requires-python = "==3.12.*"
 # dependencies = [
 #   "parakeet-mlx",
 #   "fastapi",
 #   "uvicorn",
 #   "python-multipart",
 # ]
+#
+# [tool.uv]
+# exclude-newer = "2026-07-28T21:24:00Z"
 # ///
 """
 Parakeet STT sidecar — a whisper-server-compatible /inference HTTP shim.
@@ -22,8 +25,14 @@ WhisperProvider already speaks against whisper.cpp's whisper-server:
 So switching the app to Parakeet is just pointing WhisperProvider at this port —
 no new provider class. Run:
 
-    uv run scripts/parakeet-server.py --port 8077
-    # or:  ./scripts/parakeet-server.py --port 8077
+    uv run --frozen --script scripts/parakeet-server.py --port 8077
+
+Dependencies are locked in parakeet-server.py.lock (`uv lock --script`), with
+hashes, at the versions the app ran from 2026-07-28 (exclude-newer above), on
+Python 3.12. The app ships the lock beside this script and runs `--frozen`, so
+every Mac gets the same parakeet-mlx and mlx. To move them: change exclude-newer,
+run `uv lock --script scripts/parakeet-server.py`, and re-run the transcription
+eval (`cd server && npm run eval:audio`) before shipping.
 
 Model is loaded once at startup; each request transcribes one chunk. The first
 inference pays a one-time Metal compile cost (the app's health polling covers it).

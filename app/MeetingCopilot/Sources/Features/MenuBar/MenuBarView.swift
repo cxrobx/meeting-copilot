@@ -46,6 +46,9 @@ struct MenuBarView: View {
         VStack(spacing: 0) {
             header
             VStack(alignment: .leading, spacing: 14) {
+                if let setup = sessionManager.processSupervisor.transcriptionSetup {
+                    TranscriptionSetupCard(text: setup)
+                }
                 if inMeeting {
                     LiveSection(sessionManager: sessionManager, feed: feed, actions: actions, close: { dismiss() })
                 } else {
@@ -216,6 +219,29 @@ private struct ServerFailedCard: View {
             .buttonStyle(PillButtonStyle(kind: .normal, small: true))
         }
         .modifier(CardStyle(border: theme.danger.opacity(0.35)))
+    }
+}
+
+/// First start on a new Mac: local speech recognition is still downloading
+/// (ProcessSupervisor.transcriptionSetup). Shown in both states, since a
+/// meeting started now would have no local transcription yet.
+private struct TranscriptionSetupCard: View {
+    let text: String
+    @Environment(\.menuBarTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                StatusDot(kind: .warn)
+                Text("Preparing transcription")
+                    .font(theme.font(12, .semibold))
+            }
+            Text(text)
+                .font(theme.font(11))
+                .foregroundStyle(theme.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .modifier(CardStyle(border: theme.warning.opacity(0.35)))
     }
 }
 

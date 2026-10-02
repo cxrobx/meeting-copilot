@@ -74,7 +74,8 @@ fi
 if [ "$PROVIDER_LC" = "parakeet" ]; then
     if parakeet_available; then
         echo "Starting Parakeet sidecar on port $PARAKEET_PORT (model loads on first start)..."
-        uv run "$PARAKEET_SCRIPT" --port "$PARAKEET_PORT" &
+        # --frozen: the locked versions (parakeet-server.py.lock), as the app runs them.
+        uv run --frozen --script "$PARAKEET_SCRIPT" --port "$PARAKEET_PORT" &
         PARAKEET_PID=$!
         echo "  Parakeet sidecar PID: $PARAKEET_PID"
         # Wait for the model to load + the HTTP server to come up before the

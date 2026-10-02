@@ -160,6 +160,15 @@ final class MenuBarRenderTests: XCTestCase {
                              meetingLevels: [Float](repeating: 0, count: MenuBarFeed.historyBars),
                              micLevels: Self.wave(seed: 3), theme: theme)
         try render(MenuBarView(sessionManager: live, feed: liveFeed, actions: Self.noActions), to: out.appendingPathComponent("live-silent-\(suffix).png"))
+
+        // First start on a new Mac: Parakeet's model still downloading.
+        let setup = SessionManager()
+        setup.serverReady = true
+        setup.processSupervisor.transcriptionSetup =
+            "Downloading the speech model: 42% of 2.5 GB. First start only; transcription starts when it's ready."
+        let setupFeed = MenuBarFeed()
+        setupFeed.loadPreview(sessions: [], next: nil, meetingLevels: [], micLevels: [], theme: theme)
+        try render(MenuBarView(sessionManager: setup, feed: setupFeed, actions: Self.noActions), to: out.appendingPathComponent("idle-setup-\(suffix).png"))
     }
 
     private func render<V: View>(_ view: V, to url: URL) throws {
