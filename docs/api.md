@@ -13,6 +13,7 @@
 | `audio.flush` | Flush VAD-buffered trailing audio at stop | — |
 | `session.start` | Begin a meeting session | `title?, agenda?, attendees?, projectNames?, contextPaths?` |
 | `session.stop` | End the session (idempotent) | — |
+| `session.pause` / `session.resume` | Pause or resume the live meeting (`session/pause.ts`). Paused: frames and chunks are dropped, the Grok stream is closed, the mic watchdog stands down, the pulse's timer reads wait. Resume writes a `[Paused]` row (source `system`, no words) into the transcript. Any client may send them; repeats are harmless | — |
 | `action.approve` | Approve a suggestion (also used for Retry on failed) | `actionId` |
 | `action.dismiss` | Dismiss a suggestion | `actionId` |
 | `action.cancel` | Cancel a running action | `actionId` |
@@ -35,6 +36,7 @@
 | `action.status` | Action lifecycle change | `actionId, state, result?` |
 | `action.stream` | Token delta from a streaming worker | `actionId, delta` |
 | `session.state` | Authoritative session state | `state, sessionId?, message?, startedAt?, title?` |
+| `session.paused` | The live meeting was paused or resumed; also sent on connect once a meeting has paused. Its own message, not a `session.state` (the app's state machine is a fixed set, gotcha #23). The app stops sending audio on it; the dashboard shows the banner and freezes its timer | `sessionId?, paused, pausedAt` (epoch ms or null), `pausedMs` (all paused time, the open pause included), `marker?` (on resume, the transcript row: `{ id, label, text, timestamp }`) |
 | `agenda.status` | Agenda coverage update (8s cadence) | `status { items, missing }` |
 | `intelligence.status` | Eval-loop phase indicator | `phase: 'idle'\|'evaluating'\|'generating'` |
 | `intelligence.error` | Realtime intelligence failure; `degraded` = the AI stopped for the session (budget lockout only) | `source, message, at, degraded?` |
