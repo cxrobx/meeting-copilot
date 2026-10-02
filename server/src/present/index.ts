@@ -7500,6 +7500,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     clearTimeout(selChangeTimer);
     selChangeTimer = setTimeout(function() {
       var s = window.getSelection();
+      // Focusing the Ask… input collapses the page selection; the bar must stay.
       // A selection inside an evidence frame leaves this page's collapsed.
       if ((!s || s.isCollapsed) && !chatFrameSel) hideSelBar();
     }, 150);

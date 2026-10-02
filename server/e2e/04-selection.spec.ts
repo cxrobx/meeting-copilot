@@ -33,3 +33,24 @@ test('highlighting shows the toolbar and Add to chat makes a chip, in the transc
 
   expect(watch.problems()).toEqual([]);
 });
+
+// Catches: focusing the Ask… input collapses the page selection, and the
+// selectionchange handler then hid the toolbar before anything could be typed.
+test('Ask… in the selection toolbar stays open to type in', async ({ page }) => {
+  const watch = watchPage(page);
+  await page.goto(run.replayUrl);
+  const bar = page.locator('.selbar');
+  const body = page.locator('#action-card-ga4 .card-body');
+  await expect(body).toBeVisible();
+  await dragSelect(page, body.locator('p, li').first());
+  await expect(bar).toBeVisible();
+  await bar.locator('.selbar-btn', { hasText: 'Ask' }).click();
+  const input = bar.locator('.selbar-input-row input');
+  await expect(input).toBeFocused();
+  await page.waitForTimeout(500); // past the 150 ms selectionchange debounce
+  await expect(bar).toBeVisible();
+  await input.pressSequentially('who owns this?');
+  await expect(input).toHaveValue('who owns this?');
+  await expect(bar).toBeVisible();
+  expect(watch.problems()).toEqual([]);
+});
