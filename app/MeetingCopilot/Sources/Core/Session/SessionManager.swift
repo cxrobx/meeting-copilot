@@ -526,6 +526,9 @@ final class SessionManager {
     /// A meeting went live (true) or stopped being live (false). The app
     /// holds the coach's global hotkeys only in between.
     var onMeetingLiveChanged: ((Bool) -> Void)?
+    /// Fires when a meeting is over (its session left priming…ending): the
+    /// updater runs anything it held back for the meeting.
+    var onMeetingEnded: (() -> Void)?
 
     /// Evaluates JavaScript inside the dashboard WKWebView (wired by
     /// WebDashboardView). Nil until the web panel has been created.
@@ -618,10 +621,12 @@ final class SessionManager {
         }
         print("[SessionManager] State: \(state.rawValue) -> \(newState.rawValue)")
         let wasLive = state == .live || state == .degraded
+        let wasMeeting = state.isMeeting
         state = newState
         currentSession?.state = newState
         let isLive = newState == .live || newState == .degraded
         if wasLive != isLive { onMeetingLiveChanged?(isLive) }
+        if wasMeeting && !newState.isMeeting { onMeetingEnded?() }
         return true
     }
 

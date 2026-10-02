@@ -6,9 +6,10 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 DEFAULT_APP="$PROJECT_DIR/dist/Meeting Copilot.app"
 EXPECTED_BUNDLE_ID="com.christopherrobinson.meeting-copilot"
 REQUIRE_DEVELOPER_ID=false
+ALLOW_TEST_FEED=false
 
 usage() {
-  echo "Usage: $0 [--require-developer-id] [path/to/Meeting Copilot.app]"
+  echo "Usage: $0 [--require-developer-id] [--allow-test-feed] [path/to/Meeting Copilot.app]"
 }
 
 APP_BUNDLE=""
@@ -16,6 +17,9 @@ for arg in "$@"; do
   case "$arg" in
     --require-developer-id)
       REQUIRE_DEVELOPER_ID=true
+      ;;
+    --allow-test-feed)
+      ALLOW_TEST_FEED=true
       ;;
     -h|--help)
       usage
@@ -46,6 +50,8 @@ fail() {
 }
 
 [ -d "$APP_BUNDLE" ] || fail "App bundle not found: $APP_BUNDLE"
+# Absolute, so require() below reads it as a path and not a module name.
+APP_BUNDLE="$(cd "$APP_BUNDLE" && pwd)"
 [ -f "$VERSION_FILE" ] || fail "Version file not found: $VERSION_FILE"
 
 APP_VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
@@ -96,7 +102,30 @@ for usage_key in NSMicrophoneUsageDescription NSScreenCaptureUsageDescription NS
     || fail "Info.plist is missing $usage_key"
 done
 
+# Sparkle: the update channel's identity comes from sparkle.conf. A build
+# pointed at a local test feed (MC_FEED_URL) must never be installed or
+# published, so it passes only when the caller says it is a test build.
+# shellcheck source=sparkle.conf
+. "$SCRIPT_DIR/sparkle.conf"
+[ -f "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" ] \
+  || fail "Bundle is incomplete; missing Contents/Frameworks/Sparkle.framework"
+bundled_sparkle="$(plutil -extract CFBundleShortVersionString raw -o - "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B/Resources/Info.plist")"
+[ "$bundled_sparkle" = "$SPARKLE_VERSION" ] || fail "Bundled Sparkle is $bundled_sparkle, expected $SPARKLE_VERSION"
+actual_key="$(plutil -extract SUPublicEDKey raw -o - "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true)"
+[ "$actual_key" = "$SPARKLE_PUBLIC_KEY" ] \
+  || fail "SUPublicEDKey is '$actual_key', not the update channel's key from scripts/sparkle.conf"
+actual_feed="$(plutil -extract SUFeedURL raw -o - "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true)"
+if [ "$actual_feed" != "$SPARKLE_FEED_URL" ] && [ "$ALLOW_TEST_FEED" != true ]; then
+  fail "SUFeedURL is '$actual_feed', not $SPARKLE_FEED_URL (a test build? pass --allow-test-feed only for the local update test)"
+fi
+for key in SUEnableAutomaticChecks SUVerifyUpdateBeforeExtraction; do
+  [ "$(plutil -extract "$key" raw -o - "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null)" = true ] \
+    || fail "Info.plist must set $key to true"
+done
+
 main_binary="$APP_BUNDLE/Contents/MacOS/MeetingCopilot"
+otool -l "$main_binary" | awk '/LC_RPATH/ { getline; getline; print $2 }' | grep -qx '@executable_path/../Frameworks' \
+  || fail "The main binary has no @executable_path/../Frameworks rpath, so Sparkle would not load"
 if otool -L "$main_binary" | grep -q '/opt/homebrew/.*whisper'; then
   fail "Main binary still contains an absolute Homebrew whisper dependency"
 fi
@@ -165,7 +194,9 @@ while IFS= read -r -d '' f; do
   entitlements="$(codesign -d --entitlements - --xml "$f" 2>/dev/null || true)"
   ! grep -q 'get-task-allow' <<< "$entitlements" \
     || fail "$rel carries com.apple.security.get-task-allow, which notarization rejects"
-  local_refs="$( (otool -L "$f" | tail -n +2 | awk '{print $1}'; otool -l "$f" | awk '/LC_RPATH/ { getline; getline; print $2 }') \
+  # Dependencies are otool -L's tab-indented lines; the others are per-architecture
+  # headers naming the file itself (a universal binary has one per slice).
+  local_refs="$( (otool -L "$f" | awk '/^\t/ {print $1}'; otool -l "$f" | awk '/LC_RPATH/ { getline; getline; print $2 }') \
     | grep -E '^/(opt/homebrew|usr/local|Users)/' || true)"
   [ -z "$local_refs" ] || fail "$rel points at files on this Mac, which a downloaded copy won't have:
 $local_refs"

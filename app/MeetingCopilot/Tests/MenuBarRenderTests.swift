@@ -192,6 +192,6 @@ final class MenuBarRenderTests: XCTestCase {
 
     private static let noActions = MenuBarActions(
         startSession: {}, setUpInvite: { _ in }, openSession: { _ in }, openHistory: {},
-        togglePanel: {}, openChat: {}, openSettings: {}, openNotesFolder: {}, quit: {}
+        togglePanel: {}, openChat: {}, openSettings: {}, checkForUpdates: {}, openNotesFolder: {}, quit: {}
     )
 }

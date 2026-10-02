@@ -8,6 +8,12 @@ BUNDLE_ID="com.christopherrobinson.meeting-copilot"
 BUILD_DIR="$PROJECT_DIR/build"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 VERSION_FILE="$PROJECT_DIR/VERSION"
+# shellcheck source=sparkle.conf
+. "$SCRIPT_DIR/sparkle.conf"
+# MC_FEED_URL points a TEST build at a local appcast (docs/updates.md, the
+# real-update test). verify-app.sh refuses such a build unless told it is one,
+# so ship.sh and release.sh can never install or publish it.
+FEED_URL="${MC_FEED_URL:-$SPARKLE_FEED_URL}"
 
 if [ ! -f "$VERSION_FILE" ]; then
   echo "ERROR: VERSION file not found at $VERSION_FILE" >&2
@@ -78,6 +84,17 @@ mkdir -p "$APP_BUNDLE/Contents/Resources/server/dist"
 
 # Copy Swift binary
 cp "$SWIFT_BIN" "$APP_BUNDLE/Contents/MacOS/MeetingCopilot"
+
+# Embed Sparkle, the version Package.resolved pins. ditto keeps the framework's
+# Versions/Current symlinks, which a plain copy flattens and breaks.
+SPARKLE_FRAMEWORK="$(dirname "$SWIFT_BIN")/Sparkle.framework"
+if [ ! -d "$SPARKLE_FRAMEWORK" ]; then
+  echo "ERROR: Sparkle.framework not found next to the Swift build ($SPARKLE_FRAMEWORK)."
+  exit 1
+fi
+mkdir -p "$APP_BUNDLE/Contents/Frameworks"
+ditto "$SPARKLE_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+echo "  Embedded Sparkle $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SPARKLE_FRAMEWORK/Versions/B/Resources/Info.plist")"
 
 # Rewrite libwhisper's install name from the Homebrew absolute path to
 # @rpath so the runtime loader picks up the BUNDLED dylib under
@@ -246,6 +263,10 @@ cat >> "$APP_BUNDLE/Contents/Info.plist" << EOF
     <string>$APP_VERSION</string>
     <key>CFBundleShortVersionString</key>
     <string>$APP_VERSION</string>
+    <key>SUFeedURL</key>
+    <string>$FEED_URL</string>
+    <key>SUPublicEDKey</key>
+    <string>$SPARKLE_PUBLIC_KEY</string>
 EOF
 
 cat >> "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
@@ -272,6 +293,14 @@ cat >> "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
         <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
 </dict>
 </plist>
 PLIST
@@ -373,7 +402,17 @@ done
 # 2. Node, with the two JIT entitlements V8 needs (scripts/entitlements/node.plist).
 sign --entitlements "$NODE_ENTITLEMENTS" "$BUNDLED_NODE"
 
-# 3. The app around them.
+# 3. Sparkle's helpers, innermost first, as its documentation gives them for
+#    Developer ID: the two XPC services, Autoupdate, Updater.app, then the
+#    framework. The downloader keeps the entitlements it was built with.
+SPARKLE_B="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B"
+sign "$SPARKLE_B/XPCServices/Installer.xpc"
+sign --preserve-metadata=entitlements "$SPARKLE_B/XPCServices/Downloader.xpc"
+sign "$SPARKLE_B/Autoupdate"
+sign "$SPARKLE_B/Updater.app"
+sign "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+
+# 4. The app around them.
 sign --entitlements "$APP_ENTITLEMENTS" "$APP_BUNDLE"
 
 if [ "$SIGN_IDENTITY" = "-" ]; then
@@ -388,7 +427,9 @@ fi
 echo ""
 echo "[5/5] Verifying package and creating dist/ copy..."
 
-"$SCRIPT_DIR/verify-app.sh" "$APP_BUNDLE"
+VERIFY_ARGS=()
+[ -z "${MC_FEED_URL:-}" ] || VERIFY_ARGS+=(--allow-test-feed)
+"$SCRIPT_DIR/verify-app.sh" ${VERIFY_ARGS[@]+"${VERIFY_ARGS[@]}"} "$APP_BUNDLE"
 
 # Cleanup staging before copying the final distributable.
 rm -rf "$PROD_STAGING"
@@ -397,7 +438,7 @@ DIST_DIR="$PROJECT_DIR/dist"
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 ditto "$APP_BUNDLE" "$DIST_DIR/$APP_NAME.app"
-"$SCRIPT_DIR/verify-app.sh" "$DIST_DIR/$APP_NAME.app"
+"$SCRIPT_DIR/verify-app.sh" ${VERIFY_ARGS[@]+"${VERIFY_ARGS[@]}"} "$DIST_DIR/$APP_NAME.app"
 echo "  Copied to: $DIST_DIR/$APP_NAME.app"
 
 echo ""

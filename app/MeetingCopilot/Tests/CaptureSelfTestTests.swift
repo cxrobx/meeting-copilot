@@ -17,4 +17,16 @@ final class CaptureSelfTestTests: XCTestCase {
         // A flag with nothing after it has nowhere to report, so it is not a run.
         XCTAssertNil(CaptureSelfTest.requestedOutput(["MeetingCopilot", "--capture-selftest"]))
     }
+
+    func testWaitDefaultsTo20sAndIgnoresNonsense() {
+        XCTAssertEqual(CaptureSelfTest.requestedSeconds(["MeetingCopilot"]), 20)
+        XCTAssertEqual(CaptureSelfTest.requestedSeconds(["MeetingCopilot", "--capture-selftest-seconds", "45"]), 45)
+        XCTAssertEqual(CaptureSelfTest.requestedSeconds(["MeetingCopilot", "--capture-selftest-seconds", "0"]), 20)
+        XCTAssertEqual(CaptureSelfTest.requestedSeconds(["MeetingCopilot", "--capture-selftest-seconds", "lots"]), 20)
+    }
+
+    func testMeetingSignalIsOptIn() {
+        XCTAssertFalse(CaptureSelfTest.requestedMeetingSignal(["MeetingCopilot", "--capture-selftest", "/tmp/o"]))
+        XCTAssertTrue(CaptureSelfTest.requestedMeetingSignal(["MeetingCopilot", "--capture-selftest-meeting-signal"]))
+    }
 }

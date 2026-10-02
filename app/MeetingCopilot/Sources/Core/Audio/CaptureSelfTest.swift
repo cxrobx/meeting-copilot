@@ -21,9 +21,31 @@ enum CaptureSelfTest {
         return URL(fileURLWithPath: arguments[index + 1])
     }
 
-    static func run(writingTo output: URL, seconds: Double = 5) {
+    /// `--capture-selftest-seconds N` (2–120): how long to wait for both tracks
+    /// before calling it a failure. The test ends as soon as both deliver.
+    static func requestedSeconds(_ arguments: [String] = CommandLine.arguments) -> Double {
+        guard let index = arguments.firstIndex(of: "--capture-selftest-seconds"), index + 1 < arguments.count,
+              let seconds = Double(arguments[index + 1]), (2...120).contains(seconds) else { return 20 }
+        return seconds
+    }
+
+    /// `--capture-selftest-meeting-signal`: the meeting track must carry sound,
+    /// not just buffers (the caller plays some).
+    static func requestedMeetingSignal(_ arguments: [String] = CommandLine.arguments) -> Bool {
+        arguments.contains("--capture-selftest-meeting-signal")
+    }
+
+    /// Runs until the mic has delivered a non-zero buffer and the meeting track
+    /// a buffer (or, with `needMeetingSignal`, a non-zero one), for at least 2 s,
+    /// or until `seconds` pass, and reports how long each track took.
+    ///
+    /// The meeting track needs something playing: a Core Audio process tap
+    /// delivers no buffers at all while no process makes sound (measured
+    /// 2026-10-02: 0 buffers in 20 s silent, the first within 0.3 s once a
+    /// sound played). scripts/capture-selftest.sh plays a near-silent tone.
+    static func run(writingTo output: URL, seconds: Double = 20, needMeetingSignal: Bool = false) {
         let capture = AudioCaptureManager()
-        appLog("[SelfTest] capture self-test for \(seconds)s → \(output.path)")
+        appLog("[SelfTest] capture self-test, up to \(Int(seconds))s → \(output.path)")
         Task { @MainActor in
             var result: [String: Any] = [
                 "micAuthorization": authorizationName(AVCaptureDevice.authorizationStatus(for: .audio)),
@@ -35,7 +57,22 @@ enum CaptureSelfTest {
                     onDeviceError: { warnings.append("mic device error") },
                     onCaptureWarning: { warnings.append($0) }
                 )
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                let started = Date()
+                var micFirst: Double?
+                var meetingFirst: Double?
+                while true {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    let elapsed = Date().timeIntervalSince(started)
+                    let now = capture.captureHealthSnapshot
+                    if micFirst == nil, now.micNonZero > 0 { micFirst = elapsed }
+                    if meetingFirst == nil, (needMeetingSignal ? now.meetingNonZero : now.meetingBuffers) > 0 {
+                        meetingFirst = elapsed
+                    }
+                    if (micFirst != nil && meetingFirst != nil && elapsed >= 2) || elapsed >= seconds { break }
+                }
+                result["seconds"] = (Date().timeIntervalSince(started) * 10).rounded() / 10
+                if let micFirst { result["micFirstAfter"] = (micFirst * 10).rounded() / 10 }
+                if let meetingFirst { result["meetingFirstAfter"] = (meetingFirst * 10).rounded() / 10 }
                 let health = capture.captureHealthSnapshot
                 result["micBuffers"] = health.micBuffers
                 result["micNonZero"] = health.micNonZero

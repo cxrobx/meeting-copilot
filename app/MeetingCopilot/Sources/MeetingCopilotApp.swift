@@ -116,6 +116,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let menuBarFeed = MenuBarFeed()
     private let floatingPanelController = FloatingPanelController()
     private let coachHotkeys = CoachHotkeys()
+    private lazy var updates = UpdateController { [weak self] in
+        self?.sessionManager.state.isMeeting ?? false
+    }
     private var hasShownPermissions = false
     private var terminationInProgress = false
 
@@ -126,7 +129,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A capture self-test run (scripts/capture-selftest.sh) starts no
         // server and touches no session: it measures capture and exits.
         if let output = CaptureSelfTest.requestedOutput() {
-            CaptureSelfTest.run(writingTo: output)
+            CaptureSelfTest.run(writingTo: output,
+                                seconds: CaptureSelfTest.requestedSeconds(),
+                                needMeetingSignal: CaptureSelfTest.requestedMeetingSignal())
             return
         }
 
@@ -139,6 +144,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Poll until server is ready
         sessionManager.waitForServer()
+
+        // Sparkle auto-updates; never during a meeting (UpdateController).
+        updates.start()
+        sessionManager.onMeetingEnded = { [weak self] in self?.updates.meetingEnded() }
 
         // Set up notifications — including routing banner Approve/Dismiss taps
         // back into the session, and suppressing banners while the panel is
@@ -302,6 +311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             togglePanel: { [weak self] in self?.togglePanel() },
             openChat: { [weak self] in self?.showPanelAndRun("chat") },
             openSettings: { [weak self] in self?.showPanelAndRun("settings") },
+            checkForUpdates: { [weak self] in self?.updates.checkForUpdates() },
             openNotesFolder: {
                 // Summaries are filed here when auto-save is on (workers/summary.ts).
                 Self.openFolder("~/Documents/CX/Meetings", fallback: "~/Documents/CX")

@@ -14,6 +14,7 @@ struct MenuBarActions {
     /// Front the panel with its Chat drawer open.
     var openChat: () -> Void
     var openSettings: () -> Void
+    var checkForUpdates: () -> Void
     var openNotesFolder: () -> Void
     var quit: () -> Void
 }
@@ -132,6 +133,10 @@ struct MenuBarView: View {
             FooterButton(systemName: "gearshape", label: "Settings",
                          help: "Open the dashboard's settings") {
                 dismiss(); actions.openSettings()
+            }
+            FooterButton(systemName: "arrow.down.circle", label: "Updates",
+                         help: "Check for a newer Meeting Copilot") {
+                dismiss(); actions.checkForUpdates()
             }
             Spacer(minLength: 4)
             FooterButton(systemName: "power", label: "Quit", help: "Quit Meeting Copilot") {
@@ -1031,7 +1036,7 @@ private struct FooterButton: View {
             }
             .lineLimit(1)
             .fixedSize()
-            .padding(.horizontal, 7)
+            .padding(.horizontal, 5)
             .padding(.vertical, 5)
             .foregroundStyle(hover ? theme.textPrimary : theme.textMuted)
             .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(hover ? theme.hoverWash : .clear))

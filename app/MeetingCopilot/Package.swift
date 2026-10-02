@@ -12,6 +12,11 @@ let whisperLibexec = "/opt/homebrew/opt/whisper-cpp/libexec"
 let package = Package(
     name: "MeetingCopilot",
     platforms: [.macOS(.v14)],
+    dependencies: [
+        // Auto-updates. Pinned exactly: a Sparkle bump means reading its
+        // CHANGELOG and re-running the real-update test (docs/updates.md).
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
+    ],
     targets: [
         // C umbrella exposing whisper.cpp's Silero VAD API to Swift.
         // At runtime, the app loads `libwhisper.1.8.3.dylib` from the bundle's
@@ -45,7 +50,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "MeetingCopilot",
-            dependencies: ["CWhisperVAD", "ObjCExceptionBridge"],
+            dependencies: [
+                "CWhisperVAD",
+                "ObjCExceptionBridge",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
             path: "Sources",
             resources: [
                 .process("Resources")
@@ -56,6 +65,9 @@ let package = Package(
                     "-L\(whisperLibexec)/lib",
                     "-Xlinker", "-rpath",
                     "-Xlinker", "@loader_path/../Resources/whisper/lib",
+                    // Sparkle.framework, embedded by build-app.sh.
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@executable_path/../Frameworks",
                     // Dev fallback: swift run / swift build point at the
                     // Homebrew install directly since there's no bundled
                     // whisper in the build dir.

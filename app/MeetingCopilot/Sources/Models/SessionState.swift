@@ -27,6 +27,15 @@ enum SessionState: String, Codable {
     func canTransition(to newState: SessionState) -> Bool {
         validTransitions.contains(newState)
     }
+
+    /// A meeting is under way, from Start until its session is archived.
+    /// Nothing that interrupts (an update window, a relaunch) may happen then.
+    var isMeeting: Bool {
+        switch self {
+        case .priming, .live, .degraded, .ending: return true
+        case .idle, .error, .archived: return false
+        }
+    }
 }
 
 // MARK: - Session Model
