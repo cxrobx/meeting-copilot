@@ -159,6 +159,10 @@ echo ""
 echo "[2/5] Packaging app..."
 "$SCRIPT_DIR/build-app.sh"
 "$SCRIPT_DIR/verify-app.sh" --require-developer-id "$PACKAGED_APP"
+# The packaged app captures under its own signature, hardened runtime and
+# grants: both tracks must deliver before anything is installed.
+"$SCRIPT_DIR/capture-selftest.sh" "$PACKAGED_APP" \
+  || fail "The packaged app could not capture audio, so the installed app was not touched."
 
 # The ship gate (docs/quality-plan.md §5): WebKit, the engine the app's
 # WKWebView uses, drives the PACKAGED server's dashboard through the specs in server/e2e
@@ -245,6 +249,15 @@ if ! wait_for_health; then
   restore_needed=false
   rollback_install "$backup_app" "$was_running"
   fail "The new app did not become healthy within 45 seconds; the previous installation was restored."
+fi
+
+# Capture once more from the installed copy: it proves capture where it will
+# run, and pays the one-time Metal shader compile a newly signed build's
+# whisper libraries need (~10 s) now, rather than at the next meeting's start.
+if ! "$SCRIPT_DIR/capture-selftest.sh" "$INSTALLED_APP"; then
+  restore_needed=false
+  rollback_install "$backup_app" "$was_running"
+  fail "The installed app could not capture audio; the previous installation was restored."
 fi
 
 restore_needed=false

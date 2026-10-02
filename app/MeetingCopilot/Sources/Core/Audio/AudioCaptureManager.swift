@@ -172,6 +172,11 @@ final class AudioCaptureManager: NSObject {
     // that silent failure into a visible one — and, for the mic, into an
     // automatic restart attempt.
     private let captureHealth = CaptureHealth()
+    /// Buffers (and non-zero buffers) per track since capture started: what
+    /// the capture self-test reports (CaptureSelfTest).
+    var captureHealthSnapshot: (micBuffers: Int, micNonZero: Int, meetingBuffers: Int, meetingNonZero: Int) {
+        captureHealth.snapshot()
+    }
     private var healthTimer: Timer?
     private var healthStartedAt: Date?
     private var micWatchdogArmedAt: Date?

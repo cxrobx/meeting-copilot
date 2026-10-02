@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The app itself, under the hardened runtime. Microphone access is the only
+  hardened-runtime resource it uses: without this key the mic is refused even
+  when the privacy grant is on. ScreenCaptureKit and the Core Audio process tap
+  need no entitlement (only the privacy grants). Everything it loads in-process
+  (libwhisper, Sparkle) is signed by the same team, so library validation stays on.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>

@@ -278,17 +278,52 @@ PLIST
 
 echo "  Bundle assembled: $APP_BUNDLE"
 
+# ── Self-contained: nothing may point back at this Mac ──────────────────
+#
+# A downloaded copy has no Homebrew, no /usr/local and no ~/Projects, so any
+# load command naming them is a launch failure on someone else's Mac that
+# never shows up on this one. verify-app.sh fails the build on any left.
+
+# The dev rpath Package.swift adds so `swift run` finds Homebrew's libwhisper.
+while IFS= read -r rpath; do
+  install_name_tool -delete_rpath "$rpath" "$MC_BIN"
+  echo "  Removed dev rpath $rpath"
+done < <(otool -l "$MC_BIN" | awk '/LC_RPATH/ { getline; getline; print $2 }' | grep -E '^/(opt/homebrew|usr/local|Users)/' || true)
+
+# Homebrew's dylibs name themselves by their Cellar path; loaders reach them
+# through @rpath anyway, so make the identity say so too.
+if [ -d "$APP_BUNDLE/Contents/Resources/whisper/lib" ]; then
+  find "$APP_BUNDLE/Contents/Resources/whisper/lib" -type f -name '*.dylib' | while IFS= read -r dylib; do
+    id="$(otool -D "$dylib" | tail -n +2)"
+    case "$id" in
+      /opt/homebrew/*|/usr/local/*) install_name_tool -id "@rpath/$(basename "$id")" "$dylib" 2>/dev/null ;;
+    esac
+  done
+fi
+
+# better-sqlite3's compile leftovers: object files and a test extension the
+# server never loads. Unsignable or unsigned Mach-O the notary would reject.
+SQLITE_RELEASE="$APP_BUNDLE/Contents/Resources/server/node_modules/better-sqlite3/build/Release"
+rm -rf "$SQLITE_RELEASE/obj.target" "$SQLITE_RELEASE/.deps" "$SQLITE_RELEASE/test_extension.node"
+
 # ── Step 4: Code sign ────────────────────────────────────────────────────
 #
 # Prefer a stable signing identity so TCC permissions (Screen Recording,
-# Microphone) persist across rebuilds. Ad-hoc signing binds permissions to
-# the binary's CDHash, which changes every build — macOS silently revokes
-# the grant even though the System Settings toggle still shows "on".
+# Microphone, System Audio Recording) persist across rebuilds. Ad-hoc signing
+# binds permissions to the binary's CDHash, which changes every build — macOS
+# silently revokes the grant even though the System Settings toggle still
+# shows "on". The hardened runtime does not change the designated requirement
+# (identifier + Developer ID team), so it keeps the grants too.
 #
 # Resolution order:
 #   1. $CODESIGN_IDENTITY env var (explicit override)
 #   2. "Developer ID Application" certificate from login keychain (stable)
 #   3. Fallback: ad-hoc (expect permissions to be re-prompted each rebuild)
+#
+# Every Mach-O is signed on its own, innermost first, with the hardened
+# runtime and a secure timestamp (what notarization requires), then the
+# bundle around them. Never --deep: it skips Mach-O files under
+# Contents/Resources, and applies one set of entitlements to everything.
 
 echo ""
 echo "[4/5] Code signing..."
@@ -312,30 +347,40 @@ resolve_identity() {
 }
 
 SIGN_IDENTITY="$(resolve_identity)"
+APP_ENTITLEMENTS="$SCRIPT_DIR/entitlements/app.plist"
+NODE_ENTITLEMENTS="$SCRIPT_DIR/entitlements/node.plist"
 
-# Create entitlements
-ENTITLEMENTS="$BUILD_DIR/entitlements.plist"
-cat > "$ENTITLEMENTS" << 'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.device.audio-input</key>
-    <true/>
-</dict>
-</plist>
-PLIST
+sign() {
+  if [ "$SIGN_IDENTITY" = "-" ]; then
+    codesign --force --options runtime --sign - "$@"
+  else
+    codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$@"
+  fi
+}
+
+# 1. Every Mach-O under Resources but Node: whisper's dylibs and server, the
+#    native addon, uv. Deepest path first, so nothing is sealed before what
+#    it contains.
+RESOURCES="$APP_BUNDLE/Contents/Resources"
+BUNDLED_NODE="$RESOURCES/node/bin/node"
+find "$RESOURCES" -type f -print0 | while IFS= read -r -d '' f; do
+  [ "$f" = "$BUNDLED_NODE" ] && continue
+  case "$(file -b "$f")" in *Mach-O*) echo "$f" ;; esac
+done | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2- | while IFS= read -r f; do
+  sign "$f"
+done
+
+# 2. Node, with the two JIT entitlements V8 needs (scripts/entitlements/node.plist).
+sign --entitlements "$NODE_ENTITLEMENTS" "$BUNDLED_NODE"
+
+# 3. The app around them.
+sign --entitlements "$APP_ENTITLEMENTS" "$APP_BUNDLE"
 
 if [ "$SIGN_IDENTITY" = "-" ]; then
-  codesign --force --deep --sign - --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
-  echo "  Signed (ad-hoc) — TCC permissions will be revoked on next rebuild."
+  echo "  Signed (ad-hoc, hardened runtime) — TCC permissions will be revoked on next rebuild."
   echo "  To persist permissions, set CODESIGN_IDENTITY or install a 'Developer ID Application' cert."
 else
-  # NOTE: no --options runtime. Hardened runtime blocks spawning the node
-  # child process without extra entitlements (allow-unsigned-executable-memory,
-  # disable-library-validation). Only add it back when preparing for notarization.
-  codesign --force --deep --sign "$SIGN_IDENTITY" --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
-  echo "  Signed with: $SIGN_IDENTITY"
+  echo "  Signed with: $SIGN_IDENTITY (hardened runtime, timestamped)"
 fi
 
 # ── Step 5: Verify and copy to dist/ ────────────────────────────────────

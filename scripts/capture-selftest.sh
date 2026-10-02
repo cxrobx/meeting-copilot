@@ -1,0 +1,76 @@
+#!/bin/bash
+# Prove a built app can still capture: launch it in its --capture-selftest mode,
+# which starts the mic and the meeting track for a few seconds and reports how
+# many buffers each delivered. No server, no session, nothing stored.
+#
+#   scripts/capture-selftest.sh                         # dist/Meeting Copilot.app
+#   scripts/capture-selftest.sh path/to/App.app [--with-sound]
+#
+# It goes through LaunchServices (open -n), so it runs under the app's own
+# signature, hardened runtime, entitlements and privacy grants, exactly as a
+# meeting would. That is what it guards: a signing or entitlement change
+# (T230's hardened runtime, a lost audio-input entitlement, a library the
+# runtime refuses to load) that leaves a meeting with a dead track. ship.sh
+# runs it before install.
+#
+# It requires the mic to be authorized and to deliver non-zero samples (a live
+# mic's noise floor is never exact zero, gotcha #28) and the meeting track to
+# deliver buffers. Silent system audio is all zeros, so the meeting track's
+# content is only checked with --with-sound, which plays a sound meanwhile.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+APP="$PROJECT_DIR/dist/Meeting Copilot.app"
+WITH_SOUND=false
+for arg in "$@"; do
+  case "$arg" in
+    --with-sound) WITH_SOUND=true ;;
+    -*) echo "Unknown option: $arg" >&2; exit 2 ;;
+    *) APP="$arg" ;;
+  esac
+done
+
+fail() { echo "ERROR: capture self-test: $*" >&2; exit 1; }
+[ -d "$APP" ] || fail "no app at $APP"
+# open -a wants an absolute path; a relative one is looked up as an app name.
+APP="$(cd "$(dirname "$APP")" && pwd)/$(basename "$APP")"
+
+OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mc-selftest.XXXXXX")"
+OUT="$OUT_DIR/result.json"
+SOUND_PID=""
+cleanup() {
+  [ -n "$SOUND_PID" ] && kill "$SOUND_PID" 2>/dev/null || true
+  pkill -f -- "--capture-selftest $OUT" 2>/dev/null || true
+  rm -rf "$OUT_DIR"
+}
+trap cleanup EXIT
+
+if [ "$WITH_SOUND" = true ]; then
+  ( while true; do afplay /System/Library/Sounds/Submarine.aiff; done ) &
+  SOUND_PID=$!
+fi
+
+open -n -a "$APP" --args --capture-selftest "$OUT"
+# A freshly signed build's first launch is assessed by macOS before it runs,
+# which has taken over 10 s; the test itself takes 5.
+for _ in $(seq 1 120); do
+  [ -s "$OUT" ] && break
+  sleep 0.5
+done
+[ -s "$OUT" ] || fail "the app wrote no result within 60 s (see ~/.meeting-copilot/app.log, [SelfTest])"
+
+# plutil prints a missing key's error on stdout, so keep its output only on success.
+field() { local value; if value="$(plutil -extract "$1" raw -o - "$OUT" 2>/dev/null)"; then echo "$value"; fi; }
+summary="mic $(field micBuffers) buffers ($(field micNonZero) non-zero, $(field micAuthorization)), meeting $(field meetingBuffers) buffers ($(field meetingNonZero) non-zero, $(field meetingBackend))"
+
+[ -z "$(field error)" ] || fail "capture did not start: $(field error)"
+[ "$(field micAuthorization)" = "authorized" ] || fail "microphone access is $(field micAuthorization). $summary"
+[ "$(field micBuffers)" -gt 0 ] 2>/dev/null || fail "the mic delivered nothing. $summary"
+[ "$(field micNonZero)" -gt 0 ] 2>/dev/null || fail "the mic delivered only exact zeros. $summary"
+[ "$(field meetingBuffers)" -gt 0 ] 2>/dev/null || fail "the meeting track delivered nothing. $summary"
+if [ "$WITH_SOUND" = true ]; then
+  [ "$(field meetingNonZero)" -gt 0 ] 2>/dev/null \
+    || fail "the meeting track heard nothing while a sound played (System Audio Recording permission?). $summary"
+fi
+echo "Capture self-test passed: $summary"

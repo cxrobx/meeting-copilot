@@ -134,9 +134,54 @@ if [ "$REQUIRE_DEVELOPER_ID" = true ] \
   fail "A Developer ID signature is required for shipping; ad-hoc signatures reset macOS audio permissions"
 fi
 
+# macOS keys the Microphone, Screen Recording and System Audio Recording grants
+# to the designated requirement: this bundle id plus this Developer ID team. A
+# signature from any other team ships an app that has silently lost all three.
+EXPECTED_TEAM_ID="CCYV5HQZCM"
+if [ "$REQUIRE_DEVELOPER_ID" = true ]; then
+  requirement="$(codesign -d -r- "$APP_BUNDLE" 2>&1)"
+  grep -q "identifier \"$EXPECTED_BUNDLE_ID\"" <<< "$requirement" \
+    && grep -q "certificate leaf\[subject.OU\] = $EXPECTED_TEAM_ID" <<< "$requirement" \
+    || fail "The designated requirement is not $EXPECTED_BUNDLE_ID from team $EXPECTED_TEAM_ID, so macOS would drop the audio and screen grants:
+$requirement"
+fi
+
+# Every Mach-O in the bundle: signed on its own, under the hardened runtime
+# (notarization refuses anything else), by the app's team, and pointing at
+# nothing on this Mac. A load command naming /opt/homebrew, /usr/local or a
+# home folder works here and fails to launch on anyone else's Mac.
+app_team="$(sed -n 's/^TeamIdentifier=//p' <<< "$signature_info")"
+macho_count=0
+while IFS= read -r -d '' f; do
+  case "$(file -b "$f")" in *Mach-O*) ;; *) continue ;; esac
+  macho_count=$((macho_count + 1))
+  rel="${f#"$APP_BUNDLE/"}"
+  info="$(codesign -dv --verbose=2 "$f" 2>&1)" || fail "$rel is not signed"
+  grep -q 'flags=.*runtime' <<< "$info" || fail "$rel is not signed with the hardened runtime"
+  if [ -n "$app_team" ] && [ "$app_team" != "not set" ]; then
+    [ "$(sed -n 's/^TeamIdentifier=//p' <<< "$info")" = "$app_team" ] \
+      || fail "$rel is not signed by the app's team ($app_team)"
+  fi
+  entitlements="$(codesign -d --entitlements - --xml "$f" 2>/dev/null || true)"
+  ! grep -q 'get-task-allow' <<< "$entitlements" \
+    || fail "$rel carries com.apple.security.get-task-allow, which notarization rejects"
+  local_refs="$( (otool -L "$f" | tail -n +2 | awk '{print $1}'; otool -l "$f" | awk '/LC_RPATH/ { getline; getline; print $2 }') \
+    | grep -E '^/(opt/homebrew|usr/local|Users)/' || true)"
+  [ -z "$local_refs" ] || fail "$rel points at files on this Mac, which a downloaded copy won't have:
+$local_refs"
+done < <(find "$APP_BUNDLE/Contents" -type f -print0)
+
+app_entitlements="$(codesign -d --entitlements - --xml "$APP_BUNDLE" 2>/dev/null || true)"
+grep -q 'com.apple.security.device.audio-input' <<< "$app_entitlements" \
+  || fail "The app lacks com.apple.security.device.audio-input: under the hardened runtime the mic would be refused"
+node_entitlements="$(codesign -d --entitlements - --xml "$BUNDLED_NODE" 2>/dev/null || true)"
+grep -q 'com.apple.security.cs.allow-jit' <<< "$node_entitlements" \
+  || fail "The bundled Node lacks com.apple.security.cs.allow-jit: V8 cannot run under the hardened runtime without it"
+
 echo "Verified Meeting Copilot $APP_VERSION"
 echo "  Bundle: $APP_BUNDLE"
 echo "  Node:   bundled $bundled_node_version"
+echo "  Code:   $macho_count Mach-O files, all signed with the hardened runtime"
 if grep -q '^Authority=Developer ID Application:' <<< "$signature_info"; then
   echo "  Sign:   Developer ID"
 else

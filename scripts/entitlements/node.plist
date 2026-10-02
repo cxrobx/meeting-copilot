@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The bundled Node (Contents/Resources/node/bin/node), re-signed by us. V8
+  compiles JavaScript to machine code at run time, which the hardened runtime
+  forbids without these two. Node's own signature also carries get-task-allow
+  (notarization rejects it), disable-library-validation (not needed: the only
+  native addon, better_sqlite3.node, is signed by the same team) and
+  allow-dyld-environment-variables / disable-executable-page-protection
+  (nothing uses them). Those are dropped on purpose.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>

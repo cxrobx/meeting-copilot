@@ -123,6 +123,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Set as accessory app (no Dock icon)
         NSApplication.shared.setActivationPolicy(.accessory)
 
+        // A capture self-test run (scripts/capture-selftest.sh) starts no
+        // server and touches no session: it measures capture and exits.
+        if let output = CaptureSelfTest.requestedOutput() {
+            CaptureSelfTest.run(writingTo: output)
+            return
+        }
+
         // Kill any orphaned processes from previous launches
         sessionManager.processSupervisor.cleanupOrphans()
 
