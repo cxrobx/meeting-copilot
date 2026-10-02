@@ -43,7 +43,12 @@ OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mc-selftest.XXXXXX")"
 OUT="$OUT_DIR/result.json"
 TONE="$OUT_DIR/tone.wav"
 SOUND_PID=""
+# macOS's /bin/bash 3.2 exits 0 when `set -u` aborts a script that has an EXIT
+# trap; for a gate that would read as "capture works". Only the pass line sets
+# SELFTEST_PASSED, and anything else that ends with 0 exits 1.
+SELFTEST_PASSED=0
 cleanup() {
+  local status=$?
   if [ -n "$SOUND_PID" ]; then
     kill "$SOUND_PID" 2>/dev/null || true
     wait "$SOUND_PID" 2>/dev/null || true   # reaped quietly: no "Terminated" line
@@ -51,6 +56,10 @@ cleanup() {
   pkill -f "afplay $TONE" 2>/dev/null || true
   pkill -f -- "--capture-selftest $OUT" 2>/dev/null || true
   rm -rf "$OUT_DIR"
+  if [ "$status" = 0 ] && [ "$SELFTEST_PASSED" != 1 ]; then
+    echo "ERROR: capture self-test: the script stopped before it finished" >&2
+    exit 1
+  fi
 }
 trap cleanup EXIT
 
@@ -87,3 +96,4 @@ summary="mic $(field micBuffers) buffers ($(field micNonZero) non-zero, $(field 
 [ "$(field meetingNonZero)" -gt 0 ] 2>/dev/null \
   || fail "the meeting track heard only zeros while a tone played (System Audio Recording permission, gotcha #20?). $summary"
 echo "Capture self-test passed: $summary"
+SELFTEST_PASSED=1

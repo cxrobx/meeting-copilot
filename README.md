@@ -48,11 +48,18 @@ second client.
 Recording laws differ by place. Make sure you have consent from everyone you
 record.
 
-## Requirements
+## Install
 
-- macOS 14+
-- Node.js 20+
-- Swift 5.9+ / Xcode 15+
+From the first published release on, download the DMG from
+[Releases](https://github.com/cxrobx/meeting-copilot/releases) and drag the app to Applications. It needs macOS 14+ on Apple Silicon, nothing else: Node and `uv` ship
+inside it. The first start downloads the speech model (Parakeet, about 2.5 GB) and its Python
+packages; the menu bar shows the progress. It keeps itself up to date (Sparkle), and never
+installs an update during a meeting. How releases are made: [`docs/updates.md`](docs/updates.md).
+
+## Building from source
+
+- macOS 14+ on Apple Silicon
+- Swift 5.9+ / Xcode 15+ (Node is fetched and pinned by `scripts/fetch-node.sh`)
 - [Claude Code](https://claude.com/claude-code) CLI, logged in (the suggestion,
   worker and pulse paths run on it)
 - Optional API keys: `OPENAI_API_KEY` (live triage and chat), `XAI_API_KEY`
@@ -80,6 +87,7 @@ cd server && npm test                  # unit tests
 ## Documentation
 
 - [`docs/setup.md`](docs/setup.md): environment variables, building, deployment
+- [`docs/updates.md`](docs/updates.md): distribution, signing, updates, releasing
 - [`docs/api.md`](docs/api.md): WebSocket and REST API
 - [`CHANGELOG.md`](CHANGELOG.md): version history
 

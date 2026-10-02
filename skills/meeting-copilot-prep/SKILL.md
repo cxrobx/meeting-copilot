@@ -127,4 +127,4 @@ consent, never yours.
   and hands the brief to the copilot as a pinned context doc.
 - Source: `server/src/prep/staged.ts` (format, checks), `prep/stage-cli.ts` (this
   CLI), `present/index.ts` ("Staged preps"). Tests:
-  `server/src/__tests__/staged-prep.test.ts` (run under `/usr/local/bin/node`).
+  `server/src/__tests__/staged-prep.test.ts` (run under the pinned Node: `PATH="$(dirname "$(scripts/fetch-node.sh)"):$PATH"`).

@@ -1,6 +1,6 @@
 # Known Gotchas
 
-Organized by category. 30 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
+Organized by category. 32 items + recovery playbook, condensed format. Original numbering preserved (gaps intentional).
 
 ## Index
 
@@ -19,7 +19,7 @@ Organized by category. 30 items + recovery playbook, condensed format. Original 
 | 11 | WKWebView needs health polling before load | Frontend |
 | 12 | ScreenCaptureKit silent frames — ARK.driver in coreaudiod | Environment |
 | 13 | Claude CLI at `~/.local/bin` not on bundle's PATH | Environment |
-| 14 | Native-module ABI mismatch between build and runtime Node | Deployment |
+| 14 | ~~Native-module ABI mismatch between build and runtime Node~~ (superseded: the app ships its own pinned Node) | Deployment |
 | 15 | Bundle PATH and app.log vs stderr — diagnostics go missing | Environment |
 | 16 | Silero VAD model required for silence handling + latency; whisper-cpp version gate | Environment |
 | 17 | TranscriptSegment.duration is deprecated — use audioDurationSec / transcriptionLatencyMs | Backend |
@@ -36,6 +36,8 @@ Organized by category. 30 items + recovery playbook, condensed format. Original 
 | 28 | The mic engine stops mid-meeting on a configuration change, silently | Environment |
 | 29 | An aborted OpenAI stream ends quietly: it looks finished and reports no usage | External APIs |
 | 30 | Playwright newer than 1.61 cannot drive WebKit on macOS 14 — the ship gate breaks | Environment |
+| 31 | A process tap delivers nothing while no process makes sound | Environment |
+| 32 | A newly signed whisper build compiles its Metal shaders once (~10 s) before the first capture | Deployment |
 | — | **Recovery playbook** (system-wide SCK silence, server crash loops, zombie processes) | — |
 
 Standard categories: Environment, Database, Backend, Frontend, Security, Deployment, External APIs
@@ -112,7 +114,8 @@ sudo sample coreaudiod 5 2>&1 | grep -i ARK.driver
   2. `extractAgendaItemsFromNotes` prefers the direct Anthropic API via `anthropicTriageJson` when `ANTHROPIC_API_KEY` is set — same path the agenda-eval loop already uses — falling back to the CLI only when no key is present. Sidesteps PATH issues entirely.
 **Pattern**: `app/MeetingCopilot/Sources/Core/Process/ProcessSupervisor.swift:69-105` (PATH injection), `server/src/intelligence/agenda.ts:830-900` (API-first extract).
 
-### 14. Native-Module ABI Mismatch Between Build and Runtime Node
+### 14. Native-Module ABI Mismatch Between Build and Runtime Node ~~SUPERSEDED~~
+**Superseded 2026-10-02 (T230):** the app ships its own Node (`Contents/Resources/node`, pinned by `scripts/fetch-node.sh`), and that one binary builds the server, runs `npm test`, the e2e gate and the app, so build and runtime cannot disagree. `verify-app.sh` checks the bundled Node matches the pin and loads `better-sqlite3`. The dev tree's `server/node_modules` is built for the pinned Node 24 (ABI 137) now: run tests and scripts under it (`PATH="$(dirname "$(scripts/fetch-node.sh)"):$PATH"`), not under `/usr/local/bin/node` (Node 20). The history below is kept for the class.
 **Symptom**: Start Session fails silently; `server.log` shows `WS/TCP Handler error: NODE_MODULE_VERSION 137 … requires 115` with `better_sqlite3.node` in the stack. Every `session.start` throws in `new Database()` before the session is created, which also breaks anything downstream (extraction, agenda tracker) that depended on that session.
 **Cause**: `./scripts/build-app.sh` ran `npm ci` using the shell's default Node (e.g. nvm's v24, ABI 137), but `ProcessSupervisor` spawns the server with PATH prepended to include `/opt/homebrew/bin:/usr/local/bin`, where `node` is v20 (ABI 115). The compiled `better-sqlite3.node` is an older-Node binary from the build shell's perspective; at runtime the older Node refuses to load it.
 **Solution**: `build-app.sh` now pins `PATH` to the first existing Node in `/opt/homebrew/bin` → `/usr/local/bin` (the same resolution order `ProcessSupervisor` uses), then verifies the native module loads under that runtime Node with `node -e "require('…/better-sqlite3')"` before the bundle is considered good. If it doesn't, the build aborts with a clear rebuild hint instead of shipping a broken bundle.
@@ -207,6 +210,19 @@ this default.
 **Solution**: `@playwright/test` is pinned exact to **1.61.1** in `server/package.json`. Do not bump it (`npm update`, `npm audit fix --force`) while this Mac is on macOS 14. After macOS 15+, move to the latest and confirm with `npm run e2e`.
 **Check**: the gate itself. A broken driver fails all six specs, so it can never pass silently.
 **Pattern**: `server/package.json`, `server/e2e/playwright.config.ts`.
+
+### 31. A Process Tap Delivers Nothing While No Process Makes Sound
+**Symptom**: The capture self-test (`scripts/capture-selftest.sh`) reports `meeting 0 buffers` while the mic is fine. It looks exactly like a dead tap, and on 2026-10-02 it was first misread as a launch-time or post-update stall.
+**Cause**: A Core Audio process tap's aggregate runs its IOProc only while some tapped process is producing audio. In a quiet room it delivers no buffers at all, not zero-filled ones. Measured: 0 buffers in 20 s silent; the first within 0.3 s once a sound played. In a meeting this never shows, because the meeting app streams audio (silence included) the whole time.
+**Solution**: Anything that judges the meeting track without a meeting must make sound itself. `capture-selftest.sh` plays a 7 kHz tone at -50 dBFS: inaudible in practice, below the 8 kHz the 16 kHz track keeps, and non-zero on the tap. (19 kHz was tried first. The resampler filters it to a 0.0001 peak, which is too close to zero to trust.)
+**Check**: the self-test requires meeting non-zero buffers while the tone plays, and `ship.sh` runs it before and after install.
+**Pattern**: `scripts/capture-selftest.sh`, `app/MeetingCopilot/Sources/Core/Audio/CaptureSelfTest.swift`.
+
+### 32. A Newly Signed whisper Build Compiles Its Metal Shaders Once Before the First Capture
+**Symptom**: The first capture after installing a build whose whisper libraries were re-signed starts about 10 s late: `[VADProbe] loaded` follows the session start by 10 s instead of under 1.
+**Cause**: The VAD (libwhisper + ggml) compiles ggml's embedded Metal library the first time a newly signed copy loads it (`ggml_metal_library_init: loaded in 10.430 sec`). Capture starts only after the VAD loads. The compiled result is cached per copy, so the second run is instant. Since T230, `build-app.sh` re-signs the whisper dylibs with the hardened runtime, so the first install of that signature pays it once.
+**Solution**: `ship.sh` runs the capture self-test on the installed copy right after install, which pays it then, not at the next meeting's start. A Sparkle update whose whisper libraries are unchanged did not pay it (measured on 0.1.91 to 0.1.92). One that upgrades whisper-cpp will, on the first meeting after the update.
+**Pattern**: `scripts/ship.sh` (post-install self-test), `AudioCaptureManager.startCapture` (VAD before capture).
 
 ### 11. WKWebView Needs Health Polling Before Loading Localhost
 **Symptom**: Blank white panel on app launch

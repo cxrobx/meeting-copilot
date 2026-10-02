@@ -119,10 +119,17 @@ backup_root=""
 backup_app=""
 was_running=false
 restore_needed=false
+intended_exit=false
 
 cleanup_on_exit() {
   local status=$?
   trap - EXIT INT TERM HUP
+  # macOS's /bin/bash 3.2 reports 0 when `set -u` aborts a script that has an
+  # EXIT trap. The only deliberate 0 that reaches here is the declined prompt.
+  if [ "$status" = 0 ] && [ "$intended_exit" != true ]; then
+    echo "ERROR: ship.sh stopped before it finished." >&2
+    status=1
+  fi
 
   if [ "$restore_needed" = true ]; then
     echo ""
@@ -201,6 +208,7 @@ else
       ;;
     *)
       echo "Cancelled. The verified package remains at: $PACKAGED_APP"
+      intended_exit=true
       exit 0
       ;;
   esac

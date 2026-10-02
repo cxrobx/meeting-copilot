@@ -4,7 +4,16 @@ All notable changes to Meeting Copilot will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Downloadable, and it updates itself (T230).** The app is self-contained: it ships a pinned Node 24 and a pinned `uv`, so a Mac with neither runs it. Parakeet runs from a hashed lockfile pinned to the exact packages the app has run since July. Its packages and 2.5 GB model download on first start, behind a "Preparing transcription" card in the menu bar with the percentage; whisper's model is no longer bundled and downloads, checksummed, on first use of whisper mode. Every binary is signed inside out with the hardened runtime, and `scripts/release.sh` notarizes the app and a DMG and writes a Sparkle appcast for GitHub Releases. Sparkle 2.10.0 checks daily and from a new **Updates** button in the menu bar, asks before installing, refuses archives that are tampered or signed with another key, and never interrupts a meeting: a check due mid-meeting waits, and an install accepted mid-meeting waits for the meeting and its close-out work to finish. Nothing is published yet.
+- `scripts/capture-selftest.sh` proves a build still captures both tracks under its own signature and privacy grants; `ship.sh` runs it before and after install.
+
 ### Changed
+
+- The server runs on the app's own Node 24 instead of Homebrew's Node 20 (end of life since April 2026), and the same Node builds and tests it, which ends gotcha #14's build/runtime mismatch.
+- `verify-app.sh` fails a build with any binary that is unsigned, unhardened, signed by another team, or pointing at `/opt/homebrew`, `/usr/local` or a home folder, and checks the designated requirement your privacy grants are keyed to.
+- The scripts with an EXIT trap (`ship.sh`, `release.sh`, `capture-selftest.sh`) no longer report success when macOS's bash 3.2 aborts them on an unset variable.
 
 - A noise gate now sits in front of the Grok stream (`transcription/gate.ts`), because xAI bills every second sent per channel, silence included (measured: a 60 s two-channel stream billed 121 s, so one multichannel stream saves nothing). The gate sends 500 ms of look-ahead ahead of each opening so a soft first word isn't clipped, holds through pauses up to 1.5 s, and sends `finalize` when it closes. Speech that arrives while a stream is down triggers an immediate reconnect, and the buffered audio goes out in order. While the stream is healthy it owns the transcript, gated stretches included; the app's VAD chunks reach local Parakeet only when the stream is down. (Also routing the gate's leftovers to Parakeet was measured and removed: it rescued ~0.1% of words and added ~18 duplicate or junk words per word rescued.) Replayed three recorded meetings (`npm run eval:gate`): 36–62% less audio billed; word recall 98.4% / 98.3% / 95.5% against Grok's own run-to-run floor of 99.4% / 99.7% / 97.9%; no duplicated lines. Every line opening the gated run seemed to miss was checked by hand and found mid-line or reworded. `COPILOT_STT_GATE=0` turns it off.
 - Fixed transcript lines doubling when Grok restated an utterance with shifted punctuation, or continued past a line the 80-word cap had closed (gotcha #26).

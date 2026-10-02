@@ -111,11 +111,14 @@ Toggle: `SHARE_TRANSCRIPT=false` env var disables sharing.
 
 ## App Bundle Packaging
 
-`scripts/build-app.sh` produces `Meeting Copilot.app`:
-- Compiles server (`npm run build` → `dist/`), prunes to production `node_modules`
-- Builds Swift binary (`swift build -c release`)
-- Assembles `.app` bundle with `Info.plist` (`LSUIElement=true`, privacy descriptions)
-- Signs with the first "Developer ID Application" identity in the keychain (or `CODESIGN_IDENTITY`), falling back to ad-hoc, which re-prompts for every permission on each rebuild; `verify-app.sh` checks the result
-- Writes `dist/Meeting Copilot.app` and does **not** install. `scripts/ship.sh` installs: it refuses during a live meeting, runs both test suites, verifies the Developer ID signature, runs the WebKit smoke test against the packaged server (`server/e2e/`), replaces `/Applications/Meeting Copilot.app`, relaunches, and checks `/health`
+`scripts/build-app.sh` produces `Meeting Copilot.app`, self-contained (`docs/updates.md`):
+- Compiles the server with the pinned Node (`fetch-node.sh`) and bundles that Node at `Contents/Resources/node`
+- Bundles the pinned `uv` and Parakeet's lock; the models are not bundled (first start downloads them), except the 0.9 MB Silero VAD
+- Builds the Swift binary (`swift build -c release`) and embeds Sparkle at `Contents/Frameworks`
+- Assembles `.app` bundle with `Info.plist` (`LSUIElement=true`, privacy descriptions, Sparkle keys from `scripts/sparkle.conf`)
+- Removes anything pointing back at this Mac (the Homebrew dev rpath, Cellar install names, compile leftovers)
+- Signs every Mach-O inside out with the hardened runtime and a timestamp (`scripts/entitlements/`), with the first "Developer ID Application" identity (or `CODESIGN_IDENTITY`), falling back to ad-hoc, which re-prompts for every permission on each rebuild. `verify-app.sh` checks the result, including that no Mach-O names `/opt/homebrew`, `/usr/local` or a home folder
+- Writes `dist/Meeting Copilot.app` and does **not** install. `scripts/ship.sh` installs: it refuses during a live meeting, runs both test suites, verifies the Developer ID signature, runs the capture self-test (`capture-selftest.sh`) and the WebKit smoke test against the packaged server (`server/e2e/`), replaces `/Applications/Meeting Copilot.app`, relaunches, checks `/health`, and runs the capture self-test on the installed copy
+- `scripts/release.sh` builds the same bundle, notarizes and staples it and a DMG, signs the update zip and writes the Sparkle appcast; it publishes to GitHub Releases only with `--publish`
 
 `ProcessSupervisor` uses `isPackaged` (checks `Bundle.main.bundlePath.hasSuffix(".app")`) to prefer bundle resources over dev paths. Injects `/opt/homebrew/bin` into PATH via `processEnvironment()`.

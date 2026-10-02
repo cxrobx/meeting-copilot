@@ -112,7 +112,11 @@ sign_file() {
 # Before a long build: sign a probe and check it against the public key the app carries, so a missing,
 # wrong or unreadable key (or a password prompt nobody is there to answer) fails now, not at the end.
 TOOLS="$(mktemp -d "${TMPDIR:-/tmp}/mc-release.XXXXXX")"
-trap 'rm -rf "$TOOLS"' EXIT
+# macOS's /bin/bash 3.2 exits 0 when `set -u` aborts a script that has an EXIT
+# trap, so an abort would look like a finished release. Only a run that reached
+# one of its ends sets RELEASE_FINISHED; anything else exits 1.
+RELEASE_FINISHED=0
+trap 'status=$?; rm -rf "$TOOLS"; if [ "$status" = 0 ] && [ "$RELEASE_FINISHED" != 1 ]; then echo "✗ release.sh stopped before it finished" >&2; exit 1; fi' EXIT
 swiftc -O "$ROOT/scripts/ed25519-verify.swift" -o "$TOOLS/ed25519-verify" 2>/dev/null \
   || fail "couldn't build scripts/ed25519-verify.swift (needs the Xcode command-line tools)"
 echo "meeting-copilot release key check" > "$TOOLS/probe"
@@ -123,6 +127,7 @@ PROBE_SIGNATURE="$(sign_file "$TOOLS/probe" 2>/dev/null)" \
 echo "  ✓ VERSION is $VERSION, notes written, $TAG is free, identity and notary profile work, the signing key matches"
 if [ "$CHECK_ONLY" = 1 ]; then
   echo "✓ Every check before the build passed (--check): nothing was built."
+  RELEASE_FINISHED=1
   exit 0
 fi
 
@@ -138,7 +143,7 @@ notarize() {
   fi
 }
 
-echo "→ Building and signing Meeting Copilot $VERSION…"
+echo "→ Building and signing Meeting Copilot ${VERSION}…"
 CODESIGN_IDENTITY="$IDENTITY" "$ROOT/scripts/build-app.sh"
 APP="$ROOT/dist/$APP_NAME.app"
 "$ROOT/scripts/verify-app.sh" --require-developer-id "$APP"
@@ -234,6 +239,7 @@ ls -l "$DIST" | sed 's/^/  /'
 echo ""
 if [ "$ALLOW_DIRTY" = 1 ]; then
   echo "This was a dry run from a dirty tree (--allow-dirty): do not publish it. Commit, then run this again."
+  RELEASE_FINISHED=1
   exit 0
 fi
 echo "To publish, push the release commit, then run:"
@@ -244,3 +250,4 @@ if [ "$PUBLISH" = 1 ]; then
 else
   echo "(Not run. Re-run with --publish to have this script run it.)"
 fi
+RELEASE_FINISHED=1
