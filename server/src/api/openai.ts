@@ -219,6 +219,20 @@ export interface FastResearchSource {
 export interface FastResearchResult {
   text: string;
   sources: FastResearchSource[];
+  /** Calls the model made to `functions`, arguments parsed; [] when none. */
+  calls: FunctionCall[];
+}
+
+/** A function tool the model may call. Strict: every property required, no others. */
+export interface FunctionTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface FunctionCall {
+  name: string;
+  arguments: Record<string, unknown>;
 }
 
 /**
@@ -236,6 +250,12 @@ export async function openaiFastResearchStream(params: {
   signal?: AbortSignal;
   onDelta?: (text: string) => void;
   label?: string;
+  /**
+   * Function tools beside web search. A call is only collected, never
+   * answered: there is no second turn, so a function must stand for
+   * something the caller does after the answer (the chat's task drafts).
+   */
+  functions?: FunctionTool[];
 }): Promise<FastResearchResult> {
   const client = getClient();
   beginLlmRequest();
@@ -247,7 +267,16 @@ export async function openaiFastResearchStream(params: {
   const stream = await client.responses.create(
     {
       model,
-      tools: [{ type: 'web_search' }],
+      tools: [
+        { type: 'web_search' },
+        ...(params.functions ?? []).map((f) => ({
+          type: 'function' as const,
+          name: f.name,
+          description: f.description,
+          parameters: f.parameters,
+          strict: true,
+        })),
+      ],
       input: [
         { role: 'system', content: params.systemPrompt },
         ...(params.history ?? []).map((m) => ({ role: m.role, content: m.content })),
@@ -265,6 +294,7 @@ export async function openaiFastResearchStream(params: {
   let accumulated = '';
   let usage: OpenAI.Responses.ResponseUsage | undefined;
   let searches = 0;
+  const calls: FunctionCall[] = [];
 
   for await (const event of stream) {
     if (event.type === 'response.output_text.delta') {
@@ -276,8 +306,15 @@ export async function openaiFastResearchStream(params: {
         // Don't kill the stream on a bad callback.
       }
     } else if (event.type === 'response.output_item.done') {
-      const item = event.item as { type: string; content?: Array<Record<string, unknown>> };
-      if (item.type === 'message' && Array.isArray(item.content)) {
+      const item = event.item as { type: string; content?: Array<Record<string, unknown>>; name?: string; arguments?: string };
+      if (item.type === 'function_call' && item.name) {
+        try {
+          const args = JSON.parse(item.arguments || '{}');
+          if (args && typeof args === 'object' && !Array.isArray(args)) calls.push({ name: item.name, arguments: args });
+        } catch {
+          log('api/openai', `${params.label ?? 'fast-research'} dropped a ${item.name} call with unreadable arguments`);
+        }
+      } else if (item.type === 'message' && Array.isArray(item.content)) {
         for (const part of item.content) {
           if ((part as { type?: string }).type !== 'output_text') continue;
           const annotations = (part as { annotations?: Array<Record<string, unknown>> }).annotations;
@@ -320,6 +357,6 @@ export async function openaiFastResearchStream(params: {
 
   const elapsed = Date.now() - started;
   const ttft = firstTokenAt > 0 ? firstTokenAt - started : -1;
-  log('api/openai', `${tag} model=${model} ttftMs=${ttft} totalMs=${elapsed} sources=${sources.length} chars=${accumulated.length} in=${usage?.input_tokens ?? 0} out=${usage?.output_tokens ?? 0} searches=${searches}`);
-  return { text: accumulated, sources };
+  log('api/openai', `${tag} model=${model} ttftMs=${ttft} totalMs=${elapsed} sources=${sources.length} chars=${accumulated.length} in=${usage?.input_tokens ?? 0} out=${usage?.output_tokens ?? 0} searches=${searches}${calls.length ? ` calls=${calls.map((c) => c.name).join(',')}` : ''}`);
+  return { text: accumulated, sources, calls };
 }

@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import type { ChatAttachment } from './context.js';
+import type { TaskDraft } from './tasks.js';
 
 /**
  * The meeting chat's thread, kept in the session's own database (invariant 2:
@@ -25,6 +26,8 @@ export interface ChatMessage {
   /** Which model answered, for an assistant turn ('' for the user's). */
   via?: string;
   createdAt: number;
+  /** Task drafts shown under an assistant turn (chat/tasks.ts); kept in their own table. */
+  drafts?: TaskDraft[];
 }
 
 export const CHAT_TABLE_SQL = `

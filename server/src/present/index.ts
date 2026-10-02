@@ -727,6 +727,52 @@ export function createPresentRouter(registry: WorkerRegistry, options: PresentRo
     res.json({ cancelled: isSessionId(sessionId) ? options.chat.cancel(sessionId) : 0 });
   });
 
+  // Task drafts in the chat (chat/tasks.ts). File is the user's approval: the
+  // draft reaches CXTasks only from here. Each answers with the draft as it
+  // ends; the message carrying it also goes out over the WebSocket.
+  router.post('/present/chat/task/file', async (req, res) => {
+    if (!options.chat) { res.status(503).json({ error: 'The chat is not set up on this server.' }); return; }
+    if (badSession(req)) { res.status(400).json({ error: 'session must be a session id' }); return; }
+    const sessionId = sessionFor(req);
+    if (!isSessionId(sessionId)) { res.status(409).json({ error: 'No meeting to file from.' }); return; }
+    const body = (req.body ?? {}) as { draftId?: unknown; title?: unknown; body?: unknown; priority?: unknown; due?: unknown };
+    try {
+      const draft = await options.chat.fileDraft({
+        sessionId,
+        draftId: body.draftId,
+        fields: { title: body.title, body: body.body, priority: body.priority, due: body.due },
+      });
+      res.status(draft.state === 'filed' ? 200 : 502).json({ draft });
+    } catch (err) {
+      res.status(err instanceof ChatError ? err.status : 500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.post('/present/chat/task/dismiss', (req, res) => {
+    if (!options.chat) { res.status(503).json({ error: 'The chat is not set up on this server.' }); return; }
+    if (badSession(req)) { res.status(400).json({ error: 'session must be a session id' }); return; }
+    const sessionId = sessionFor(req);
+    if (!isSessionId(sessionId)) { res.status(409).json({ error: 'No meeting here.' }); return; }
+    try {
+      res.json({ draft: options.chat.dismissDraft({ sessionId, draftId: (req.body ?? {}).draftId }) });
+    } catch (err) {
+      res.status(err instanceof ChatError ? err.status : 500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.post('/present/chat/task/pulse', (req, res) => {
+    if (!options.chat) { res.status(503).json({ error: 'The chat is not set up on this server.' }); return; }
+    if (badSession(req)) { res.status(400).json({ error: 'session must be a session id' }); return; }
+    const sessionId = sessionFor(req);
+    if (!isSessionId(sessionId)) { res.status(409).json({ error: 'No meeting here.' }); return; }
+    const body = (req.body ?? {}) as { text?: unknown; why?: unknown };
+    try {
+      res.json({ message: options.chat.draftFromPulse({ sessionId, text: body.text, why: body.why }) });
+    } catch (err) {
+      res.status(err instanceof ChatError ? err.status : 500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ─── GET /present/events — SSE stream (fallback for replay) ─────────
   router.get('/present/events', (req, res) => {
     res.writeHead(200, {
@@ -3058,6 +3104,49 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     color: var(--gb-subtext0); border: 1px solid var(--gb-surface2);
   }
   .pulse-chat:hover { color: var(--gb-text); background: var(--gb-surface1); }
+  .pulse-list li .pulse-task {
+    font-family: inherit; font-size: 9.5px; font-weight: 600; cursor: pointer; margin-left: 6px;
+    padding: 0 6px; border-radius: 4px; background: transparent; vertical-align: 1px;
+    color: var(--gb-overlay2); border: 1px solid var(--gb-surface2);
+  }
+  .pulse-list li .pulse-task:hover { color: var(--gb-text); background: var(--gb-surface1); }
+
+  /* A task draft in the chat (chat/tasks.ts): editable until File. */
+  .chat-task {
+    margin-top: 8px; padding: 9px 10px; border-radius: 8px;
+    background: var(--gb-base); border: 1px solid var(--gb-surface2);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .chat-task-label { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gb-overlay2); }
+  .chat-task input, .chat-task textarea, .chat-task select {
+    width: 100%; box-sizing: border-box; font-family: var(--font-sans); font-size: 12px; line-height: 1.45;
+    padding: 5px 7px; border-radius: 6px; outline: none;
+    background: var(--gb-surface1); color: var(--gb-text); border: 1px solid var(--gb-surface2);
+  }
+  .chat-task input:focus, .chat-task textarea:focus, .chat-task select:focus { border-color: rgb(var(--accent)); }
+  .chat-task .chat-task-title { font-weight: 600; }
+  .chat-task textarea { resize: vertical; min-height: 54px; max-height: 200px; }
+  .chat-task-row { display: flex; align-items: center; gap: 6px; }
+  .chat-task-row input[type="date"] { flex: 1; min-width: 0; }
+  .chat-task-row label { font-size: 10.5px; font-weight: 600; color: var(--gb-overlay2); white-space: nowrap; }
+  /* Empty, WebKit draws today's date in grey: fade it further so it never reads as a deadline. */
+  .chat-task-row input[type="date"].empty { color: transparent; }
+  .chat-task-row input[type="date"].empty:focus { color: var(--gb-overlay2); }
+  .chat-task-row select { width: auto; flex: 0 0 auto; }
+  .chat-task-actions { display: flex; align-items: center; gap: 8px; }
+  .chat-task-actions .chat-task-note { flex: 1; min-width: 0; font-size: 10.5px; color: var(--gb-overlay2); }
+  .chat-task.error .chat-task-note { color: var(--gb-red); }
+  .chat-task-dismiss {
+    font-family: inherit; font-size: 10.5px; font-weight: 600; background: none; border: none;
+    padding: 0; cursor: pointer; color: var(--gb-overlay2);
+  }
+  .chat-task-dismiss:hover { color: var(--gb-text); }
+  .chat-task.done { flex-direction: row; align-items: center; gap: 8px; font-size: 12px; color: var(--gb-text); }
+  .chat-task.done > * { white-space: nowrap; flex-shrink: 0; }
+  .chat-task.done .chat-task-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .chat-task.done .chat-task-ref { font-family: var(--font-mono); font-weight: 700; color: var(--gb-green); }
+  .chat-task.done a { font-size: 10.5px; font-weight: 600; color: rgb(var(--accent)); text-decoration: none; }
+  .chat-task.dismissed { color: var(--gb-overlay2); text-decoration: line-through; }
 
   /* ─── Newest-first transcript ──────────────────────────────── */
   .seg.newest { background: rgb(var(--warning) / 0.09); }
@@ -3910,12 +3999,15 @@ export const PRESENT_HTML = `<!DOCTYPE html>
 
   function attrText(s) { return escapeHtml(String(s || '')).replace(/"/g, '&quot;'); }
 
-  function pulseList(title, items, cls) {
+  // taskable: each item gets a Task button that drafts it into the chat.
+  function pulseList(title, items, cls, taskable) {
     if (!items || !items.length) return '';
     return '<div class="pulse-section ' + cls + '">' +
       '<div class="pulse-section-title">' + escapeHtml(title) + '</div>' +
       '<ul class="pulse-list">' + items.map(function(i) {
         return '<li>' + escapeHtml(i.text || '') +
+          (taskable && i.text ? '<button class="pulse-task" type="button" data-chat-act="task-pulse" data-task-text="' + attrText(i.text) +
+            '" data-task-why="' + attrText(i.why || '') + '" title="Draft this as a CXTasks task in the chat">+ Task</button>' : '') +
           (i.why ? '<span class="pulse-why">' + escapeHtml(i.why) + '</span>' : '') + '</li>';
       }).join('') + '</ul></div>';
   }
@@ -3951,7 +4043,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
             ? pulseList('You may have missed', p.missed, 'missed-list')
             : '<div class="pulse-empty">Nothing slipped by so far.</div>')
         : '') +
-      pulseList(closeout ? 'Before the call ends' : 'Close out before the end', p.closeOut, 'closeout-list') +
+      pulseList(closeout ? 'Before the call ends' : 'Close out before the end', p.closeOut, 'closeout-list', true) +
     '</div>';
   }
 
@@ -7668,8 +7760,153 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       meta = '<button type="button" data-chat-act="copy" data-chat-id="' + id + '">Copy</button>' +
         (m.via ? '<span>' + escapeHtml(m.via) + '</span>' : '');
     }
-    return '<div class="chat-msg assistant ' + evAttr(m.state) + '" data-chat-id="' + id + '">' + body +
+    var drafts = (m.drafts || []).map(chatTaskHtml).join('');
+    return '<div class="chat-msg assistant ' + evAttr(m.state) + '" data-chat-id="' + id + '">' + body + drafts +
       (meta ? '<div class="chat-meta">' + meta + '</div>' : '') + '</div>';
+  }
+
+  // ─── Task drafts (chat/tasks.ts) ─────────────────────────────
+  // Unsent edits live here so a re-render (a new message) keeps them.
+  var chatTaskEdits = {};
+  var CHAT_TASK_PRIORITIES = [[0, 'P0 Urgent'], [1, 'P1 High'], [2, 'P2 Normal'], [3, 'P3 Low']];
+
+  function chatTaskValue(d, field) {
+    var e = chatTaskEdits[d.id];
+    return e && e[field] !== undefined ? e[field] : d[field];
+  }
+
+  function chatTaskHtml(d) {
+    var id = evAttr(d.id);
+    if (d.state === 'filed') {
+      return '<div class="chat-task done" data-task-id="' + id + '"><span>Filed as</span><span class="chat-task-ref">' + escapeHtml(d.taskRef || '') + '</span>' +
+        '<span class="chat-task-name" title="' + evAttr(d.title) + '">' + escapeHtml(d.title) + '</span>' +
+        (d.taskId ? '<a href="cxtasks://task/' + evAttr(d.taskId) + '" title="Open in CXTasks">Open &#8599;</a>' : '') + '</div>';
+    }
+    if (d.state === 'dismissed') {
+      return '<div class="chat-task done dismissed" data-task-id="' + id + '"><span class="chat-task-name">' + escapeHtml(d.title) + '</span></div>';
+    }
+    var filing = d.state === 'filing';
+    var dis = filing ? ' disabled' : '';
+    var pri = Number(chatTaskValue(d, 'priority'));
+    var note = filing ? 'Filing&hellip;'
+      : d.state === 'error' ? escapeHtml(d.error || 'Filing failed.')
+      : (d.source === 'pulse' ? 'From the pulse.' : '') + ' Nothing is filed until you press File.';
+    return '<div class="chat-task ' + evAttr(d.state) + '" data-task-id="' + id + '">' +
+      '<div class="chat-task-label">CXTasks task</div>' +
+      '<input class="chat-task-title" data-task-field="title" aria-label="Task title" maxlength="200" value="' + evAttr(chatTaskValue(d, 'title')) + '"' + dis + '>' +
+      '<textarea data-task-field="body" aria-label="Task notes" rows="3" placeholder="Notes"' + dis + '>' + escapeHtml(chatTaskValue(d, 'body') || '') + '</textarea>' +
+      '<div class="chat-task-row">' +
+        '<label>Due</label><input type="date" data-task-field="due" aria-label="Due date"' + (chatTaskValue(d, 'due') ? '' : ' class="empty"') +
+          ' value="' + evAttr(chatTaskValue(d, 'due') || '') + '"' + dis + '>' +
+        '<select data-task-field="priority" aria-label="Priority"' + dis + '>' + CHAT_TASK_PRIORITIES.map(function(p) {
+          return '<option value="' + p[0] + '"' + (p[0] === pri ? ' selected' : '') + '>' + p[1] + '</option>';
+        }).join('') + '</select>' +
+      '</div>' +
+      '<div class="chat-task-actions"><span class="chat-task-note">' + note + '</span>' +
+        (filing ? '' : '<button type="button" class="chat-task-dismiss" data-chat-act="task-dismiss" data-task-id="' + id + '">Dismiss</button>' +
+          '<button type="button" class="btn btn-green btn-sm" data-chat-act="task-file" data-task-id="' + id + '">' + (d.state === 'error' ? 'Try again' : 'File') + '</button>') +
+      '</div></div>';
+  }
+
+  // The message holding a draft, and the draft.
+  function chatTaskFind(draftId) {
+    for (var i = 0; i < chatMessages.length; i++) {
+      var ds = chatMessages[i].drafts || [];
+      for (var j = 0; j < ds.length; j++) if (ds[j].id === draftId) return { message: chatMessages[i], draft: ds[j], index: j };
+    }
+    return null;
+  }
+
+  // A draft as the server returned it (a replay page has no socket to hear it).
+  function chatTaskApply(draft) {
+    var hit = draft && chatTaskFind(draft.id);
+    if (!hit) return;
+    hit.message.drafts[hit.index] = draft;
+    if (draft.state === 'filed' || draft.state === 'dismissed') delete chatTaskEdits[draft.id];
+    chatRenderOne(hit.message.id);
+  }
+
+  function chatTaskPost(path, body) {
+    return fetch(path + '?session=' + encodeURIComponent(chatLoadedFor), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(function(r) {
+      return r.json().catch(function() { return {}; }).then(function(d) {
+        if (d.draft) chatTaskApply(d.draft);
+        if (!r.ok && !d.draft) throw new Error(d.error || ('HTTP ' + r.status));
+        return d;
+      });
+    });
+  }
+
+  function chatTaskFile(draftId) {
+    var hit = chatTaskFind(draftId);
+    if (!hit || !chatLoadedFor) return;
+    var d = hit.draft;
+    var title = String(chatTaskValue(d, 'title') || '').trim();
+    if (!title) { showToast('Give the task a title first.', { error: true }); return; }
+    var fields = { draftId: draftId, title: title, body: chatTaskValue(d, 'body') || '', due: chatTaskValue(d, 'due') || '', priority: Number(chatTaskValue(d, 'priority')) };
+    chatTaskApply(Object.assign({}, d, { state: 'filing' }));
+    chatTaskPost('/present/chat/task/file', fields).then(function(r) {
+      if (r.draft && r.draft.state === 'filed') showToast('Filed ' + r.draft.taskRef + ' in CXTasks');
+      else if (r.draft && r.draft.error) showToast('Not filed: ' + r.draft.error, { error: true });
+    }).catch(function(err) {
+      chatTaskApply(Object.assign({}, d, { state: 'error', error: (err && err.message) || String(err) }));
+    });
+  }
+
+  function chatTaskDismiss(draftId) {
+    if (!chatLoadedFor) return;
+    chatTaskPost('/present/chat/task/dismiss', { draftId: draftId }).catch(function(err) {
+      showToast('Could not dismiss: ' + ((err && err.message) || err), { error: true });
+    });
+  }
+
+  // The pulse's + Task: the draft opens in the chat.
+  function chatTaskFromPulse(el) {
+    var key = chatSessionKey();
+    if (!key) return;
+    chatOpen(false);
+    fetch('/present/chat/task/pulse?session=' + encodeURIComponent(key), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: el.getAttribute('data-task-text') || '', why: el.getAttribute('data-task-why') || '' }),
+    }).then(function(r) {
+      return r.json().catch(function() { return {}; }).then(function(d) {
+        if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+        if (d.message && chatLoadedFor === key) chatReceive(d.message);
+      });
+    }).catch(function(err) {
+      showToast('Could not draft the task: ' + ((err && err.message) || err), { error: true });
+    });
+  }
+
+  if (chatThreadEl) {
+    chatThreadEl.addEventListener('input', function(e) {
+      var f = e.target && e.target.getAttribute && e.target.getAttribute('data-task-field');
+      var card = f && e.target.closest('.chat-task');
+      if (!card) return;
+      var draftId = card.getAttribute('data-task-id');
+      chatTaskEdits[draftId] = chatTaskEdits[draftId] || {};
+      chatTaskEdits[draftId][f] = f === 'priority' ? Number(e.target.value) : e.target.value;
+      if (f === 'due') e.target.classList.toggle('empty', !e.target.value);
+    });
+    chatThreadEl.addEventListener('change', function(e) {
+      if (e.target && e.target.tagName === 'SELECT' && e.target.getAttribute('data-task-field')) {
+        e.target.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
+    // Typing in a draft must not drive the page's other keys; Enter in the title files it.
+    chatThreadEl.addEventListener('keydown', function(e) {
+      var card = e.target && e.target.closest ? e.target.closest('.chat-task') : null;
+      if (!card || !e.target.getAttribute('data-task-field')) return;
+      e.stopPropagation();
+      if (e.key === 'Enter' && !e.isComposing && e.target.tagName === 'INPUT') {
+        e.preventDefault();
+        chatTaskFile(card.getAttribute('data-task-id'));
+      }
+    });
   }
 
   function chatEmptyHtml() {
@@ -7940,6 +8177,9 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     else if (act === 'copy') chatCopy(el.getAttribute('data-chat-id'));
     else if (act === 'retry') chatRetry(el.getAttribute('data-chat-id'));
     else if (act === 'pulse') chatAttachPulse();
+    else if (act === 'task-file') chatTaskFile(el.getAttribute('data-task-id'));
+    else if (act === 'task-dismiss') chatTaskDismiss(el.getAttribute('data-task-id'));
+    else if (act === 'task-pulse') chatTaskFromPulse(el);
   });
 
   if (chatInputEl) {

@@ -91,7 +91,29 @@ export const CHAT_SYSTEM = [
   'In the transcript, "You" is the user (their microphone) and "Meeting" is everyone else on the call. When you quote the meeting, quote it exactly and give its [mm:ss] time.',
   'If the meeting does not cover what they ask, say so plainly instead of guessing.',
   'Items the user attached from the dashboard are numbered [1], [2] and so on. "This" or "that" usually means the latest one.',
+  'When the user asks you to make, file or add a task, to-do, reminder or follow-up, call draft_task once per task. It only drafts: the user checks each one and files it into CXTasks themselves. Write a short imperative title, put the meeting context someone would need cold in the notes, and give a due date only when one was said or asked for. Then say in one line what you drafted.',
 ].join('\n');
+
+/** Said when the answer comes from a path without the draft_task tool. */
+export const CHAT_NO_TASK_TOOL = 'You cannot draft tasks on this path. If the user asks for a task, write the task out (title, notes, due date) and say that filing it into CXTasks needs the OpenAI path to be on.';
+
+/** The draft_task function: arguments become a TaskDraft (chat/tasks.ts). */
+export const DRAFT_TASK_TOOL = {
+  name: 'draft_task',
+  description: 'Draft a CXTasks task for the user to check and file. Drafting files nothing.',
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['title', 'notes', 'priority', 'due', 'people'],
+    properties: {
+      title: { type: 'string', description: 'Short imperative title, e.g. "Send Rory the Q4 deck".' },
+      notes: { type: 'string', description: 'Markdown notes: what was said, why it matters, anything needed to do it. Quote the meeting where it helps.' },
+      priority: { type: 'integer', enum: [0, 1, 2, 3], description: '0 urgent, 1 high, 2 normal (the default), 3 low.' },
+      due: { type: ['string', 'null'], description: 'Deadline as YYYY-MM-DD, resolved against today\'s date. Null unless a date or day was said or asked for.' },
+      people: { type: 'array', items: { type: 'string' }, description: 'First names of people the task involves, other than the user. Empty when none.' },
+    },
+  },
+};
 
 /** mm:ss from the start, h:mm:ss past an hour. */
 export function clock(epochMs: number, startedAt: number | null): string {

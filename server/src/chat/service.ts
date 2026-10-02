@@ -9,8 +9,19 @@ import { snapshotFile } from '../present/evidence.js';
 import { isOpenAiApiAvailable, openaiFastResearchStream } from '../api/openai.js';
 import { claudeSuggest } from '../claude-cli.js';
 import { MODEL_CONFIG } from '../model-config.js';
+import { cxtasksFiler, dueDateToIso, type TaskFiler } from '../cxtasks/client.js';
+import {
+  cleanTaskFields,
+  personTag,
+  readTaskDrafts,
+  writeTaskDraft,
+  type TaskDraft,
+  type TaskDraftFields,
+} from './tasks.js';
 import {
   CHAT_SYSTEM,
+  CHAT_NO_TASK_TOOL,
+  DRAFT_TASK_TOOL,
   ATTACH_LIMITS,
   buildMeetingSnapshot,
   clip,
@@ -54,6 +65,8 @@ export interface ChatAnswer {
   sources: Array<{ url: string; title: string }>;
   /** The model that answered. */
   via: string;
+  /** draft_task calls, as the model gave them (checked by the service). */
+  taskDrafts?: TaskDraftFields[];
 }
 
 export type ChatAnswerer = (req: ChatAnswerRequest) => Promise<ChatAnswer>;
@@ -73,6 +86,10 @@ export interface ChatServiceDeps {
   liveContext?: (sessionId: string) => ChatLiveContext | null;
   broadcast?: (event: ChatEvent) => void;
   answer?: ChatAnswerer;
+  /** Files a confirmed draft into CXTasks (cxtasks/client.ts). */
+  fileTask?: TaskFiler;
+  /** The repo a meeting's tasks belong to, when it has exactly one project. */
+  repoFor?: (sessionId: string) => string | undefined;
   now?: () => number;
   log?: (message: string) => void;
 }
@@ -92,12 +109,15 @@ export class ChatService {
   private readonly chains = new Map<string, Promise<unknown>>();
   /** assistant message id → its abort, while queued or running. */
   private readonly inFlight = new Map<string, { sessionId: string; abort: AbortController }>();
-  private readonly deps: Required<Omit<ChatServiceDeps, 'liveContext'>> & Pick<ChatServiceDeps, 'liveContext'>;
+  /** Draft ids being filed right now: a second File press is refused. */
+  private readonly filing = new Set<string>();
+  private readonly deps: Required<Omit<ChatServiceDeps, 'liveContext' | 'repoFor'>> & Pick<ChatServiceDeps, 'liveContext' | 'repoFor'>;
 
   constructor(deps: ChatServiceDeps) {
     this.deps = {
       broadcast: () => {},
       answer: defaultChatAnswerer(),
+      fileTask: cxtasksFiler(),
       now: () => Date.now(),
       log: () => {},
       ...deps,
@@ -110,11 +130,121 @@ export class ChatService {
 
   /** The thread, oldest first. A turn the server lost mid-answer reads as interrupted. */
   thread(sessionId: string): ChatMessage[] {
-    return readChat(this.dbPath(sessionId)).map((m) =>
-      m.state === 'streaming' && !this.inFlight.has(m.id)
+    const dbPath = this.dbPath(sessionId);
+    const drafts = new Map<string, TaskDraft[]>();
+    for (const d of readTaskDrafts(dbPath)) {
+      const shown = d.state === 'filing' && !this.filing.has(d.id)
+        ? { ...d, state: 'error' as const, error: 'The server restarted while filing this. Check CXTasks before filing it again.' }
+        : d;
+      drafts.set(d.messageId, [...(drafts.get(d.messageId) ?? []), shown]);
+    }
+    return readChat(dbPath).map((m) => {
+      const msg: ChatMessage = m.state === 'streaming' && !this.inFlight.has(m.id)
         ? { ...m, state: 'error', error: 'Interrupted: the server restarted before this answer finished.' }
-        : m,
-    );
+        : m;
+      const own = drafts.get(m.id);
+      return own ? { ...msg, drafts: own } : msg;
+    });
+  }
+
+  /** One message with its drafts, as the thread shows it. */
+  private messageWithDrafts(sessionId: string, messageId: string): ChatMessage | undefined {
+    return this.thread(sessionId).find((m) => m.id === messageId);
+  }
+
+  private emitAll(event: ChatEvent): void {
+    try { this.deps.broadcast(event); } catch { /* a dead socket must not stop the work */ }
+  }
+
+  /**
+   * The pulse's Task button: a draft of one of its items, shown in the chat as
+   * a turn of its own. No model is asked; the item already names the step.
+   */
+  draftFromPulse(req: { sessionId: string; text: unknown; why?: unknown }): ChatMessage {
+    const { sessionId } = req;
+    const dbPath = this.dbPath(sessionId);
+    if (!existsSync(dbPath)) throw new ChatError('That meeting is not here any more.', 404);
+    const why = typeof req.why === 'string' ? req.why.trim() : '';
+    const fields = cleanTaskFields({ title: req.text, body: why ? `From the meeting pulse: ${why}` : 'From the meeting pulse.' });
+    if (!fields) throw new ChatError('That pulse item has no text to make a task from.', 400);
+    const now = this.deps.now();
+    const message: ChatMessage = {
+      id: uuidv4(), role: 'assistant', content: 'A task from the pulse. Check it, then press File.',
+      attachments: [], origin: 'dashboard', state: 'done', via: 'pulse', createdAt: now,
+    };
+    writeChat(dbPath, sessionId, message);
+    const draft: TaskDraft = { id: uuidv4(), messageId: message.id, source: 'pulse', ...fields, state: 'draft', createdAt: now };
+    writeTaskDraft(dbPath, sessionId, draft);
+    const shown = { ...message, drafts: [draft] };
+    this.emitAll({ type: 'chat.message', sessionId, message: shown });
+    this.deps.log(`task drafted from the pulse`);
+    return shown;
+  }
+
+  /** The user's File press: their edits, then CXTasks. Resolves with the draft as it ends. */
+  async fileDraft(req: { sessionId: string; draftId: unknown; fields?: TaskDraftFields }): Promise<TaskDraft> {
+    const { sessionId } = req;
+    const dbPath = this.dbPath(sessionId);
+    const draft = readTaskDrafts(dbPath).find((d) => d.id === req.draftId);
+    if (!draft) throw new ChatError('That draft is not here any more.', 404);
+    if (draft.state === 'filed') throw new ChatError(`Already filed as ${draft.taskRef}.`, 409);
+    if (this.filing.has(draft.id) || draft.state === 'filing') throw new ChatError('Already filing this one.', 409);
+    if (draft.state === 'dismissed') throw new ChatError('That draft was dismissed.', 409);
+    const fields = cleanTaskFields({ ...draft, ...(req.fields ?? {}) });
+    if (!fields) throw new ChatError('Give the task a title first.', 400);
+
+    this.filing.add(draft.id);
+    let current: TaskDraft = { ...draft, ...fields, state: 'filing' };
+    delete current.error;
+    const save = (d: TaskDraft) => {
+      writeTaskDraft(dbPath, sessionId, d);
+      const message = this.messageWithDrafts(sessionId, d.messageId);
+      if (message) this.emitAll({ type: 'chat.message', sessionId, message });
+    };
+    try {
+      save(current);
+      const filed = await this.deps.fileTask({
+        title: current.title,
+        body: this.taskBody(sessionId, current),
+        priority: current.priority,
+        dueAt: current.due ? dueDateToIso(current.due) ?? undefined : undefined,
+        tags: ['meeting', ...current.people.map(personTag).filter((t) => t.length > 1)],
+        repoPath: this.deps.repoFor?.(sessionId),
+      });
+      current = { ...current, state: 'filed', taskRef: filed.ref, taskId: filed.id };
+      this.deps.log(`task filed as ${filed.ref} (from ${current.source})`);
+    } catch (err) {
+      current = { ...current, state: 'error', error: err instanceof Error ? err.message : String(err) };
+      this.deps.log(`task filing failed: ${current.error}`);
+    } finally {
+      this.filing.delete(draft.id);
+    }
+    save(current);
+    return current;
+  }
+
+  dismissDraft(req: { sessionId: string; draftId: unknown }): TaskDraft {
+    const { sessionId } = req;
+    const dbPath = this.dbPath(sessionId);
+    const draft = readTaskDrafts(dbPath).find((d) => d.id === req.draftId);
+    if (!draft) throw new ChatError('That draft is not here any more.', 404);
+    if (draft.state === 'filed' || draft.state === 'filing' || this.filing.has(draft.id)) {
+      throw new ChatError('That one is already filed.', 409);
+    }
+    const dismissed: TaskDraft = { ...draft, state: 'dismissed' };
+    writeTaskDraft(dbPath, sessionId, dismissed);
+    const message = this.messageWithDrafts(sessionId, draft.messageId);
+    if (message) this.emitAll({ type: 'chat.message', sessionId, message });
+    return dismissed;
+  }
+
+  /** The draft's notes, then where it came from, so the task reads cold. */
+  private taskBody(sessionId: string, d: TaskDraft): string {
+    const stored = readStoredMeeting(this.dbPath(sessionId));
+    const when = new Date(stored.startedAt ?? d.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const meeting = stored.title ? `"${stored.title}"` : 'a meeting';
+    const footer = `From ${meeting} on ${when}, via Meeting Copilot (session \`${sessionId}\`).`;
+    return d.body ? `${d.body}\n\n${footer}` : footer;
   }
 
   busy(sessionId: string): boolean {
@@ -187,7 +317,8 @@ export class ChatService {
     try {
       if (signal.aborted) throw new Error('Aborted');
       const history = historyFor(readChat(dbPath), user.id);
-      const system = `${CHAT_SYSTEM}\n\n${buildMeetingSnapshot(this.snapshotInput(sessionId, user.content))}`;
+      const today = new Date(this.deps.now()).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+      const system = `${CHAT_SYSTEM}\nToday is ${today}.\n\n${buildMeetingSnapshot(this.snapshotInput(sessionId, user.content))}`;
       const answer = await this.deps.answer({
         system,
         history,
@@ -210,7 +341,15 @@ export class ChatService {
         content += tail;
         emit({ type: 'chat.delta', sessionId, id: placeholder.id, seq: ++seq, text: tail });
       }
-      finished = { ...placeholder, content: content.trim() || 'No answer came back.', state: 'done', via: answer.via };
+      const drafts: TaskDraft[] = [];
+      for (const f of answer.taskDrafts ?? []) {
+        const fields = cleanTaskFields(f);
+        if (fields) drafts.push({ id: uuidv4(), messageId: placeholder.id, source: 'chat', ...fields, state: 'draft', createdAt: this.deps.now() });
+      }
+      const fallback = drafts.length ? `Drafted ${drafts.length === 1 ? 'a task' : `${drafts.length} tasks`}. Check, then press File.` : 'No answer came back.';
+      finished = { ...placeholder, content: content.trim() || fallback, state: 'done', via: answer.via };
+      for (const d of drafts) writeTaskDraft(dbPath, sessionId, d);
+      if (drafts.length) finished.drafts = drafts;
       this.deps.log(`answered via=${answer.via} ms=${this.deps.now() - started} chars=${content.length} attachments=${user.attachments.length} origin=${user.origin}`);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
@@ -396,8 +535,10 @@ export function defaultChatAnswerer(log: (message: string) => void = () => {}): 
           signal: req.signal,
           onDelta,
           label: req.label,
+          functions: [DRAFT_TASK_TOOL],
         });
-        return { text: r.text, sources: r.sources, via: MODEL_CONFIG.chat };
+        const taskDrafts = (r.calls ?? []).filter((c) => c.name === DRAFT_TASK_TOOL.name).map((c) => c.arguments as TaskDraftFields);
+        return { text: r.text, sources: r.sources, via: MODEL_CONFIG.chat, ...(taskDrafts.length ? { taskDrafts } : {}) };
       } catch (err) {
         if (req.signal.aborted || spoke) throw err;
         log(`OpenAI failed before answering, trying the subscription CLI: ${err instanceof Error ? err.message : String(err)}`);
@@ -407,7 +548,7 @@ export function defaultChatAnswerer(log: (message: string) => void = () => {}): 
     const earlier = req.history.length
       ? `Our conversation so far:\n${req.history.map((m) => `${m.role === 'user' ? 'User' : 'You'}: ${m.content}`).join('\n\n')}\n\nNow:\n`
       : '';
-    const text = await claudeSuggest(`${earlier}${req.user}`, req.system, req.signal, ['WebSearch', 'WebFetch'], {
+    const text = await claudeSuggest(`${earlier}${req.user}`, `${req.system}\n\n${CHAT_NO_TASK_TOOL}`, req.signal, ['WebSearch', 'WebFetch'], {
       onDelta,
       model: MODEL_CONFIG.worker,
       cold: true,

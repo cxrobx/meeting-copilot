@@ -1,6 +1,7 @@
 import { homedir, userInfo } from 'node:os';
 import { resolve } from 'node:path';
 import type { ChatAnswerer } from './service.js';
+import type { TaskFiler } from '../cxtasks/client.js';
 
 /**
  * A scripted chat answerer for the ship gate's browser tests (server/e2e/).
@@ -14,6 +15,9 @@ import type { ChatAnswerer } from './service.js';
 
 /** A question containing this streams slowly enough to press Stop mid-answer. */
 export const FAKE_CHAT_SLOW_MARKER = '[slow]';
+
+/** A question containing this comes back with a task draft. */
+export const FAKE_CHAT_TASK_MARKER = '[task]';
 
 const FAST_STEP_MS = 30;
 const SLOW_STEP_MS = 150;
@@ -46,7 +50,20 @@ export function fakeChatAnswerer(): ChatAnswerer {
       text += word;
       req.onDelta(word);
     }
-    return { text, sources: [], via: 'e2e-fake' };
+    // A question asking for a task drafts one, as the real chat's draft_task call would.
+    const taskDrafts = req.user.includes(FAKE_CHAT_TASK_MARKER)
+      ? [{ title: 'Send Rory the Q4 deck', notes: 'Rory asked for the deck before the board meeting.', priority: 2, due: null, people: ['Rory'] }]
+      : undefined;
+    return { text, sources: [], via: 'e2e-fake', taskDrafts };
+  };
+}
+
+/** Files nothing: each task gets the next made-up T-number. */
+export function fakeTaskFiler(): TaskFiler {
+  let n = 9000;
+  return async () => {
+    n += 1;
+    return { ref: `T${n}`, id: `00000000-0000-4000-8000-${String(n).padStart(12, '0')}` };
   };
 }
 

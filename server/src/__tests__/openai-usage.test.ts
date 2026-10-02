@@ -41,4 +41,14 @@ describe('fast research stream usage', () => {
     await openaiFastResearchStream({ systemPrompt: 's', userContent: 'q' });
     expect(getLlmBudgetSnapshot().tokens).toBe(105);
   });
+
+  it('collects function calls with their arguments, and drops one it cannot read', async () => {
+    events.list = [
+      { type: 'response.output_item.done', item: { type: 'function_call', name: 'draft_task', arguments: '{"title":"Send the deck"}' } },
+      { type: 'response.output_item.done', item: { type: 'function_call', name: 'draft_task', arguments: '{"title":' } },
+      { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 }, output: [] } },
+    ];
+    const r = await openaiFastResearchStream({ systemPrompt: 's', userContent: 'q', functions: [{ name: 'draft_task', description: 'd', parameters: {} }] });
+    expect(r.calls).toEqual([{ name: 'draft_task', arguments: { title: 'Send the deck' } }]);
+  });
 });

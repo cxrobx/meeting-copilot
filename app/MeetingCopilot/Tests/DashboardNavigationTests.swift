@@ -16,6 +16,11 @@ final class DashboardNavigationTests: XCTestCase {
         }
     }
 
+    func testFiledTaskLinkOpensCXTasksButNothingElseThere() {
+        XCTAssertEqual(policy.destination(for: URL(string: "cxtasks://task/3200587a-f0d3-4f2f-9446-791c4b4ac537")!), .external)
+        XCTAssertEqual(policy.destination(for: URL(string: "cxtasks://run/anything")!), .blocked)
+    }
+
     func testRegularAndNewWindowLinksCannotNavigateTheDashboard() {
         let article = URL(string: "https://note.com/article")!
         XCTAssertEqual(policy.decision(for: article, targetIsMainFrame: true), .openExternally)

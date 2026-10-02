@@ -13,6 +13,7 @@ vi.mock('../claude-cli.js', () => ({ claudeSuggest: cli.suggest }));
 
 const { defaultChatAnswerer } = await import('../chat/service.js');
 const { MODEL_CONFIG } = await import('../model-config.js');
+const { CHAT_NO_TASK_TOOL, DRAFT_TASK_TOOL } = await import('../chat/context.js');
 
 function request(deltas: string[] = []) {
   return {
@@ -42,6 +43,14 @@ describe('defaultChatAnswerer', () => {
     expect(cli.suggest).not.toHaveBeenCalled();
   });
 
+  it('offers draft_task and hands its calls back as task drafts, never anything else it called', async () => {
+    const draft = { title: 'Send Rory the deck', notes: 'n', priority: 2, due: '2026-10-09', people: ['Rory'] };
+    openai.stream.mockResolvedValue({ text: 'Drafted it.', sources: [], calls: [{ name: 'draft_task', arguments: draft }, { name: 'other', arguments: {} }] });
+    const out = await defaultChatAnswerer()(request());
+    expect(openai.stream.mock.calls[0]![0].functions).toEqual([DRAFT_TASK_TOOL]);
+    expect(out.taskDrafts).toEqual([draft]);
+  });
+
   it('falls back to the subscription CLI when the API fails before its first word', async () => {
     openai.stream.mockRejectedValue(new Error('Per-session LLM budget reached ($10)'));
     cli.suggest.mockResolvedValue('From the CLI.');
@@ -50,7 +59,7 @@ describe('defaultChatAnswerer', () => {
     expect(out).toEqual({ text: 'From the CLI.', sources: [], via: MODEL_CONFIG.worker });
     const [prompt, system, , tools, opts] = cli.suggest.mock.calls[0]!;
     expect(prompt).toBe('Our conversation so far:\nUser: first\n\nYou: one\n\nNow:\nand then?');
-    expect(system).toBe('SYSTEM + meeting');
+    expect(system).toBe(`SYSTEM + meeting\n\n${CHAT_NO_TASK_TOOL}`);
     expect(tools).toEqual(['WebSearch', 'WebFetch']);
     expect(opts).toMatchObject({ cold: true, model: MODEL_CONFIG.worker });
     expect(logs[0]).toContain('budget reached');

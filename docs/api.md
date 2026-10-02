@@ -91,6 +91,9 @@
 | GET | `/present/chat?session=<uuid>` | The meeting chat's thread, oldest first `{ sessionId, messages, busy }` (`sessionId: null` with no meeting). An answer the server lost mid-stream reads as `error` |
 | POST | `/present/chat?session=<uuid>` | Ask the meeting chat. Body `{ text, attachments? }`: up to 6 of `{ kind: quote\|card\|tab\|pulse\|answer, label, text, context?, actionId?, tabIndex? }` (a `tab` is filled from the session's `prep.json` by `tabIndex`, never from `text`). Streams this turn as SSE, `event: message` (the question, then the answer's start and end) and `event: delta` (`{id, seq, text}`); the same events go out over the WebSocket. 400 empty, 404 no such meeting, 409 no meeting at all. Closing the response does not stop the answer |
 | POST | `/present/chat/cancel?session=<uuid>` | Stop that meeting's queued or streaming answers `{ cancelled: n }` |
+| POST | `/present/chat/task/file?session=<uuid>` | File a task draft into CXTasks: the user's approval (`chat/tasks.ts`, `cxtasks/client.ts`). Body `{ draftId, title?, body?, priority?: 0-3, due?: 'YYYY-MM-DD'\|'' }` (the edits win over the draft). `{ draft }`, 200 filed (`taskRef`, `taskId`), 502 CXTasks refused or failed (`draft.state: 'error'`, `draft.error`); 404 no such draft, 409 already filed, filing or dismissed. The message holding it goes out as `chat.message` at `filing` and at the end |
+| POST | `/present/chat/task/dismiss?session=<uuid>` | Drop a draft `{ draft }` (409 once filed) |
+| POST | `/present/chat/task/pulse?session=<uuid>` | Draft a pulse item, no model involved. Body `{ text, why? }`. `{ message }`: a new assistant turn (`via: 'pulse'`) carrying the draft, also broadcast |
 | POST | `/present/review` | On-demand Opus self-review for a session |
 | GET | `/vendor/*` | Vendored dashboard assets (marked/DOMPurify/hljs/fonts) |
 | POST | `/transcribe` | **Gated legacy path** — 410 unless `COPILOT_ENABLE_HTTP_TRANSCRIBE=1` (bypasses dedup + stitcher) |

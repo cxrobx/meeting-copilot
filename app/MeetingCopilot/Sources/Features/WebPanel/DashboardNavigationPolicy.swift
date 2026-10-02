@@ -28,6 +28,8 @@ struct DashboardNavigationPolicy {
         if isDashboard(url) { return .dashboard }
         switch url.scheme?.lowercased() {
         case "http", "https", "mailto", "tel": return .external
+        // A filed task's "Open in CXTasks" link, and nothing else that app handles.
+        case "cxtasks" where url.host == "task": return .external
         default: return .blocked
         }
     }

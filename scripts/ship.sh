@@ -167,7 +167,7 @@ echo "[2/5] Packaging app..."
 "$SCRIPT_DIR/verify-app.sh" --require-developer-id "$PACKAGED_APP"
 
 # The ship gate (docs/quality-plan.md §5): WebKit, the engine the app's
-# WKWebView uses, drives the PACKAGED server's dashboard through six specs
+# WKWebView uses, drives the PACKAGED server's dashboard through the specs in server/e2e
 # under a throwaway HOME with a scripted chat, so it spends nothing and never
 # touches the running app. A failure stops here, before /Applications changes.
 echo ""

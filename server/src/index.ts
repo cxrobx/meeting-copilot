@@ -43,7 +43,7 @@ import { cleanupOldSessions, cleanStalePresence } from './session/cleanup.js';
 import { writePresence, removePresence, appendTranscript, setSharingEnabled } from './session/shared.js';
 import { createPresentRouter, findAction } from './present/index.js';
 import { ChatService, ChatError, defaultChatAnswerer, type ChatEvent } from './chat/service.js';
-import { e2eFakeChatEnabled, fakeChatAnswerer } from './chat/fake.js';
+import { e2eFakeChatEnabled, fakeChatAnswerer, fakeTaskFiler } from './chat/fake.js';
 import { PublishJobs, type PublishStateMessage } from './publish/index.js';
 import { polishToPage } from './publish/polish.js';
 import { wranglerUploader } from './publish/uploader.js';
@@ -669,6 +669,14 @@ const chat = new ChatService({
     : null),
   broadcast: (event) => broadcast(event),
   answer: fakeChat ? fakeChatAnswerer() : defaultChatAnswerer((message) => log('chat', message)),
+  // Under the e2e fake nothing reaches the real CXTasks.
+  ...(fakeChat ? { fileTask: fakeTaskFiler() } : {}),
+  // A task from a meeting with exactly one project belongs to that repo.
+  repoFor: (id) => {
+    if (sessionStore?.id !== id) return undefined;
+    const projects = intelligence.getProjectContext();
+    return projects.length === 1 ? projects[0]!.path : undefined;
+  },
   log: (message) => log('chat', message),
 });
 app.use(createPresentRouter(registry, { getSessionId: liveSessionId, publish: publishJobs, chat }));
