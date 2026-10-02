@@ -105,6 +105,17 @@ final class MenuBarRenderTests: XCTestCase {
         )
         try render(MenuBarView(sessionManager: idle, feed: idleFeed, actions: Self.noActions), to: out.appendingPathComponent("idle-\(suffix).png"))
 
+        // The idle "Test audio" check: running, passed, and a failure with advice.
+        idleFeed.loadPreview(sessions: [], next: nil,
+                             meetingLevels: Self.wave(seed: 4), micLevels: Self.wave(seed: 5), theme: theme)
+        idle.audioCheck.loadPreview(.running(heardMic: true, heardMeeting: false))
+        try render(MenuBarView(sessionManager: idle, feed: idleFeed, actions: Self.noActions), to: out.appendingPathComponent("idle-check-running-\(suffix).png"))
+        idle.audioCheck.loadPreview(.done(AudioCheck.Outcome(mic: .heard, meeting: .heard)))
+        try render(MenuBarView(sessionManager: idle, feed: idleFeed, actions: Self.noActions), to: out.appendingPathComponent("idle-check-passed-\(suffix).png"))
+        idle.audioCheck.loadPreview(.done(AudioCheck.Outcome(mic: .heard, meeting: .zeros)))
+        try render(MenuBarView(sessionManager: idle, feed: idleFeed, actions: Self.noActions), to: out.appendingPathComponent("idle-check-failed-\(suffix).png"))
+        idle.audioCheck.loadPreview(.idle)
+
         // Live, 12:48 in, with a pulse, two waiting suggestions and one running.
         let live = SessionManager()
         live.serverReady = true
@@ -151,6 +162,18 @@ final class MenuBarRenderTests: XCTestCase {
         try render(MenuBarView(sessionManager: live, feed: liveFeed, actions: Self.noActions), to: out.appendingPathComponent("live-ask-\(suffix).png"))
         live.menubarChat = MenubarChat()
         live.actions = waiting
+
+        // Paused 4 minutes in: PAUSED, frozen timer, Resume. Its own manager:
+        // resuming clears a notification, which needs an app bundle.
+        let paused = SessionManager()
+        paused.serverReady = true
+        paused.currentSession = session
+        paused.state = .live
+        paused.isRecording = true
+        paused.sessionElapsedTime = 528
+        paused.meetingAttendees = "Rory, Eli Park"
+        paused.applyPause(PauseUpdate(paused: true, pausedAt: now.addingTimeInterval(-240), pausedMs: 240_000))
+        try render(MenuBarView(sessionManager: paused, feed: liveFeed, actions: Self.noActions), to: out.appendingPathComponent("live-paused-\(suffix).png"))
 
         // Live with the capture watchdog's silence warning.
         live.captureWarning = "No meeting audio for 25 s. Check System Settings → Privacy & Security → System Audio Recording."

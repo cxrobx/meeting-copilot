@@ -99,9 +99,27 @@ final class SessionManager {
         }
     }
 
+    /// The live meeting is paused (server/src/session/pause.ts): capture keeps
+    /// running so Resume is instant, but nothing is sent. The server's
+    /// `session.paused` is the truth; a press here sets it at once so no
+    /// frame goes out while the message is on its way.
+    private(set) var isPaused = false
+    /// When the current pause began (nil while running).
+    private(set) var pausedAt: Date? = nil
+    /// Paused time before the current pause, in seconds; the timer leaves it out.
+    private var pausedSecondsBefore: TimeInterval = 0
+    private var pauseAlerts = PauseAlerts()
+
+    /// Seconds paused so far, the current pause included.
+    var pausedSeconds: TimeInterval {
+        pausedSecondsBefore + (pausedAt.map { Date().timeIntervalSince($0) } ?? 0)
+    }
+
     // MARK: - Dependencies
 
     let audioCaptureManager = AudioCaptureManager()
+    /// The idle "Test audio" check (its own capture; Start cancels it).
+    let audioCheck = AudioCheck()
     let webSocketClient = WebSocketClient()
     let processSupervisor = ProcessSupervisor()
 
@@ -230,6 +248,9 @@ final class SessionManager {
             : meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let session = Session(title: title)
         currentSession = session
+        // A running audio check holds both devices: let go before the session opens them.
+        if audioCheck.isRunning { await audioCheck.cancel() }
+        audioCheck.dismissResult()
 
         // Set up WebSocket callbacks
         await webSocketClient.setCallbacks(
@@ -276,13 +297,18 @@ final class SessionManager {
         audioCaptureManager.onMicRecovered = { [weak self] in
             Task { @MainActor in self?.setMicDead(app: false) }
         }
+        audioCaptureManager.onMeetingPeakSecond = { [weak self] peak in
+            Task { @MainActor in self?.notePausedMeetingPeak(peak) }
+        }
         do {
             try await audioCaptureManager.startCapture(
                 onChunk: { [weak self] wavData, source, meta in
                     Task { [weak self] in
                         guard let self = self else { return }
                         let isConnected = await self.webSocketClient.getIsConnected()
-                        let sessionState = await MainActor.run { self.state }
+                        let (sessionState, paused) = await MainActor.run { (self.state, self.isPaused) }
+                        // Paused: dropped, not buffered. Nothing leaves the Mac.
+                        if paused { return }
                         let base64 = wavData.base64EncodedString()
                         let sourceStr = source == .mic ? "mic" : "meeting"
                         if isConnected && sessionState == .live {
@@ -391,7 +417,8 @@ final class SessionManager {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s
                 guard let self = self, let startedAt = self.currentSession?.startedAt else { break }
-                self.sessionElapsedTime = Date().timeIntervalSince(startedAt)
+                self.sessionElapsedTime = max(0, Date().timeIntervalSince(startedAt) - self.pausedSeconds)
+                if let alert = self.pauseAlerts.tick(now: Date()) { self.raisePauseAlert(alert) }
             }
         }
     }
@@ -470,7 +497,7 @@ final class SessionManager {
         frameSendTask = Task { [weak self] in
             for await frame in frames {
                 guard let self else { return }
-                guard self.state == .live else { continue }
+                guard self.state == .live, !self.isPaused else { continue }
                 try? await client.sendBinary(frame)
             }
         }
@@ -513,8 +540,72 @@ final class SessionManager {
         menubarChat = MenubarChat()
         setMicDead(app: false, server: false)
         captureWarning = nil
+        applyPause(PauseUpdate(paused: false, pausedAt: nil, pausedMs: 0))
         currentSession = nil
         _ = handleStateTransition(to: .idle)
+    }
+
+    // MARK: - Pause
+
+    /// Pause or resume the live meeting. Pausing stops sending at once; the
+    /// server's `session.paused` then confirms it to every client.
+    func togglePause() {
+        guard state == .live || state == .degraded else { return }
+        let resuming = isPaused
+        if !resuming {
+            applyPause(PauseUpdate(paused: true, pausedAt: Date(), pausedMs: pausedSecondsBefore * 1000))
+        }
+        Task {
+            do {
+                try await webSocketClient.send(resuming ? .sessionResume : .sessionPause)
+            } catch {
+                appLog("[Session] \(resuming ? "resume" : "pause") send failed: \(error)")
+                await MainActor.run {
+                    self.surfaceError(resuming
+                        ? "Couldn't reach the server to resume. Still paused: nothing is being recorded."
+                        : "Couldn't reach the server to pause. Nothing is being sent from this Mac meanwhile.")
+                }
+            }
+        }
+    }
+
+    /// The server's `session.paused`, or a press here (internal for the render test).
+    func applyPause(_ update: PauseUpdate) {
+        let was = isPaused
+        isPaused = update.paused
+        pausedAt = update.paused ? (update.pausedAt ?? pausedAt ?? Date()) : nil
+        // pausedMs counts the open pause too; keep only what came before it.
+        let openSeconds = pausedAt.map { Date().timeIntervalSince($0) } ?? 0
+        pausedSecondsBefore = max(0, update.pausedMs / 1000 - openSeconds)
+        if isPaused && !was {
+            appLog("[Session] Paused")
+            pauseAlerts.paused(at: pausedAt ?? Date())
+        } else if !isPaused && was {
+            appLog("[Session] Resumed")
+            pauseAlerts.resumed()
+            NotificationManager.shared.clearPauseNotification()
+        }
+    }
+
+    /// One second's meeting-track peak (AudioCaptureManager), heard while paused.
+    private func notePausedMeetingPeak(_ peak: Float) {
+        guard isPaused, let alert = pauseAlerts.meetingPeak(peak, at: Date()) else { return }
+        raisePauseAlert(alert)
+    }
+
+    private func raisePauseAlert(_ alert: PauseAlerts.Alert) {
+        switch alert {
+        case .meetingSound:
+            appLog("[Session] Paused, but the meeting track has sound")
+            NotificationManager.shared.postPauseNotification(
+                title: "Paused, and the meeting has sound",
+                body: "Meeting Copilot is paused, so none of this is being transcribed. If the meeting is back on, resume.")
+        case .reminder(let minutes):
+            appLog("[Session] Still paused after \(minutes) min")
+            NotificationManager.shared.postPauseNotification(
+                title: "Still paused (\(minutes) min)",
+                body: "Nothing is being recorded. Resume when the meeting is back on, or stop the session.")
+        }
     }
 
     // MARK: - Error Surfacing
@@ -785,6 +876,10 @@ final class SessionManager {
         case .captureRestartMic:
             guard state == .live || state == .degraded else { break }
             audioCaptureManager.restartMicrophone()
+
+        case .sessionPaused(let update):
+            guard state == .live || state == .degraded || state == .priming else { break }
+            applyPause(update)
 
         case .chatMessage(let reply):
             guard let reply = menubarChat.receive(reply) else { break }

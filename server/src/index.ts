@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { unlinkSync, existsSync, mkdirSync, chmodSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -63,6 +64,7 @@ import { attachPrepToSession, prepBriefDoc } from './prep/staged.js';
 import { evidenceView, openLiveTabs, type EvidenceTabView } from './present/evidence.js';
 import { LLM_CONFIG, MODEL_CONFIG } from './model-config.js';
 import { TrackWatch, type Track, type TrackState } from './capture/track-watch.js';
+import { PauseClock, pauseMarkerText, PAUSE_MARKER_LABEL, type PauseSnapshot } from './session/pause.js';
 
 // Load environment — prefer ~/.meeting-copilot/.env so a packaged .app
 // user has a stable, user-writable location for API keys that survives
@@ -119,6 +121,9 @@ type InboundMessage =
   | { type: 'audio.flush' }
   | { type: 'session.start'; title?: string; projectNames?: string[]; agenda?: string; attendees?: string; contextPaths?: string[]; contextDirPaths?: string[] }
   | { type: 'session.stop' }
+  // Pause / Resume a live meeting (session/pause.ts). Any client may send them.
+  | { type: 'session.pause' }
+  | { type: 'session.resume' }
   | { type: 'action.approve'; actionId: string }
   | { type: 'action.dismiss'; actionId: string }
   | { type: 'action.cancel'; actionId: string }
@@ -157,6 +162,14 @@ type OutboundMessage =
   // banner while the mic is not ok; the app raises NO MIC from it too.
   | { type: 'capture.health'; mic: TrackState; meeting: TrackState }
   | { type: 'capture.restartMic' }
+  // Pause state of the live meeting. Its own message, not a session.state:
+  // the app's state machine and decoder know a fixed set (gotcha #23).
+  | ({
+      type: 'session.paused';
+      sessionId?: string;
+      /** On resume: the transcript line left where the gap was. */
+      marker?: { id: string; label: string; text: string; timestamp: number };
+    } & PauseSnapshot)
   | ChatEvent
   | {
       type: 'transcript.update';
@@ -288,6 +301,11 @@ type OutboundMessage =
 let sessionStore: SessionStore | null = null;
 let eventLogger: EventLogger | null = null;
 let sessionActive = false;
+// Paused: frames and chunks are dropped, the live stream is closed.
+const pauseClock = new PauseClock();
+// The stream drain a pause started; a quick Resume waits for it, or the old
+// stream's close would land on the new one's state.
+let pauseDrain: Promise<void> | null = null;
 
 // Post-stop lifecycle, tracked independently of sessionActive so a client that
 // (re)connects — or missed the single terminal broadcast — resolves to the
@@ -738,6 +756,10 @@ function handleWsConnection(ws: WebSocket, label: string): void {
   };
   ws.send(JSON.stringify(stateMsg));
 
+  if (sessionActive && (pauseClock.paused || pauseClock.pausedMs() > 0)) {
+    ws.send(JSON.stringify({ type: 'session.paused', sessionId: sessionStore?.id, ...pauseClock.snapshot() }));
+  }
+
   // A late-joining dashboard must see a dead mic at once, not at the next change.
   if (sessionActive && trackWatch.active) {
     const health = trackWatch.snapshot();
@@ -778,7 +800,7 @@ function handleWsConnection(ws: WebSocket, label: string): void {
     // Binary audio frame: [0x01 mic | 0x02 meeting] + 100 ms of 16 kHz PCM16.
     // JSON messages always start with '{', so the first byte tells them apart.
     if (Buffer.isBuffer(raw) && (raw[0] === AUDIO_FRAME_MIC || raw[0] === AUDIO_FRAME_MEETING)) {
-      if (sessionActive) {
+      if (sessionActive && !pauseClock.paused) {
         const track: Track = raw[0] === AUDIO_FRAME_MIC ? 'mic' : 'meeting';
         const pcm = raw.subarray(1);
         trackWatch.frame(track, pcm);
@@ -885,6 +907,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
         debugLog('[Audio] Dropping chunk because no session is active');
         break;
       }
+      if (pauseClock.paused) break; // nothing is transcribed while paused
 
       const wavBuffer = Buffer.from(message.data, 'base64');
       debugLog(`[Audio] Chunk received: ${wavBuffer.length} bytes, source: ${message.source}`);
@@ -928,6 +951,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       // A new meeting supersedes any archived/ending lifecycle from the last one.
       postSessionState = null;
       lastSessionId = null;
+      pauseClock.reset();
 
       // Create new session
       sessionStore = new SessionStore();
@@ -1156,6 +1180,7 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
           goalsProvider: () => meetingGoals,
           agendaProvider: agendaForPulse,
           coachProvider: () => sessionCoachSuggestions.map((s) => s.headline),
+          pauseProvider: () => pauseClock.snapshot(),
           talkShareProvider: () => {
             const stats = monitorSpeakerStats();
             if (!stats || stats.micWords + stats.meetingWords < 100) return '';
@@ -1183,6 +1208,12 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
       postSessionState = 'ending';
       lastSessionId = sessionStore.id;
       stopTrackWatch();
+      // Ending while paused ends the pause: no marker, nothing came after it.
+      const endedPause = pauseClock.resume();
+      if (endedPause) {
+        eventLogger?.log('session.resume', { pausedMs: endedPause.endedAt - endedPause.startedAt, atStop: true });
+        broadcast({ type: 'session.paused', sessionId: sessionStore.id, ...pauseClock.snapshot() });
+      }
 
       eventLogger?.log('session.stop', {
         sessionId: sessionStore.id,
@@ -1381,6 +1412,57 @@ async function handleInboundMessage(message: InboundMessage): Promise<void> {
           sessionId: lastSessionId ?? undefined,
         });
       }
+      break;
+    }
+
+    case 'session.pause': {
+      if (!sessionActive || !sessionStore || postSessionState === 'ending') break;
+      if (!pauseClock.pause()) {
+        // Already paused: say so again, so a client that missed it catches up.
+        broadcast({ type: 'session.paused', sessionId: sessionStore.id, ...pauseClock.snapshot() });
+        break;
+      }
+      const store = sessionStore;
+      // Paused first (frames drop from here), announced at once, then the
+      // stream drains: its last words land as usual before it closes.
+      stopTrackWatch();
+      store.updateState('paused');
+      eventLogger?.log('session.pause', {});
+      debugLog('[Session] Paused');
+      broadcast({ type: 'session.paused', sessionId: store.id, ...pauseClock.snapshot() });
+      const drain = (async () => {
+        try {
+          await streaming?.stop();
+        } catch (err) {
+          console.warn('[Streaming] stop on pause failed:', err);
+        }
+        transcriptStitcher.flushAll();
+      })();
+      pauseDrain = drain;
+      await drain;
+      if (pauseDrain === drain) pauseDrain = null;
+      break;
+    }
+
+    case 'session.resume': {
+      if (!sessionActive || !sessionStore) break;
+      const span = pauseClock.resume();
+      if (!span) break;
+      const store = sessionStore;
+      // Where the gap was, in the transcript every summary and chat reads.
+      const marker = { id: randomUUID(), label: PAUSE_MARKER_LABEL, text: pauseMarkerText(span), timestamp: span.endedAt };
+      store.addMarker(marker.id, marker.label, marker.text, marker.timestamp);
+      store.updateState('active');
+      // Announce first so the app sends again; frames before the stream is
+      // open queue in it (streaming.ts enqueue).
+      broadcast({ type: 'session.paused', sessionId: store.id, ...pauseClock.snapshot(), marker });
+      if (pauseDrain) await pauseDrain;
+      // A pause or stop that came in while the drain finished wins.
+      if (!sessionActive || sessionStore !== store || pauseClock.paused || postSessionState === 'ending') break;
+      streaming?.start(transcription.sessionPromptText);
+      startTrackWatch();
+      eventLogger?.log('session.resume', { pausedMs: span.endedAt - span.startedAt });
+      debugLog(`[Session] Resumed after ${Math.round((span.endedAt - span.startedAt) / 1000)}s`);
       break;
     }
 

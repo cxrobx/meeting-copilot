@@ -73,6 +73,8 @@ final class MenuBarFeed {
 
     private var isVisible = false
     private var levelTimer: Timer?
+    /// The meter the bars read: the session's, or the audio check's.
+    @ObservationIgnored private var levelSource: LevelMeter?
 
     // MARK: Visibility
 
@@ -88,7 +90,12 @@ final class MenuBarFeed {
     /// Start or stop the level bars to match "open and recording".
     func updateLevelSampling(session: SessionManager) {
         if isVisible && session.isRecording {
+            if levelSource !== session.audioCaptureManager.levelMeter { stopLevels() }
             startLevels(from: session.audioCaptureManager.levelMeter)
+        } else if isVisible, session.audioCheck.isRunning, let meter = session.audioCheck.capture?.levelMeter {
+            // The idle "Test audio" check: its own capture's bars.
+            if levelSource !== meter { stopLevels() }
+            startLevels(from: meter)
         } else {
             stopLevels()
         }
@@ -157,6 +164,7 @@ final class MenuBarFeed {
 
     private func startLevels(from meter: LevelMeter) {
         guard levelTimer == nil else { return }
+        levelSource = meter
         _ = meter.drain() // the peak that built up while closed isn't "now"
         meetingLevels = [Float](repeating: 0, count: Self.historyBars)
         micLevels = [Float](repeating: 0, count: Self.historyBars)
@@ -174,6 +182,7 @@ final class MenuBarFeed {
     private func stopLevels() {
         levelTimer?.invalidate()
         levelTimer = nil
+        levelSource = nil
     }
 
     private func push(_ peaks: (mic: Float, meeting: Float)) {

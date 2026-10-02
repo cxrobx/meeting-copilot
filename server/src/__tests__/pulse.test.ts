@@ -359,3 +359,51 @@ describe('askAnswerText', () => {
     expect(askAnswerText({ ...base, mode: 'pulse', trigger: 'interval' } as MeetingPulseResult)).toBeNull();
   });
 });
+
+describe('MeetingPulse while paused', () => {
+  const t0 = new Date('2026-10-02T15:00:00Z').getTime();
+  let paused: boolean;
+  let pausedMs: number;
+  let pulses: MeetingPulseResult[];
+  let pulse: MeetingPulse;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(t0);
+    paused = false;
+    pausedMs = 0;
+    pulses = [];
+    pulse = new MeetingPulse({ ask: vi.fn(async () => ANSWER), now: () => Date.now() });
+    pulse.on('pulse', (p: MeetingPulseResult) => pulses.push(p));
+    pulse.start({
+      title: 'Paused call',
+      startedAt: t0,
+      transcriptProvider: () => '[You] hello there',
+      wordCountProvider: () => 500,
+      pauseProvider: () => ({ paused, pausedMs }),
+    });
+  });
+
+  afterEach(() => {
+    pulse.stop();
+    vi.useRealTimers();
+  });
+
+  it('skips timer reads and the scheduled close-out, but answers a question asked', async () => {
+    paused = true;
+    pulse.setEndsAt(t0 + 6 * 60_000); // close-out due at minute 1
+    await vi.advanceTimersByTimeAsync(PULSE_INTERVAL_MS);
+    expect(pulses).toHaveLength(0);
+
+    pulse.requestCheckIn();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pulses).toHaveLength(1);
+    expect(pulses[0]).toMatchObject({ trigger: 'check-in' });
+  });
+
+  it('leaves paused time out of minutes in', async () => {
+    pausedMs = 4 * 60_000;
+    await vi.advanceTimersByTimeAsync(2 * PULSE_INTERVAL_MS);
+    expect(pulses[0]).toMatchObject({ trigger: 'interval', minutesIn: 1 });
+  });
+});

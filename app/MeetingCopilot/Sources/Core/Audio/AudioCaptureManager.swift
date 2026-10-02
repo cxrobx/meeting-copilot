@@ -227,6 +227,9 @@ final class AudioCaptureManager: NSObject {
     /// mic specifically and clear the alarm when audio returns.
     var onMicDead: ((String) -> Void)?
     var onMicRecovered: (() -> Void)?
+    /// The meeting track's peak over the last second, from the capture
+    /// thread. A paused meeting listens to it (PauseAlerts).
+    var onMeetingPeakSecond: ((Float) -> Void)?
 
     /// How long to wait for the mic tap's FIRST buffer before treating the
     /// engine as dead. AVAudioEngine legitimately takes a beat to spin up
@@ -571,6 +574,7 @@ final class AudioCaptureManager: NSObject {
         let now = Date()
         if now.timeIntervalSince(meetingPeakLastFlush) >= 1.0 {
             appLog("[AudioCapture] meeting peak=\(String(format: "%.4f", meetingPeakWindow))")
+            onMeetingPeakSecond?(meetingPeakWindow)
             meetingPeakWindow = 0.0
             meetingPeakLastFlush = now
         }

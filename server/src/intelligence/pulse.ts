@@ -245,6 +245,9 @@ export interface PulseStartOptions {
   agendaProvider?: () => string;
   coachProvider?: () => string[];
   talkShareProvider?: () => string;
+  /** Meeting pause (session/pause.ts): timer reads skip while paused, and
+   *  "minutes in" leaves paused time out. */
+  pauseProvider?: () => { paused: boolean; pausedMs: number };
 }
 
 interface PulseRequest {
@@ -360,6 +363,11 @@ export class MeetingPulse extends EventEmitter {
 
   private request(mode: PulseMode, trigger: PulseTrigger): void {
     if (!this.options) return;
+    // Nobody is in the room to read: the timers wait. A question asked still runs.
+    if (!isAskedTrigger(trigger) && this.options.pauseProvider?.().paused) {
+      this.emit('skipped', { reason: 'paused' });
+      return;
+    }
     // Near the calendar end every timer read becomes a close-out, so the list
     // stays current through the last minutes. A question someone asked stays
     // the question they asked.
@@ -418,7 +426,8 @@ export class MeetingPulse extends EventEmitter {
 
     const gen = this.generation;
     const now = this.now();
-    const minutesIn = Math.max(0, Math.round((now - options.startedAt) / 60_000));
+    const pausedMs = options.pauseProvider?.().pausedMs ?? 0;
+    const minutesIn = Math.max(0, Math.round((now - options.startedAt - pausedMs) / 60_000));
     const minutesLeft = this.endsAt === null ? null : Math.round((this.endsAt - now) / 60_000);
     const prompt = buildPulsePrompt({
       title: options.title ?? '',

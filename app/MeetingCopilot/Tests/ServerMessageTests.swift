@@ -33,6 +33,32 @@ final class ServerMessageTests: XCTestCase {
         }
     }
 
+    // MARK: - Pause (server/src/session/pause.ts)
+
+    func testSessionPausedDecodesThePauseAndTheResume() throws {
+        // Captured from the server's WebSocket (e2e/09-pause.spec.ts), 2026-10-02.
+        let paused = try decode(#"{"type":"session.paused","sessionId":"a1","paused":true,"pausedAt":1791000000123,"pausedMs":4000}"#)
+        guard case .sessionPaused(let p) = paused else { return XCTFail("expected .sessionPaused, got \(paused)") }
+        XCTAssertTrue(p.paused)
+        XCTAssertEqual(p.pausedAt, Date(timeIntervalSince1970: 1_791_000_000.123))
+        XCTAssertEqual(p.pausedMs, 4000)
+
+        let resumed = try decode(#"{"type":"session.paused","sessionId":"a1","paused":false,"pausedAt":null,"pausedMs":64000,"marker":{"id":"m1","label":"[Paused]","text":"Paused 1 min (2:02 PM–2:03 PM). Nothing was recorded.","timestamp":1791000064123}}"#)
+        guard case .sessionPaused(let r) = resumed else { return XCTFail("expected .sessionPaused, got \(resumed)") }
+        XCTAssertFalse(r.paused)
+        XCTAssertNil(r.pausedAt)
+        XCTAssertEqual(r.pausedMs, 64000)
+    }
+
+    func testPauseAndResumeEncodeWhatTheServerReads() throws {
+        func json(_ message: ClientMessage) throws -> [String: String] {
+            let data = try JSONEncoder.copilotEncoder.encode(message)
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: String])
+        }
+        XCTAssertEqual(try json(.sessionPause), ["type": "session.pause"])
+        XCTAssertEqual(try json(.sessionResume), ["type": "session.resume"])
+    }
+
     func testMessagesTheAppDoesNotHandleStillDecode() throws {
         // The dashboard's own messages (coach.history, factcheck.flag, …) reach
         // the app's socket too; an unknown type must never fail the decode.

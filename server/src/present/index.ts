@@ -3774,6 +3774,32 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer;
 }
 .cap-banner button:hover { background: rgba(255,255,255,0.15); }
+/* Meeting paused (session/pause.ts): nothing is recorded or sent until Resume. */
+.pause-banner {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 16px;
+  background: rgb(var(--warning, 255 159 10));
+  color: #1a1a1a;
+  font-weight: 600; font-size: 13px;
+}
+.pause-banner[hidden] { display: none; }
+.pause-banner .pause-text { flex: 1; }
+.pause-banner .pause-since { font-variant-numeric: tabular-nums; font-weight: 500; opacity: 0.8; }
+.pause-banner button {
+  border: 1px solid rgba(0,0,0,0.55); background: transparent; color: inherit;
+  border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer;
+}
+.pause-banner button:hover { background: rgba(0,0,0,0.08); }
+.audio-indicator.paused { color: rgb(var(--warning, 255 159 10)); }
+.audio-indicator.paused .audio-dot { background: currentColor; animation: none; opacity: 1; }
+.audio-indicator.paused .audio-wave { visibility: hidden; }
+/* Where a pause was, in the transcript. */
+.seg.pause-mark {
+  margin: 6px 0; padding: 6px 4px 0;
+  border: 0; border-top: 1px dashed rgb(var(--text-muted) / 0.6);
+  background: none; text-align: center;
+  font-size: 11px; color: rgb(var(--text-muted));
+}
 </style>
 </head>
 <body>
@@ -3788,19 +3814,25 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   <div class="header-right">
     <span class="audio-indicator" id="audioIndicator">
       <span class="audio-dot" id="audioDot"></span>
-      <span>REC</span>
+      <span id="audioLabel">REC</span>
       <span class="audio-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
     </span>
     <span class="ending-hint" id="endingHint" style="display:none"></span>
     <span class="state-pill idle" id="statePill">Idle</span>
     <span class="session-timer" id="sessionTimer"></span>
     <button class="btn btn-ghost" id="newMeetingBtn" style="display:none" onclick="newMeeting()">&larr; New Meeting</button>
+    <button class="btn btn-ghost" id="pauseBtn" type="button" data-pause-act="toggle" style="display:none" title="Pause: nothing is recorded or sent until you resume">Pause</button>
     <button class="btn btn-green" id="startStopBtn" style="display:none" onclick="toggleSession()">Start</button>
     <button class="btn btn-ghost btn-sm" id="themeBtn" onclick="toggleTheme()" aria-label="Toggle light and dark theme" title="Toggle theme"></button>
     <button class="btn btn-ghost btn-sm" id="chatBtn" type="button" data-chat-act="toggle" aria-pressed="false" aria-controls="chatDrawer" title="Chat about the meeting (&#8984;J)">Chat</button>
     <button class="btn btn-ghost btn-sm" id="stageBtn" onclick="toggleStage()" aria-label="Stage view" title="Stage view (declutters to transcript + prompts)">Stage</button>
     <button class="btn btn-ghost btn-sm" id="settingsBtn" onclick="openSettings()" aria-label="Settings" title="Settings">&#9881;</button>
   </div>
+</div>
+
+<div class="pause-banner" id="pauseBanner" role="status" hidden>
+  <span class="pause-text">Paused. Nothing is being recorded or sent. <span class="pause-since" id="pauseSince"></span></span>
+  <button type="button" data-pause-act="resume">Resume</button>
 </div>
 
 <div class="cap-banner" id="capBanner" role="alert" hidden>
@@ -4993,9 +5025,10 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     stopTimer();
     timerInterval = setInterval(function() {
       if (sessionStartTime) {
-        sessionTimerEl.textContent = formatDuration(Date.now() - sessionStartTime);
+        sessionTimerEl.textContent = formatDuration(Date.now() - sessionStartTime - pausePausedMs());
         if (stageActive) stageTimerEl.textContent = sessionTimerEl.textContent;
       }
+      pauseRender();
     }, 1000);
   }
   function stopTimer() {
@@ -5233,6 +5266,8 @@ export const PRESENT_HTML = `<!DOCTYPE html>
         }
       }
     }
+
+    pauseRender();
 
     // Stats bar
     var showStats = sessionState === 'live' || sessionState === 'degraded' || isReplay;
@@ -8273,6 +8308,13 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   };
 
   function addSegment(seg) {
+    if (seg.source === 'system') {
+      if (seg.id != null && segById.has(seg.id)) return;
+      segments.push(seg);
+      var markEl = renderSegment(seg);
+      if (markEl && seg.id != null) segById.set(seg.id, { el: markEl, wordCount: 0, source: 'system' });
+      return;
+    }
     var wc = seg.wordCount || (seg.text ? seg.text.split(/\\s+/).filter(Boolean).length : 0);
     var prior = (seg.id != null && seg.replace) ? segById.get(seg.id) : null;
 
@@ -8343,6 +8385,16 @@ export const PRESENT_HTML = `<!DOCTYPE html>
   // Build a segment row element (no insertion — renderSegment and the
   // show-older re-render both use this).
   function buildSegmentEl(seg) {
+    if (seg.source === 'system') {
+      // Not speech: where a pause was (session/pause.ts).
+      var mark = document.createElement('div');
+      mark.className = 'seg pause-mark';
+      mark.dataset.source = 'system';
+      mark.dataset.text = (seg.text || '').toLowerCase();
+      if (seg.id != null) mark.dataset.segId = seg.id;
+      mark.textContent = seg.text || '';
+      return mark;
+    }
     var srcClass = seg.source === 'mic' ? 'mic' : 'meeting';
     var srcLabel = seg.source === 'mic' ? 'You' : 'Meeting';
     var signals = detectSignals(seg.text);
@@ -8462,7 +8514,7 @@ export const PRESENT_HTML = `<!DOCTYPE html>
       return;
     }
     transcriptFeed.querySelectorAll('.seg').forEach(function(el) {
-      var matchSource = currentFilter === 'all' || el.dataset.source === currentFilter;
+      var matchSource = currentFilter === 'all' || el.dataset.source === currentFilter || el.dataset.source === 'system';
       var matchSearch = !search || el.dataset.text.includes(search);
       el.style.display = (matchSource && matchSearch) ? '' : 'none';
     });
@@ -9862,6 +9914,54 @@ export const PRESENT_HTML = `<!DOCTYPE html>
     });
   };
 
+  // ─── Pause / Resume ───────────────────────────────────────
+  // The server owns it (session/pause.ts); this page shows it and asks.
+  // Names carry a pause prefix: one script scope (gotcha #24).
+  var pauseState = { paused: false, pausedAt: null, pausedMs: 0, at: 0 };
+  function pausePausedMs() {
+    // pausedMs was true when the message arrived; an open pause keeps growing.
+    if (!pauseState) return 0; // updateUI can run before this block does
+    return pauseState.pausedMs + (pauseState.paused ? Date.now() - pauseState.at : 0);
+  }
+  function pauseOnState(msg) {
+    pauseState = { paused: !!msg.paused, pausedAt: msg.pausedAt || null, pausedMs: msg.pausedMs || 0, at: Date.now() };
+    if (msg.marker) addSegment({ id: msg.marker.id, text: msg.marker.text, label: msg.marker.label, source: 'system', timestamp: msg.marker.timestamp, wordCount: 0 });
+    pauseRender();
+  }
+  function pauseReset() {
+    pauseState = { paused: false, pausedAt: null, pausedMs: 0, at: 0 };
+    pauseRender();
+  }
+  function pauseRender() {
+    if (!pauseState) return;
+    var live = (sessionState === 'live' || sessionState === 'degraded') && !isReplay;
+    var paused = live && pauseState.paused;
+    var btn = document.getElementById('pauseBtn');
+    if (btn) {
+      btn.style.display = live ? '' : 'none';
+      btn.textContent = paused ? 'Resume' : 'Pause';
+      btn.dataset.pauseAct = paused ? 'resume' : 'pause';
+      btn.title = paused ? 'Resume recording' : 'Pause: nothing is recorded or sent until you resume';
+    }
+    var banner = document.getElementById('pauseBanner');
+    if (banner) banner.hidden = !paused;
+    var since = document.getElementById('pauseSince');
+    if (since) since.textContent = paused && pauseState.pausedAt ? 'Paused for ' + formatDuration(Date.now() - pauseState.pausedAt) + '.' : '';
+    var ind = document.getElementById('audioIndicator');
+    if (ind) ind.classList.toggle('paused', paused);
+    var label = document.getElementById('audioLabel');
+    if (label) label.textContent = paused ? 'PAUSED' : 'REC';
+  }
+  document.addEventListener('click', function(e) {
+    var btn = e.target && e.target.closest ? e.target.closest('[data-pause-act]') : null;
+    if (!btn) return;
+    var act = btn.dataset.pauseAct;
+    if (act === 'toggle') act = pauseState.paused ? 'resume' : 'pause';
+    if (!wsSend({ type: act === 'resume' ? 'session.resume' : 'session.pause' })) {
+      showToast('Not connected \u2014 could not ' + act + ' the meeting. Try again in a moment.', { error: true });
+    }
+  });
+
   // ─── Capture health banner ────────────────────────────────
   // The server's own watchdog (capture/track-watch.ts) says a track is not
   // arriving. Only the mic gets a banner: it is the side nothing else reports.
@@ -9990,6 +10090,9 @@ export const PRESENT_HTML = `<!DOCTYPE html>
         case 'capture.health':
           capShowHealth(msg);
           break;
+        case 'session.paused':
+          pauseOnState(msg);
+          break;
         case 'chat.message':
         case 'chat.delta':
           chatOnSocket(msg);
@@ -10003,7 +10106,8 @@ export const PRESENT_HTML = `<!DOCTYPE html>
             if (sessionState !== 'idle') window.newMeeting();
             break;
           }
-          if (msg.sessionId && sessionId && msg.sessionId !== sessionId) resetIntelWarn();
+          if (msg.sessionId && sessionId && msg.sessionId !== sessionId) { resetIntelWarn(); pauseReset(); }
+          if (msg.state !== 'live' && msg.state !== 'degraded') pauseReset();
           sessionState = msg.state;
           sessionId = msg.sessionId || sessionId;
           // Adopt the server's authoritative start time whenever it sends one.

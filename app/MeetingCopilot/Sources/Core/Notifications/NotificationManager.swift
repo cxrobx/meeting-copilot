@@ -120,6 +120,24 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         center.removeDeliveredNotifications(withIdentifiers: ["mic-dead"])
     }
 
+    /// A paused meeting that may have been forgotten: the reminder, or sound
+    /// on the meeting track. Like the mic warning, not gated on the panel
+    /// being in front, and with sound. One banner, replaced by the next.
+    func postPauseNotification(title: String, body: String) {
+        guard hasPermission else { return }
+        center.removeDeliveredNotifications(withIdentifiers: ["paused"])
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.threadIdentifier = "capture"
+        center.add(UNNotificationRequest(identifier: "paused", content: content, trigger: nil))
+    }
+
+    func clearPauseNotification() {
+        center.removeDeliveredNotifications(withIdentifiers: ["paused"])
+    }
+
     /// One of the coach's questions, asked from a button or a ⌃⌥ hotkey. One
     /// banner per question: the answer replaces the "Reading the meeting…"
     /// banner. Silent, unlike the close-out: the meeting track taps system

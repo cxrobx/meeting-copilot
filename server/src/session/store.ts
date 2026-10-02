@@ -295,6 +295,15 @@ export class SessionStore {
     );
   }
 
+  /** A row that is not speech: where a pause was (session/pause.ts). Source
+   *  'system', no words, so talk-share and word counts are unchanged. */
+  addMarker(id: string, label: string, text: string, timestamp: number): void {
+    this.db.prepare(
+      `INSERT INTO transcript (id, sessionId, text, source, label, timestamp, duration, wordCount, redacted)
+       VALUES (?, ?, ?, 'system', ?, ?, 0, 0, 0)`,
+    ).run(id, this.sessionId, text, label, timestamp);
+  }
+
   addAction(action: {
     id: string;
     type: string;

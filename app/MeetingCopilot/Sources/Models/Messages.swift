@@ -5,6 +5,9 @@ import Foundation
 enum ClientMessage: Encodable {
     case sessionStart(title: String? = nil, projectNames: [String]? = nil, agenda: String? = nil, attendees: String? = nil, contextPaths: [String]? = nil)
     case sessionStop
+    /// Pause / Resume the live meeting (server/src/session/pause.ts).
+    case sessionPause
+    case sessionResume
     // Audio chunk with capture metadata. Server measures true e2e latency as
     // (now on receive of transcript broadcast) - captureEndedAt. `sequence`
     // is per-source so out-of-order delivery is detectable. `isContinuation`
@@ -60,6 +63,10 @@ enum ClientMessage: Encodable {
             try container.encodeIfPresent(contextPaths, forKey: .contextPaths)
         case .sessionStop:
             try container.encode("session.stop", forKey: .type)
+        case .sessionPause:
+            try container.encode("session.pause", forKey: .type)
+        case .sessionResume:
+            try container.encode("session.resume", forKey: .type)
         case .audioChunk(let data, let source, let chunkId, let audioDurationSec, let captureStartedAt, let captureEndedAt, let sequence, let isContinuation):
             try container.encode("audio_chunk", forKey: .type)
             try container.encode(data, forKey: .data)
@@ -124,10 +131,12 @@ enum ServerMessage: Decodable {
     /// A message in the meeting chat (server/src/chat/service.ts): a question,
     /// or an answer as it starts and when it ends.
     case chatMessage(ChatReply)
+    /// The live meeting was paused or resumed (server/src/session/pause.ts).
+    case sessionPaused(PauseUpdate)
 
     private enum CodingKeys: String, CodingKey {
         case type, segment, action, actionId, state, result, sessionId, data, body, pulse,
-             kind, phase, title, empty, mic, meeting, message
+             kind, phase, title, empty, mic, meeting, message, paused, pausedAt, pausedMs
     }
 
     init(from decoder: Decoder) throws {
@@ -183,6 +192,14 @@ enum ServerMessage: Decodable {
             )
         case "capture.restartMic":
             self = .captureRestartMic
+        case "session.paused":
+            // pausedAt is epoch ms or null; a missing field reads as not paused.
+            let pausedAtMs = try? container.decodeIfPresent(Double.self, forKey: .pausedAt)
+            self = .sessionPaused(PauseUpdate(
+                paused: (try? container.decodeIfPresent(Bool.self, forKey: .paused)) ?? false,
+                pausedAt: pausedAtMs.map { Date(timeIntervalSince1970: $0 / 1000) },
+                pausedMs: (try? container.decodeIfPresent(Double.self, forKey: .pausedMs)) ?? 0
+            ))
         case "chat.message":
             // Only the menu bar reads these; a shape it can't read must not
             // fail the decode (gotcha #23).
@@ -196,6 +213,17 @@ enum ServerMessage: Decodable {
             self = .metrics(DebugMetrics(transcriptLatencyMs: nil, activeWorkers: nil, audioBufferSizeBytes: nil, serverUptime: nil))
         }
     }
+}
+
+// MARK: - Pause
+
+/// `session.paused` in server/src/index.ts.
+struct PauseUpdate: Equatable {
+    let paused: Bool
+    /// When the current pause began; nil while running.
+    let pausedAt: Date?
+    /// All paused time so far, the current pause included, as of the message.
+    let pausedMs: Double
 }
 
 // MARK: - Coach Questions

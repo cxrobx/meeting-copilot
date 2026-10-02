@@ -77,6 +77,9 @@ struct MenuBarView: View {
         .onChange(of: sessionManager.isRecording) {
             feed.updateLevelSampling(session: sessionManager)
         }
+        .onChange(of: sessionManager.audioCheck.isRunning) {
+            feed.updateLevelSampling(session: sessionManager)
+        }
     }
 
     // MARK: Header
@@ -106,6 +109,9 @@ struct MenuBarView: View {
 
     private var headerStatus: (kind: StatusDot.Kind, label: String) {
         if sessionManager.serverStartFailed { return (.bad, "Server down") }
+        if sessionManager.isPaused, sessionManager.state == .live || sessionManager.state == .degraded {
+            return (.warn, "Paused")
+        }
         switch sessionManager.state {
         case .priming:  return (.warn, "Starting…")
         case .live:     return (.recording, "Recording")
@@ -171,6 +177,8 @@ private struct IdleSection: View {
             close(); actions.startSession()
         }
 
+        AudioCheckCard(check: sessionManager.audioCheck, feed: feed)
+
         if let meeting = feed.nextMeeting {
             NextMeetingCard(meeting: meeting, enabled: sessionManager.serverReady) {
                 close(); actions.setUpInvite(meeting.key)
@@ -194,6 +202,77 @@ private struct IdleSection: View {
                     }
                 }
             }
+        }
+    }
+}
+
+/// "Test audio": both tracks for a few seconds with no session (AudioCheck).
+private struct AudioCheckCard: View {
+    let check: AudioCheck
+    let feed: MenuBarFeed
+    @Environment(\.menuBarTheme) private var theme
+
+    var body: some View {
+        switch check.phase {
+        case .idle:
+            HStack(spacing: 8) {
+                Text("Check both tracks before a meeting")
+                    .font(theme.font(11))
+                    .foregroundStyle(theme.textMuted)
+                Spacer()
+                Button("Test audio") { check.start() }
+                    .buttonStyle(PillButtonStyle(kind: .normal, small: true))
+                    .help("Listen to your mic and the meeting audio for a few seconds. Nothing is recorded or sent.")
+            }
+        case .running(let heardMic, let heardMeeting):
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Text("Testing audio… say a few words")
+                        .font(theme.font(11.5, .semibold))
+                    Spacer()
+                    Button("Cancel") { Task { await check.cancel() } }
+                        .buttonStyle(PillButtonStyle(kind: .normal, small: true))
+                }
+                TrackRow(name: "Meeting", levels: feed.meetingLevels, color: theme.accent)
+                TrackRow(name: "You", levels: feed.micLevels, color: theme.success)
+                Text("\(heardMic ? "You ✓" : "You …")   \(heardMeeting ? "Meeting ✓" : "Meeting …")")
+                    .font(theme.font(11, .semibold))
+                Text("Nothing is recorded or sent. A faint test tone plays so the meeting track has something to hear.")
+                    .font(theme.font(10.5))
+                    .foregroundStyle(theme.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .modifier(CardStyle(border: theme.borderSubtle))
+        case .done(let outcome):
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(outcome.passed ? "✓ Both tracks heard" : "Audio check found a problem")
+                        .font(theme.font(11.5, .semibold))
+                        .foregroundStyle(outcome.passed ? theme.success : theme.warning)
+                    Spacer()
+                    ChipButton(text: "again", help: "Run the check again") { check.start() }
+                    ChipButton(text: "×", help: "Dismiss") { check.dismissResult() }
+                }
+                if outcome.error == nil {
+                    Text("You: \(Self.word(outcome.mic)) · Meeting: \(Self.word(outcome.meeting))")
+                        .font(theme.font(10.5))
+                        .foregroundStyle(theme.textMuted)
+                }
+                ForEach(outcome.advice, id: \.self) { line in
+                    Text(line)
+                        .font(theme.font(10.5))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .modifier(CardStyle(border: outcome.passed ? theme.success.opacity(0.5) : theme.warning.opacity(0.6)))
+        }
+    }
+
+    private static func word(_ v: AudioCheck.Verdict) -> String {
+        switch v {
+        case .heard: return "heard"
+        case .zeros: return "silence only"
+        case .nothing: return "nothing"
         }
     }
 }
@@ -397,7 +476,14 @@ private struct RecordingCard: View {
                 }
                 .padding(.vertical, 10)
 
-                if let warning = sessionManager.captureWarning {
+                if sessionManager.isPaused {
+                    // Chosen, not a fault: a plain note, not the warning box.
+                    Text("Nothing is being recorded or sent until you resume.")
+                        .font(theme.font(11))
+                        .foregroundStyle(theme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.bottom, 10)
+                } else if let warning = sessionManager.captureWarning {
                     WarningBox(title: "A track has gone silent", detail: warning)
                         .padding(.bottom, 10)
                 }
@@ -422,6 +508,9 @@ private struct RecordingCard: View {
                     }
                 } else {
                     HStack(spacing: 6) {
+                        Button(sessionManager.isPaused ? "Resume" : "Pause") { sessionManager.togglePause() }
+                            .buttonStyle(PillButtonStyle(kind: sessionManager.isPaused ? .primary : .normal))
+                            .help(sessionManager.isPaused ? "Resume recording" : "Pause: nothing is recorded or sent until you resume")
                         Button("Stop session") { sessionManager.stopSession() }
                             .buttonStyle(PillButtonStyle(kind: .danger, fullWidth: true))
                         Button("Panel") { close(); actions.togglePanel() }
@@ -431,12 +520,16 @@ private struct RecordingCard: View {
                 }
             }
         }
-        .modifier(CardStyle(border: theme.danger.opacity(0.4), tint: theme.danger.opacity(0.15)))
+        .modifier(CardStyle(border: cardColor.opacity(0.4), tint: cardColor.opacity(0.15)))
     }
+
+    private var cardColor: Color { sessionManager.isPaused ? theme.warning : theme.danger }
 
     @ViewBuilder
     private var stateLabel: some View {
         switch state {
+        case .live where sessionManager.isPaused, .degraded where sessionManager.isPaused:
+            RecLabel(text: "PAUSED", color: theme.warning, pulsing: false)
         case .live:
             RecLabel(text: "REC", color: theme.danger, pulsing: true)
         case .degraded:

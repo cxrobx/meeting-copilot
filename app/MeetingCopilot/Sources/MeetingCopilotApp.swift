@@ -33,6 +33,17 @@ struct MenuBarLabel: View {
     var body: some View {
         Group {
             switch sessionManager.state {
+            case .live where sessionManager.isPaused, .degraded where sessionManager.isPaused:
+                // Paused: not recording, and must not look like it is. The
+                // timer stays, frozen, so a forgotten pause is still visible.
+                HStack(spacing: 4) {
+                    menuBarGhost
+                    Image(systemName: "pause.fill")
+                    Text("PAUSED \(Self.elapsedText(sessionManager.sessionElapsedTime))")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .monospacedDigit()
+                }
+                .foregroundStyle(.yellow)
             case .live where sessionManager.micDead, .degraded where sessionManager.micDead:
                 // Your side isn't being heard: this has to be impossible to
                 // miss, so it replaces the REC timer until the mic recovers.
