@@ -181,7 +181,8 @@ Important:
 
       try {
         if (file.path.endsWith('.js') || file.path.endsWith('.mjs')) {
-          await execFileAsync('node', ['--check', filePath], { timeout: 5_000 });
+          // The server's own Node: a downloaded app has no `node` on PATH.
+          await execFileAsync(process.execPath, ['--check', filePath], { timeout: 5_000 });
         } else if (file.path.endsWith('.py')) {
           await execFileAsync(
             'python3',

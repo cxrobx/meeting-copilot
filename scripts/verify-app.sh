@@ -108,18 +108,18 @@ vad_model_bytes="$(stat -f%z "$APP_BUNDLE/Contents/Resources/models/ggml-silero-
 [ "$vad_model_bytes" -ge 500000 ] \
   || fail "Bundled VAD model looks truncated ($vad_model_bytes bytes)"
 
-RUNTIME_NODE=""
-for candidate in /opt/homebrew/bin/node /usr/local/bin/node; do
-  if [ -x "$candidate" ]; then
-    RUNTIME_NODE="$candidate"
-    break
-  fi
-done
-[ -n "$RUNTIME_NODE" ] || fail "No runtime Node found in /opt/homebrew/bin or /usr/local/bin"
+# The app runs the server on its own Node, never the system's (gotcha #14).
+BUNDLED_NODE="$APP_BUNDLE/Contents/Resources/node/bin/node"
+[ -x "$BUNDLED_NODE" ] || fail "Bundle is incomplete; missing Contents/Resources/node/bin/node"
+PINNED_NODE="$("$SCRIPT_DIR/fetch-node.sh")" || fail "Couldn't get the pinned Node (scripts/fetch-node.sh)"
+bundled_node_version="$("$BUNDLED_NODE" --version)" \
+  || fail "The bundled Node does not run"
+[ "$bundled_node_version" = "$("$PINNED_NODE" --version)" ] \
+  || fail "The bundled Node is $bundled_node_version, but fetch-node.sh pins $("$PINNED_NODE" --version)"
 
 sqlite_module="$APP_BUNDLE/Contents/Resources/server/node_modules/better-sqlite3"
-"$RUNTIME_NODE" -e 'require(process.argv[1])' "$sqlite_module" \
-  || fail "Bundled better-sqlite3 does not load under $RUNTIME_NODE"
+"$BUNDLED_NODE" -e 'require(process.argv[1])' "$sqlite_module" \
+  || fail "Bundled better-sqlite3 does not load under the bundled Node"
 
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE" \
   || fail "Code-signature verification failed"
@@ -132,7 +132,7 @@ fi
 
 echo "Verified Meeting Copilot $APP_VERSION"
 echo "  Bundle: $APP_BUNDLE"
-echo "  Node:   $RUNTIME_NODE ($("$RUNTIME_NODE" --version))"
+echo "  Node:   bundled $bundled_node_version"
 if grep -q '^Authority=Developer ID Application:' <<< "$signature_info"; then
   echo "  Sign:   Developer ID"
 else

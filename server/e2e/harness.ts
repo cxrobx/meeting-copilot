@@ -23,12 +23,22 @@ const PACKAGED_SERVER = join(REPO_DIR, 'dist', 'Meeting Copilot.app', 'Contents'
 const SOCKET_PATH_LIMIT = 104;
 const CLOSED_PORT_URL = 'http://127.0.0.1:9';
 
-/** The Node ProcessSupervisor and ship.sh run the server with, in the same order. */
-export function runtimeNode(): string {
-  for (const candidate of ['/opt/homebrew/bin/node', '/usr/local/bin/node']) {
-    if (existsSync(candidate)) return candidate;
+/**
+ * The Node to run the server under. A packaged server runs on the app's own
+ * Node (Contents/Resources/node, the one ProcessSupervisor spawns), so the
+ * gate tests that binary; ship.sh also names it in MC_E2E_NODE. A checkout's
+ * server runs on the Node running this test, which is the pinned one under
+ * ship.sh and must match the checkout's better-sqlite3 ABI anyway.
+ */
+export function runtimeNode(serverDir: string): string {
+  const named = process.env.MC_E2E_NODE;
+  if (named) {
+    if (!existsSync(named)) throw new Error(`MC_E2E_NODE names a Node that does not exist: ${named}`);
+    return named;
   }
-  throw new Error('No runtime Node in /opt/homebrew/bin or /usr/local/bin (the one the app runs the server with).');
+  const bundled = join(serverDir, '..', 'node', 'bin', 'node');
+  if (existsSync(bundled)) return bundled;
+  return process.execPath;
 }
 
 function freePort(): Promise<number> {
@@ -61,7 +71,7 @@ export default async function globalSetup(config: FullConfig): Promise<() => Pro
   if (!existsSync(entry)) {
     throw new Error(`No server to test at ${entry}. Package it first (./scripts/build-app.sh), or set MC_E2E_SERVER.`);
   }
-  const node = runtimeNode();
+  const node = runtimeNode(serverDir);
   // Said plainly, rather than as six launch failures.
   if (!existsSync(webkit.executablePath())) {
     throw new Error('Playwright\'s WebKit is not installed. Run: cd server && npx playwright install webkit');

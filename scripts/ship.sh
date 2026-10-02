@@ -10,13 +10,10 @@ INSTALLED_APP="/Applications/$APP_NAME.app"
 COPILOT_PORT="${COPILOT_PORT:-17890}"
 HEALTH_URL="http://127.0.0.1:$COPILOT_PORT/health"
 
-RUNTIME_NODE=""
-for candidate in /opt/homebrew/bin/node /usr/local/bin/node; do
-  if [ -x "$candidate" ]; then
-    RUNTIME_NODE="$candidate"
-    break
-  fi
-done
+# The pinned Node (scripts/fetch-node.sh): the one the app bundles, so the
+# tests and the gate run on the runtime that ships. Empty only when it can't be
+# fetched; the test step stops on that.
+RUNTIME_NODE="$("$SCRIPT_DIR/fetch-node.sh" 2>/dev/null || true)"
 
 fail() {
   echo "ERROR: $*" >&2
@@ -151,13 +148,10 @@ echo ""
 ensure_no_active_meeting
 
 echo "[1/5] Running release tests..."
-# Pin Node the same way build-app.sh does. The server's better-sqlite3 is
-# compiled against the RUNTIME Node (/usr/local/bin, ABI 115); an nvm shell
-# (Node 24, ABI 137) loads the wrong ABI and every SessionStore/calendar test
-# dies with NODE_MODULE_VERSION before a single real assertion runs. That is a
-# property of the shell, not of the code being shipped — so pin it here rather
-# than let a green tree look broken at the gate.
-[ -n "$RUNTIME_NODE" ] || fail "No system Node in /opt/homebrew/bin or /usr/local/bin; cannot run release tests against the runtime ABI."
+# Pin Node the same way build-app.sh does: the server's better-sqlite3 is
+# compiled against the pinned Node's ABI, and whatever Node the shell has on
+# PATH (nvm, Homebrew) must not decide what the gate runs on (gotcha #14).
+[ -n "$RUNTIME_NODE" ] || fail "Couldn't get the pinned Node (scripts/fetch-node.sh); cannot run release tests against the runtime ABI."
 (cd "$PROJECT_DIR/server" && PATH="$(dirname "$RUNTIME_NODE"):$PATH" npm test)
 (cd "$PROJECT_DIR/app/MeetingCopilot" && swift test)
 
@@ -174,8 +168,12 @@ echo ""
 echo "[3/5] Browser smoke test (WebKit) against the packaged server..."
 E2E_OUT="$PROJECT_DIR/dist/e2e"
 # MC_E2E_SERVER is set here, not inherited: the gate tests what ships.
+# MC_E2E_NODE is the packaged app's own Node, so the gate runs the server on
+# the exact binary (and signature) that ships.
 if ! (cd "$PROJECT_DIR/server" && PATH="$(dirname "$RUNTIME_NODE"):$PATH" \
-      MC_E2E_SERVER="$PACKAGED_APP/Contents/Resources/server" MC_E2E_OUT="$E2E_OUT" npm run --silent e2e); then
+      MC_E2E_SERVER="$PACKAGED_APP/Contents/Resources/server" \
+      MC_E2E_NODE="$PACKAGED_APP/Contents/Resources/node/bin/node" \
+      MC_E2E_OUT="$E2E_OUT" npm run --silent e2e); then
   fail "The browser smoke test failed, so the installed app was not touched. Screenshots, traces and the test server's log are in $E2E_OUT (open a trace: cd server && npx playwright show-trace <its trace.zip>)."
 fi
 

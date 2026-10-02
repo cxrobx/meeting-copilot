@@ -398,16 +398,20 @@ final class ProcessSupervisor {
         NotificationManager.shared.postServerCrashLoopNotification()
     }
 
-    /// Resolve Node to an absolute path using the same ranked list that
-    /// scripts/build-app.sh uses when compiling native modules. Falling back
-    /// to `env node` lets the PATH the Swift app inherits from its launcher
-    /// (shell / Finder / Xcode) pick a different Node — and when nvm's v24
-    /// (ABI 137) ends up ahead of /usr/local/bin's v20 (ABI 115), the
-    /// better-sqlite3 native module built at bundle time fails to load at
-    /// runtime (gotcha #14). Resolving to an absolute path is immune to
-    /// inherited PATH.
+    /// Resolve Node to an absolute path. A packaged app runs the Node it ships
+    /// (Contents/Resources/node, pinned by scripts/fetch-node.sh), the same
+    /// binary build-app.sh compiled better-sqlite3 against, so the ABI always
+    /// matches (gotcha #14) and the app needs no Node installed. A dev build
+    /// uses the pinned Node fetch-node.sh keeps in its cache, then the system's
+    /// as before. Never `env node`: the PATH the app inherits from its launcher
+    /// (shell / Finder / Xcode) could pick any Node.
     private var nodeBinaryPath: String? {
+        if isPackaged, let res = Bundle.main.resourcePath {
+            let bundled = "\(res)/node/bin/node"
+            if FileManager.default.isExecutableFile(atPath: bundled) { return bundled }
+        }
         let candidates = [
+            NSString("~/Library/Caches/meeting-copilot/node/current/bin/node").expandingTildeInPath,
             "/opt/homebrew/bin/node",
             "/usr/local/bin/node",
         ]
@@ -431,13 +435,13 @@ final class ProcessSupervisor {
         if FileManager.default.fileExists(atPath: distPath), let nodePath = nodeBinaryPath {
             process.executableURL = URL(fileURLWithPath: nodePath)
             process.arguments = ["dist/index.js"]
-            print("[ProcessSupervisor] Spawning server with \(nodePath)")
+            appLog("[ProcessSupervisor] Spawning server with \(nodePath)")
         } else if FileManager.default.fileExists(atPath: distPath) {
             // Fallback: no system Node on the usual paths — best-effort via env.
             // Likely to hit ABI mismatch but at least tries to start.
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             process.arguments = ["node", "dist/index.js"]
-            print("[ProcessSupervisor] WARNING: no /opt/homebrew/bin/node or /usr/local/bin/node — falling back to env node")
+            print("[ProcessSupervisor] WARNING: no bundled, pinned or system Node — falling back to env node")
         } else {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             process.arguments = ["npx", "tsx", "src/index.ts"]

@@ -24,25 +24,15 @@ echo ""
 
 # ── Pin Node ─────────────────────────────────────────────────────────────
 #
-# ProcessSupervisor spawns the server via `/usr/bin/env node` with PATH
-# prepended to include /opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin.
-# If the shell running this script has a DIFFERENT Node on PATH (common with
-# nvm / fnm), npm will compile native modules like better-sqlite3 against an
-# ABI the runtime Node can't load — "NODE_MODULE_VERSION" mismatch at
-# session.start. Pin to the exact Node ProcessSupervisor will use so the
-# bundle is self-consistent.
-RUNTIME_NODE=""
-for candidate in /opt/homebrew/bin/node /usr/local/bin/node; do
-  if [ -x "$candidate" ]; then
-    RUNTIME_NODE="$candidate"
-    break
-  fi
-done
-if [ -z "$RUNTIME_NODE" ]; then
-  echo "ERROR: No system Node found in /opt/homebrew/bin or /usr/local/bin."
-  echo "       Install via \`brew install node\` so the runtime + build use the same ABI."
+# The app ships its own Node (Contents/Resources/node), pinned by
+# fetch-node.sh, and this same binary compiles the server's native modules.
+# Build Node == runtime Node by construction, so better-sqlite3 can never be
+# built against an ABI the runtime can't load (gotcha #14), whatever nvm or
+# Homebrew has on PATH.
+RUNTIME_NODE="$("$SCRIPT_DIR/fetch-node.sh")" || {
+  echo "ERROR: Couldn't get the pinned Node (scripts/fetch-node.sh)."
   exit 1
-fi
+}
 RUNTIME_NODE_DIR="$(dirname "$RUNTIME_NODE")"
 export PATH="$RUNTIME_NODE_DIR:$PATH"
 echo "  Using Node: $RUNTIME_NODE ($("$RUNTIME_NODE" --version))"
@@ -132,15 +122,22 @@ echo "  Copied vendored dashboard assets"
 # Copy production node_modules
 cp -R "$PROD_STAGING/node_modules" "$APP_BUNDLE/Contents/Resources/server/"
 
-# Verify native modules load under the runtime Node. Catches ABI mismatches
+# Bundle the pinned Node: only the binary and its licence. npm, headers and
+# the rest of the distribution are build tools, not runtime.
+BUNDLED_NODE="$APP_BUNDLE/Contents/Resources/node/bin/node"
+mkdir -p "$(dirname "$BUNDLED_NODE")"
+cp "$RUNTIME_NODE" "$BUNDLED_NODE"
+cp "$(dirname "$RUNTIME_NODE_DIR")/LICENSE" "$APP_BUNDLE/Contents/Resources/node/LICENSE"
+echo "  Bundled Node $("$BUNDLED_NODE" --version)"
+
+# Verify native modules load under the bundled Node. Catches ABI mismatches
 # (NODE_MODULE_VERSION) before the user hits a silent crash on session.start.
-if ! "$RUNTIME_NODE" -e "require('$APP_BUNDLE/Contents/Resources/server/node_modules/better-sqlite3')" 2>/dev/null; then
-  echo "ERROR: better-sqlite3 native module does not load under $RUNTIME_NODE."
-  echo "       The build Node and runtime Node likely have different ABIs."
+if ! "$BUNDLED_NODE" -e "require('$APP_BUNDLE/Contents/Resources/server/node_modules/better-sqlite3')" 2>/dev/null; then
+  echo "ERROR: better-sqlite3 native module does not load under the bundled Node."
   echo "       Try:  (cd '$APP_BUNDLE/Contents/Resources/server' && '$RUNTIME_NODE_DIR/npm' rebuild better-sqlite3)"
   exit 1
 fi
-echo "  Verified: better-sqlite3 loads under runtime Node"
+echo "  Verified: better-sqlite3 loads under the bundled Node"
 
 # Copy app icons (icns for Finder, png for in-app usage)
 ICON_ICNS="$PROJECT_DIR/app/MeetingCopilot/Resources/AppIcon.icns"

@@ -14,12 +14,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVER_DIR="$(dirname "$SCRIPT_DIR")/server"
 
-# The same Node the app's server runs under (ProcessSupervisor / build-app.sh),
-# so better-sqlite3 — used for the invite lookup — loads (gotcha #14).
-NODE=""
-for candidate in /opt/homebrew/bin/node /usr/local/bin/node; do
-  if [ -x "$candidate" ]; then NODE="$candidate"; break; fi
-done
+# The pinned Node the checkout's better-sqlite3 is built for (fetch-node.sh),
+# so the invite lookup loads it (gotcha #14). Offline before the first fetch,
+# PATH's node still stages; stage-cli only loses the invite lookup.
+NODE="$("$SCRIPT_DIR/fetch-node.sh" 2>/dev/null || true)"
 NODE="${NODE:-node}"
 
 # A relative input path is relative to where the caller ran this, not to server/.
